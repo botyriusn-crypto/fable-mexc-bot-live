@@ -1,0 +1,22 @@
+import type { ExchangeAdapter } from "./types"
+import { bybitAdapter } from "./bybit"
+import { gateAdapter } from "./gate"
+
+const mexcAdapter: ExchangeAdapter = {
+  name: "mexc",
+  fetchKlines: async (s, i, l) => { const { fetchKlines } = await import("@/lib/mexc/public"); return fetchKlines(s, i, l) },
+  fetchTicker: async (s) => { const { fetchTicker } = await import("@/lib/mexc/public"); return fetchTicker(s) },
+  fetchMarkets: async () => { const { fetchContractMarkets } = await import("@/lib/mexc/public"); return fetchContractMarkets() },
+  placeOrder: async (p) => { const { placeMarketOrder } = await import("@/lib/mexc/private"); return placeMarketOrder(p) },
+  getAccountAssets: async () => { const { getAccountAssets } = await import("@/lib/mexc/private"); return getAccountAssets() },
+}
+
+const adapters: Record<string, ExchangeAdapter> = { mexc: mexcAdapter, bybit: bybitAdapter, gate: gateAdapter }
+
+export function getExchange(name?: string): ExchangeAdapter {
+  const exchange = name || process.env.EXCHANGE || "mexc"
+  return adapters[exchange] || adapters.mexc
+}
+
+export function availableExchanges(): string[] { return Object.keys(adapters) }
+export type { ExchangeAdapter }

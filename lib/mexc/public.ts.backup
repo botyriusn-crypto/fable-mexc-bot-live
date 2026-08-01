@@ -1,0 +1,157 @@
+// MEXC Futures public market data client (no API keys required)
+
+const BASE_URL = "https://contract.mexc.com/api/v1/contract"
+
+export interface Candle {
+  time: number // unix seconds
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
+export interface Ticker {
+  symbol: string
+  lastPrice: number
+  fairPrice: number
+  fundingRate: number
+  riseFallRate: number
+  volume24: number
+}
+
+interface KlineResponse {
+  success: boolean
+  data: {
+    time: number[]
+    open: number[]
+    high: number[]
+    low: number[]
+    close: number[]
+    vol: number[]
+  }
+}
+
+export interface ContractMarket {
+  symbol: string
+  displayName: string
+  priceScale: number
+  amountScale: number
+  maxLeverage: number
+}
+
+interface ContractDetailResponse {
+  success: boolean
+  data: Array<{
+    symbol: string
+    displayName?: string
+    priceScale?: number
+    amountScale?: number
+    maxLeverage?: number
+    state?: number
+  }>
+}
+
+interface TickerResponse {
+  success: boolean
+  data: {
+    symbol: string
+    lastPrice: number
+    fairPrice: number
+    fundingRate: number
+    riseFallRate: number
+    volume24: number
+  }
+}
+
+export async function fetchKlines(
+  console.log(`[MEXC API] Fetching symbol: "${symbol}" with interval: "${interval}"`);
+  console.log(`[MEXC DEBUG] Fetching klines for symbol: "${symbol}", interval: "${interval}"`);
+  console.log(`[MEXC DEBUG] Fetching klines for symbol: "${symbol}", interval: "${interval}"`);
+  symbol: string,
+  interval: string,
+  limit = 200,
+): Promise<Candle[]> {
+  const end = Math.floor(Date.now() / 1000)
+  const intervalSeconds = intervalToSeconds(interval)
+  const start = end - intervalSeconds * limit
+
+  const res = await fetch(
+  console.log(`[MEXC DEBUG] URL: ${url}`);
+    `${BASE_URL}/kline/${symbol}?interval=${interval}&start=${start}&end=${end}`,
+    { cache: "no-store" },
+  )
+  if (!res.ok) {
+    throw new Error(`MEXC kline fetch failed: ${res.status} ${res.statusText}`)
+  }
+  const json = (await res.json()) as KlineResponse
+  if (!json.success || !json.data) {
+    throw new Error("MEXC kline response unsuccessful")
+  }
+
+  const { time, open, high, low, close, vol } = json.data
+  const candles: Candle[] = []
+  for (let i = 0; i < time.length; i++) {
+    candles.push({
+      time: time[i],
+      open: open[i],
+      high: high[i],
+      low: low[i],
+      close: close[i],
+      volume: vol[i],
+    })
+  }
+  return candles
+}
+
+export async function fetchTicker(symbol: string): Promise<Ticker> {
+  const res = await fetch(`${BASE_URL}/ticker?symbol=${symbol}`, {
+    cache: "no-store",
+  })
+  if (!res.ok) {
+    throw new Error(`MEXC ticker fetch failed: ${res.status} ${res.statusText}`)
+  }
+  const json = (await res.json()) as TickerResponse
+  if (!json.success || !json.data) {
+    throw new Error("MEXC ticker response unsuccessful")
+  }
+  return {
+    symbol: json.data.symbol,
+    lastPrice: json.data.lastPrice,
+    fairPrice: json.data.fairPrice,
+    fundingRate: json.data.fundingRate,
+    riseFallRate: json.data.riseFallRate,
+    volume24: json.data.volume24,
+  }
+}
+
+export async function fetchContractMarkets(): Promise<ContractMarket[]> {
+  const res = await fetch(`${BASE_URL}/detail`, { next: { revalidate: 300 } })
+  if (!res.ok) throw new Error(`MEXC contract detail fetch failed: ${res.status}`)
+  const json = (await res.json()) as ContractDetailResponse
+  if (!json.success || !Array.isArray(json.data)) throw new Error("MEXC contract detail response unsuccessful")
+  return json.data
+    .filter((market) => market.state == null || market.state === 0)
+    .map((market) => ({
+      symbol: market.symbol,
+      displayName: market.displayName ?? market.symbol.replace("_", "/"),
+      priceScale: market.priceScale ?? 4,
+      amountScale: market.amountScale ?? 0,
+      maxLeverage: market.maxLeverage ?? 20,
+    }))
+    .sort((a, b) => a.symbol.localeCompare(b.symbol))
+}
+
+export function intervalToSeconds(interval: string): number {
+  const map: Record<string, number> = {
+    Min1: 60,
+    Min5: 300,
+    Min15: 900,
+    Min30: 1800,
+    Min60: 3600,
+    Hour4: 14400,
+    Hour8: 28800,
+    Day1: 86400,
+  }
+  return map[interval] ?? 300
+}

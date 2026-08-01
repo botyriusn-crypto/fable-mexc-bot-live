@@ -1,0 +1,5 @@
+allowBuilds:
+  bufferutil: true
+  ccxt: true
+  msw: true
+  sharp: true

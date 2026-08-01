@@ -1,0 +1,11 @@
+async function log(level: "info" | "trade" | "error", message: string, details?: unknown) {
+  try {
+    await db.insert(botLogs).values({
+      level,
+      message,
+      details: details || null,
+    })
+  } catch (error) {
+    console.error("Failed to insert log:", error)
+  }
+}

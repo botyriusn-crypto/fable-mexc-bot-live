@@ -1,0 +1,11 @@
+node_modules/
+.next/
+.env
+.env.local
+.env*.local
+*.bak
+*.bak2
+*.bak3
+*.bak4
+*.bak_maker
+mtest.mjs

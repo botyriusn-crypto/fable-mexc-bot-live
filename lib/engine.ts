@@ -1,0 +1,530 @@
+// Tick orchestration: data → features → ML-gated signal → exit management →
+// paper/live execution → model update → persistence.
+
+import { db } from "./db"
+import {
+  botConfig,
+  positions,
+  trades,
+  equitySnapshots,
+  botLogs,
+  gridOrders,
+  classifierDecisions,
+  type BotConfig,
+  type Position,
+} from "./db/schema"
+import { and, eq, isNull, sql } from "drizzle-orm"
+import { type Candle } from "./mexc/public"
+import { getExchangeClient, type Exchange } from "./exchange"
+import { classifyLorentzian, combineConfirmation } from "./lorentzian"
+import { computeSnapshot, type FeatureVector, type IndicatorSnapshot } from "./indicators"
+import { loadModel, trainOnTrade, gateEntry } from "./ml"
+import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
+import { runGridTick, gridUnrealizedPnl, getGridConfigs } from "./grid"
+import { computeInitialStops, evaluateExit } from "./exits"
+
+const TAKER_FEE = 0.0002 // 0.02%
+
+function lorentzianOptions(cfg: BotConfig) {
+  return {
+    neighbors: cfg.lorentzianNeighbors,
+    lookback: cfg.lorentzianLookback,
+    confidenceThreshold: cfg.lorentzianConfidenceThreshold,
+    useVolatilityFilter: cfg.lorentzianUseVolatilityFilter,
+    useRegimeFilter: cfg.lorentzianUseRegimeFilter,
+    useAdxFilter: cfg.lorentzianUseAdxFilter,
+    regimeThreshold: cfg.lorentzianRegimeThreshold,
+    adxThreshold: cfg.lorentzianAdxThreshold,
+    useKernelFilter: cfg.lorentzianKernelFilter,
+  }
+}
+
+async function resolveClassifierOutcomes(symbol: string, timeframe: string, candles: Candle[]) {
+  const pending = await db.select().from(classifierDecisions).where(and(
+    eq(classifierDecisions.symbol, symbol),
+    eq(classifierDecisions.timeframe, timeframe),
+    isNull(classifierDecisions.resolvedAt),
+  ))
+  const candleIndex = new Map(candles.map((candle, index) => [candle.time, index]))
+  for (const decision of pending) {
+    const index = candleIndex.get(decision.candleTime)
+    if (index == null || index + 4 >= candles.length) continue
+    const future = candles[index + 4].close
+    const outcomeDirection = future > decision.entryPrice ? "long" : future < decision.entryPrice ? "short" : "neutral"
+    const outcomeReturn = (future - decision.entryPrice) / decision.entryPrice
+    await db.update(classifierDecisions).set({
+      outcomeDirection,
+      outcomeReturn,
+      outcomeCorrectLogistic: decision.logisticAllowed && decision.candidateDirection === outcomeDirection,
+      outcomeCorrectLorentzian: decision.lorentzianDirection === outcomeDirection,
+      resolvedAt: new Date(),
+    }).where(eq(classifierDecisions.id, decision.id))
+  }
+}
+
+async function log(level: "info" | "trade" | "error", message: string, details?: unknown) {
+  await db.insert(botLogs).values({
+    level,
+    message,
+    details: details ? (details as Record<string, unknown>) : null,
+  })
+}
+
+export async function getConfig(): Promise<BotConfig> {
+  const rows = await db.select().from(botConfig).where(eq(botConfig.id, 1))
+  if (rows.length === 0) throw new Error("Bot config not found")
+  return rows[0]
+}
+
+export async function getOpenPositions(): Promise<Position[]> {
+  return db.select().from(positions).where(eq(positions.status, "open"))
+}
+
+async function getOpenPosition(symbol?: string, timeframe?: string): Promise<Position | null> {
+  const rows = await getOpenPositions()
+  return rows.find((p) => (!symbol || p.symbol === symbol) && (!timeframe || p.timeframe === timeframe)) ?? null
+}
+
+function unrealizedPnl(position: Position, markPrice: number): number {
+  const dir = position.side === "long" ? 1 : -1
+  return (markPrice - position.entryPrice) * dir * position.quantity
+}
+
+async function openPosition(
+  cfg: BotConfig,
+  direction: "long" | "short",
+  snap: IndicatorSnapshot,
+  confidence: number,
+  features: FeatureVector,
+  strategy: "trend" | "range" | "webhook" = "trend",
+): Promise<void> {
+  const price = snap.price
+  const quantity = (cfg.positionSizeUsdt * cfg.leverage) / price
+
+  // Range strategy: mean-reversion targets — TP at the middle of the range,
+  // tight SL just beyond the range boundary (breakout = premise dead).
+  let stopLoss: number
+  let takeProfit: number
+  let rangeTarget: number | null = null
+  if (strategy === "range") {
+    rangeTarget = snap.bbMiddle
+    takeProfit = snap.bbMiddle
+    stopLoss = direction === "long" ? price - snap.atr * 1.0 : price + snap.atr * 1.0
+  } else {
+    const stops = computeInitialStops(direction, price, snap.atr, cfg)
+    stopLoss = stops.stopLoss
+    takeProfit = stops.takeProfit
+  }
+
+  if (cfg.mode === "live") {
+    try {
+      const exchange = getExchangeClient(cfg.exchange as Exchange)
+      await exchange.placeMarketOrder({
+        symbol: cfg.symbol,
+        side: direction === "long" ? 1 : 3,
+        volume: quantity,
+        leverage: cfg.leverage,
+      })
+    } catch (err) {
+      await log("error", `LIVE order failed: ${err instanceof Error ? err.message : String(err)}`)
+      return
+    }
+  }
+
+  const openFee = cfg.positionSizeUsdt * cfg.leverage * TAKER_FEE
+
+  await db.insert(positions).values({
+    symbol: cfg.symbol,
+    timeframe: cfg.timeframe,
+    side: direction,
+    entryPrice: price,
+    sizeUsdt: cfg.positionSizeUsdt,
+    quantity,
+    leverage: cfg.leverage,
+    stopLoss,
+    takeProfit,
+    highestPrice: price,
+    lowestPrice: price,
+    entryConfidence: confidence,
+    entryFeatures: features as unknown as Record<string, number>,
+    atrAtEntry: snap.atr,
+    strategy,
+    rangeTarget,
+  })
+
+  await db
+    .update(botConfig)
+    .set({ paperBalance: sql`${botConfig.paperBalance} - ${openFee}` })
+    .where(eq(botConfig.id, 1))
+
+  await log(
+    "trade",
+    `Opened ${direction.toUpperCase()} [${strategy}] @ ${price.toFixed(2)} | size ${cfg.positionSizeUsdt} USDT x${cfg.leverage} | SL ${stopLoss.toFixed(2)} TP ${takeProfit.toFixed(2)} | ML confidence ${(confidence * 100).toFixed(1)}%`,
+  )
+}
+
+export async function closePosition(
+  position: Position,
+  exitPrice: number,
+  reason: "tp" | "sl" | "trail" | "signal" | "manual",
+  cfg: BotConfig,
+): Promise<void> {
+  if (cfg.mode === "live") {
+    try {
+      const exchange = getExchangeClient(cfg.exchange as Exchange)
+      await exchange.placeMarketOrder({
+        symbol: position.symbol,
+        side: position.side === "long" ? 4 : 2,
+        volume: position.quantity,
+        leverage: position.leverage,
+      })
+    } catch (err) {
+      await log("error", `LIVE close failed: ${err instanceof Error ? err.message : String(err)}`)
+      return
+    }
+  }
+
+  const grossPnl = unrealizedPnl(position, exitPrice)
+  const closeFee = position.sizeUsdt * position.leverage * TAKER_FEE
+  const netPnl = grossPnl - closeFee
+  const pnlPct = (netPnl / position.sizeUsdt) * 100
+
+  const [trade] = await db
+    .insert(trades)
+    .values({
+      positionId: position.id,
+      symbol: position.symbol,
+      side: position.side,
+      entryPrice: position.entryPrice,
+      exitPrice,
+      sizeUsdt: position.sizeUsdt,
+      leverage: position.leverage,
+      pnl: netPnl,
+      fees: closeFee,
+      exitReason: reason,
+      strategy: position.strategy ?? "trend",
+      entryConfidence: position.entryConfidence,
+      openedAt: position.openedAt,
+    })
+    .returning()
+
+  await db
+    .update(positions)
+    .set({ status: "closed", closedAt: sql`NOW()` })
+    .where(eq(positions.id, position.id))
+
+  await db
+    .update(botConfig)
+    .set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` })
+    .where(eq(botConfig.id, 1))
+
+  await log(
+    "trade",
+    `Closed ${position.side.toUpperCase()} @ ${exitPrice.toFixed(2)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT (${pnlPct.toFixed(2)}%) | reason: ${reason.toUpperCase()}`,
+  )
+
+  // Learning loop: every closed trade trains the model
+  if (position.entryFeatures) {
+    try {
+      const model = await loadModel()
+      await trainOnTrade(
+        model,
+        position.entryFeatures as unknown as FeatureVector,
+        netPnl > 0,
+        pnlPct,
+        cfg.mlLearningRate,
+        trade.id,
+        position.id,
+      )
+      await log("info", `Model updated from trade #${trade.id} (${netPnl > 0 ? "win" : "loss"})`)
+    } catch (err) {
+      await log("error", `Model training failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+}
+
+// Webhook-triggered execution: external signals (e.g. TradingView alerts)
+// bypass the cron wait and the EMA-crossover requirement, but entries still
+// pass through the ML confidence gate so the learning loop stays consistent.
+export async function runWebhookSignal(
+  action: "tick" | "long" | "short" | "close",
+): Promise<{ status: string; detail?: string }> {
+  if (action === "tick") {
+    await log("info", "Webhook: immediate tick triggered")
+    return runTick()
+  }
+
+  const cfg = await getConfig()
+  if (cfg.status !== "running") {
+    return { status: "skipped", detail: "Bot is stopped" }
+  }
+
+  try {
+    const exchange = getExchangeClient(cfg.exchange as Exchange)
+    const [candles, ticker] = await Promise.all([
+      exchange.fetchKlines(cfg.symbol, cfg.timeframe, cfg.lorentzianWebhooks ? Math.max(200, cfg.lorentzianLookback + 40) : 200),
+      exchange.fetchTicker(cfg.symbol),
+    ])
+    if (candles.length < 60) {
+      await log("error", `Webhook: insufficient candle data: ${candles.length}`)
+      return { status: "error", detail: "Insufficient candles" }
+    }
+
+    const snap = computeSnapshot(candles, cfg)
+    snap.price = ticker.lastPrice
+    const openPos = await getOpenPosition(cfg.symbol, cfg.timeframe)
+
+    if (action === "close") {
+      if (!openPos) return { status: "skipped", detail: "No open position" }
+      await closePosition(openPos, snap.price, "signal", cfg)
+      return { status: "ok", detail: "Position closed via webhook" }
+    }
+
+    // action is "long" | "short"
+    if ((action === "long" && !cfg.allowLong) || (action === "short" && !cfg.allowShort)) {
+      return { status: "skipped", detail: `${action} entries disabled in settings` }
+    }
+
+    if (openPos) {
+      if (openPos.side === action) {
+        return { status: "skipped", detail: `Already in a ${action} position` }
+      }
+      // Opposite webhook signal: close current position first
+      await closePosition(openPos, snap.price, "signal", cfg)
+    }
+
+    const model = await loadModel()
+    const features: FeatureVector = {
+      ...snap.features,
+      sideLong: action === "long" ? 1 : -1,
+    }
+    const { allowed: logisticAllowed, confidence } = gateEntry(model, features, cfg.mlConfidenceThreshold)
+    let allowed = logisticAllowed
+    let confirmationReason = `ML confidence ${(confidence * 100).toFixed(1)}%`
+    if (cfg.lorentzianWebhooks) {
+      const lorentzian = classifyLorentzian(candles, lorentzianOptions(cfg))
+      const confirmation = combineConfirmation(cfg.confirmationMode, action, logisticAllowed, lorentzian)
+      allowed = confirmation.allowed
+      confirmationReason = `${confirmation.reason}; ${lorentzian.reason}`
+    }
+
+    if (!allowed) {
+      await log("info", `Webhook ${action.toUpperCase()} signal rejected: ${confirmationReason}`)
+      return { status: "rejected", detail: confirmationReason }
+    }
+
+    await log("info", `Webhook ${action.toUpperCase()} signal accepted: ${confirmationReason}`)
+    await openPosition(cfg, action, snap, confidence, features, "webhook")
+    return { status: "ok", detail: `${action} opened via webhook` }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    await log("error", `Webhook signal failed: ${message}`)
+    return { status: "error", detail: message }
+  }
+}
+
+
+async function syncWithMexc(cfg: BotConfig) {
+  if (cfg.mode !== "live") return
+  
+  try {
+    const exchange = getExchangeClient(cfg.exchange as Exchange)
+    const mexPositions = await exchange.getOpenPositions() as any[]
+    
+    if (Array.isArray(mexPositions)) {
+      // Get all DB pending orders
+      const dbOrders = await db.select().from(gridOrders).where(eq(gridOrders.status, "pending"))
+      
+      // Get MEXC open orders - these are the real ones
+      const mexcSymbols = new Set(mexPositions.map((p: any) => p.symbol))
+      
+      // Cancel any DB orders for symbols that have NO real MEXC positions
+      for (const order of dbOrders) {
+        if (!mexcSymbols.has(order.symbol)) {
+          await db.update(gridOrders)
+            .set({ status: "cancelled" })
+            .where(eq(gridOrders.id, order.id))
+        }
+      }
+      
+      // Log the sync
+      const cancelledCount = dbOrders.filter(o => !mexcSymbols.has(o.symbol)).length
+      if (cancelledCount > 0) {
+        await log("info", `Synced with MEXC: cancelled ${cancelledCount} ghost orders`)
+      }
+    }
+  } catch (err) {
+    // Sync is best-effort, don't block trading
+  }
+}
+
+export async function runTick(): Promise<{ status: string; detail?: string }> {
+  const cfg = await getConfig()
+  if (cfg.status !== "running") return { status: "skipped", detail: "Bot is stopped" }
+  
+  // Sync with MEXC to remove ghost orders
+  await syncWithMexc(cfg)
+
+  try {
+    const [openPositions, activeGrid] = await Promise.all([
+      getOpenPositions(),
+      db.select().from(gridOrders).where(eq(gridOrders.status, "pending")),
+    ])
+    const marketKeys = new Set<string>([`${cfg.symbol}|${cfg.timeframe}`])
+    for (const pos of openPositions) marketKeys.add(`${pos.symbol}|${pos.timeframe}`)
+    for (const order of activeGrid) marketKeys.add(`${order.symbol}|${order.timeframe}`)
+
+    const model = await loadModel()
+    const marks = new Map<string, number>()
+    const tickerCache = new Map<string, any>()
+    const exchange = getExchangeClient(cfg.exchange as Exchange)
+    const gridCfgs = await getGridConfigs()
+    
+    for (const gc of gridCfgs) {
+      try {
+        const [candles, ticker] = await Promise.all([
+          exchange.fetchKlines(gc.symbol, gc.timeframe, 200),
+          tickerCache.get(gc.symbol) || exchange.fetchTicker(gc.symbol).then((t: any) => { tickerCache.set(gc.symbol, t); return t; })
+        ])
+        if (candles.length < 60) { await log("error", `Grid ${gc.symbol}: insufficient candles`); continue }
+        const snap = computeSnapshot(candles, { ...cfg, symbol: gc.symbol, timeframe: gc.timeframe })
+        snap.price = ticker.lastPrice
+        marks.set(gc.symbol, snap.price)
+        await runGridTick(cfg, gc, snap, detectRegime(snap, { ...cfg, symbol: gc.symbol, timeframe: gc.timeframe }), exchange)
+      } catch (err) {
+        await log("error", `Grid ${gc.symbol} tick failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+
+    for (const key of marketKeys) {
+      const [symbol, timeframe] = key.split("|")
+      const marketCfg = { ...cfg, symbol, timeframe }
+      try {
+        const isSelected = symbol === cfg.symbol && timeframe === cfg.timeframe
+        const candleLimit = isSelected ? Math.max(200, cfg.lorentzianLookback + 40) : 200
+        const [candles, ticker] = await Promise.all([
+          exchange.fetchKlines(symbol, timeframe, candleLimit),
+          exchange.fetchTicker(symbol),
+        ])
+        if (candles.length < 60) {
+          await log("error", `${symbol} ${timeframe}: insufficient candle data (${candles.length})`)
+          continue
+        }
+
+        const snap = computeSnapshot(candles, marketCfg)
+        snap.price = ticker.lastPrice
+        marks.set(symbol, snap.price)
+
+        const marketPosition = openPositions.find((p) => p.symbol === symbol && p.timeframe === timeframe)
+        if (marketPosition) {
+          const opposite =
+            marketPosition.strategy === "trend" &&
+            isOppositeSignal(snap, marketPosition.side as "long" | "short")
+          const decision = evaluateExit(marketPosition, snap, marketCfg, opposite)
+          if (decision.action === "close") {
+            await closePosition(marketPosition, snap.price, decision.reason!, marketCfg)
+          } else if (Object.keys(decision.updates).length > 0) {
+            await db.update(positions).set(decision.updates).where(eq(positions.id, marketPosition.id))
+          }
+        }
+
+        if (isSelected) await resolveClassifierOutcomes(symbol, timeframe, candles)
+        if (isSelected && !marketPosition) {
+          const signal = evaluateEntry(snap, marketCfg, model)
+          if (signal.baseTriggered && signal.candidateDirection && signal.features) {
+            const lorentzian = classifyLorentzian(candles, lorentzianOptions(marketCfg))
+            const confirmation = combineConfirmation(
+              marketCfg.confirmationMode,
+              signal.candidateDirection,
+              signal.mlAllowed,
+              lorentzian,
+            )
+            const reason = `${confirmation.reason}; ${lorentzian.reason}`
+            await db.insert(classifierDecisions).values({
+              symbol,
+              timeframe,
+              candleTime: candles[candles.length - 1].time,
+              candidateDirection: signal.candidateDirection,
+              strategy: signal.strategy,
+              regime: signal.regime,
+              entryPrice: snap.price,
+              confirmationMode: marketCfg.confirmationMode,
+              logisticAllowed: signal.mlAllowed,
+              logisticConfidence: signal.confidence,
+              lorentzianDirection: lorentzian.direction,
+              lorentzianVote: lorentzian.vote,
+              lorentzianConfidence: lorentzian.confidence,
+              lorentzianAllowed: lorentzian.allowed,
+              lorentzianFilters: lorentzian.filters,
+              finalAllowed: confirmation.allowed,
+              reason,
+            }).onConflictDoNothing()
+            await log("info", `${signal.candidateDirection.toUpperCase()} [${signal.strategy}] candidate: ${reason}`, {
+              logisticConfidence: signal.confidence,
+              lorentzianConfidence: lorentzian.confidence,
+              lorentzianVote: lorentzian.vote,
+              confirmationMode: marketCfg.confirmationMode,
+            })
+            if (confirmation.allowed) {
+              await openPosition(marketCfg, signal.candidateDirection, snap, signal.confidence, signal.features, signal.strategy)
+            }
+          }
+        }
+
+      // Grid already handled by multi-pair loop above
+      } catch (err) {
+        await log("error", `${symbol} ${timeframe} tick failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+
+    const cfgAfter = await getConfig()
+    const positionsAfter = await getOpenPositions()
+    let totalUnrealized = 0
+    for (const position of positionsAfter) {
+      const mark = marks.get(position.symbol)
+      if (mark != null) totalUnrealized += unrealizedPnl(position, mark)
+    }
+    for (const key of marketKeys) {
+      const [symbol, timeframe] = key.split("|")
+      const mark = marks.get(symbol)
+      if (mark != null) totalUnrealized += await gridUnrealizedPnl(mark, symbol, timeframe)
+    }
+
+    // ── AI Advisor: run analysis on schedule ──
+    if (cfg.aiAdvisorEnabled && cfg.aiAnalysisSchedule !== "manual") {
+      const now = new Date()
+      const lastAnalysis = cfg.aiLastAnalysis ? new Date(cfg.aiLastAnalysis) : null
+      let shouldRun = !lastAnalysis
+      if (!shouldRun && cfg.aiAnalysisSchedule === "daily") shouldRun = now.getTime() - lastAnalysis!.getTime() > 86400000
+      if (!shouldRun && cfg.aiAnalysisSchedule === "weekly") shouldRun = now.getTime() - lastAnalysis!.getTime() > 604800000
+      if (shouldRun) {
+        try {
+          const result = await analyzeTradesForMarket(cfg.symbol, cfg.timeframe)
+          if (result?.recommendations.length) {
+            await log("info", `AI Advisor: ${result.recommendations.length} recommendations`)
+            const highConfidence = result.recommendations.filter((r: any) => 
+              typeof r.suggested === 'number' && typeof r.current === 'number' && 
+              Math.abs(r.suggested - r.current) / Math.abs(r.current) < 0.5
+            )
+            if (highConfidence.length > 0) {
+              await applyRecommendations(0, highConfidence)
+              await log("info", `AI Advisor: auto-applied ${highConfidence.length} recommendations`)
+            }
+          }
+          await db.update(botConfig).set({ aiLastAnalysis: now as any }).where(eq(botConfig.id, 1))
+        } catch (err) {}
+      }
+    }
+
+    await db.insert(equitySnapshots).values({
+      balance: cfgAfter.paperBalance,
+      equity: cfgAfter.paperBalance + totalUnrealized,
+      unrealizedPnl: totalUnrealized,
+    })
+    return { status: "ok" }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    await log("error", `Tick failed: ${message}`)
+    return { status: "error", detail: message }
+  }
+}

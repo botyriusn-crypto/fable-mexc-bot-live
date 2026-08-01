@@ -1,0 +1,18 @@
+Deepseek modified fable dash board
+1. to start server:
+pkill -f "next" 2>/dev/null
+fuser -k 3000/tcp 2>/dev/null
+sleep 1
+export PATH=~/.local/npm-global/bin:$PATH
+pnpm start &
+sleep 3
+echo "Server restarted with webhook enabled"
+2. then start dash in browser:
+http://localhost:3000/
+
+nb@fedora:~/Downloads/Fable_Mexc_online_trading_botyrius_backup$ # Check if CRON_SECRET is blocking ticks
+grep CRON_SECRET .env.local
+sed: /var/lib/flatpak/app/dev.zed.Zed/x86_64/stable/989928e71dbc6f5620c25b59ed83e5d1ac62943cacc74754f5f0a12193d79390/files/lib/libselinux.so.1: no version information available (required by sed)
+CRON_SECRET="Iwasbornin!
+sed: /var/lib/flatpak/app/dev.zed.Zed/x86_64/stable/989928e71dbc6f5620c25b59ed83e5d1ac62943cacc74754f5f0a12193d79390/files/lib/libselinux.so.1: no version information available (required by sed)
+nb@fedora:~/Downloads/Fable_Mexc_online_trading_botyrius_backup$

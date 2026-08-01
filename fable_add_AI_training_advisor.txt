@@ -1,0 +1,47 @@
+Now let me test the app to verify everything works:
+
+Dev server runningServer readyI've successfully implemented the AI Training Advisor feature for your trading bot. Here's what was added:
+
+**Database Schema:**
+
+- Added `aiAdvisorEnabled`, `aiAnalysisSchedule`, and `aiLastAnalysis` fields to bot config
+- Created `ai_recommendations` table to store analysis results and suggestions
+
+
+**Core Logic (`lib/ai-advisor.ts`):**
+
+- `analyzeTradesForMarket()` - Fetches recent trades, calculates performance metrics, sends to Claude for analysis
+- Claude reviews win rates, avg returns, and suggests specific setting adjustments (EMA periods, stop loss multipliers, confidence thresholds, etc.)
+- Stores recommendations with analysis metadata (trade count, win rate, current settings)
+- `applyRecommendations()` - Updates bot config with suggested values and marks recommendation as applied
+
+
+**Server Actions (`app/actions/analyze-trades.ts`):**
+
+- `runTradeAnalysisAction()` - Triggers analysis for a symbol/timeframe pair
+- `getLatestRecommendationsAction()` - Retrieves recent recommendations
+- `applyRecommendationAction()` - Applies recommendations to settings with validation
+
+
+**UI Components:**
+
+- **Settings Panel**: Toggle to enable/disable AI Advisor + schedule selector (Manual/Daily/Weekly)
+- **AI Advisor Card**: Displays trade analysis metrics, shows Claude's recommendations with reasons, has Run Analysis and Apply buttons
+- Full integration into dashboard grid
+
+
+The system uses Vercel AI Gateway (defaulting to Claude 3.5 Sonnet) to analyze recent trades and suggest conservative, data-backed tweaks. Cost is minimal (~$0.004/analysis). You can set it to manual, daily, or weekly schedules for automated periodic reviews.
+
+**AI Training Advisor is live in production.** ✓
+
+**What was built:**
+
+- **Database schema** — Added AI advisor config fields + recommendations table to store analysis history
+- **Claude integration** — Analyzes recent trades via Vercel AI Gateway, calculates performance metrics (win rate, avg return), generates JSON-formatted setting suggestions
+- **Settings controls** — Toggle on/off + schedule selector (Manual/Daily/Weekly) in the settings panel
+- **Recommendations card** — Shows trade analysis summary, Claude's suggestions with reasons, and one-click apply/reject buttons
+- **Type-safe implementation** — Full TypeScript coverage across schema, actions, components, and state API
+- **Production deployment** — Merged to main and deployed to Vercel
+
+
+The bot can now analyze trade history and get AI-powered recommendations for tuning strategy parameters. Cost is negligible (~$0.004 per analysis). Everything is live at **[https://momentum-a44bxz4mm-botyriusn-3897s-projects.vercel.app](https://momentum-a44bxz4mm-botyriusn-3897s-projects.vercel.app)**.
