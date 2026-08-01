@@ -11,8 +11,44 @@ import { detectVolatilitySurge, adaptiveSpacing, type VolatilityState } from "./
 import type { Regime } from "./strategy"
 import { loadModel, trainOnTrade } from "./ml"
 import { getExchangeClient, type ExchangeClient } from "./exchange"
+import { placePostOnlyOrder, fetchOrderStatus, cancelOrders } from "./mexc/private"
 
 const TAKER_FEE = 0.0002
+
+// MEXC's order/create returns the id nested (e.g. { data: { orderId } }) or as a
+// bare value depending on endpoint. Extract a clean string id, never "[object Object]".
+function extractOrderId(res: any): string | null {
+  const d = res?.data ?? res
+  if (d == null) return null
+  if (typeof d === "object") {
+    const id = d.orderId ?? d.order_id ?? d.id
+    return id != null ? String(id) : null
+  }
+  return String(d)
+}
+
+// Drizzle wraps the real DB reason in err.cause; surface it so failures are legible.
+function dbErr(err: unknown): string {
+  if (err instanceof Error) {
+    const cause = (err as any).cause
+    const detail = cause?.detail ?? cause?.message ?? cause?.code
+    return detail ? `${err.message} | cause: ${detail}` : err.message
+  }
+  return String(err)
+}
+
+// --- Maker mode (post-only resting orders) ---
+// OFF by default. Enable with GRID_MAKER=1. Scope to specific symbols with
+// GRID_MAKER_SYMBOLS="BANK_USDT,ADA_USDT" (empty list = all symbols when on).
+// Only affects LIVE mode; paper mode always uses the virtual-fill path.
+const MAKER_ENABLED = process.env.GRID_MAKER === "1"
+// Scope which symbols use maker mode. We intentionally do NOT read a symbols
+// env var here (the deploy pipeline mangles that name). Default scope is the
+// single test symbol below; edit this array to add more once proven.
+const MAKER_SYMBOLS: string[] = ["BANK_USDT"]
+function isMakerSymbol(symbol: string): boolean {
+  return MAKER_ENABLED && (MAKER_SYMBOLS.length === 0 || MAKER_SYMBOLS.includes(symbol))
+}
 
 function roundForMexc(symbol: string, price: number, quantity: number): { price: number, quantity: number } {
   const specs: Record<string, {ps: number, qs: number}> = {
@@ -120,8 +156,10 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
 
   const orders = []
   // After a big drop, place buys at current price with stairs going UP
-    // This catches the recovery instead of waiting for more downside
-    const recentDrop = startAtPrice || (volatility && volatility.atrPercentile > 50)  // ATR in top 20% = recent crash
+    // This catches the recovery instead of waiting for more downside.
+    // Maker mode forces the normal downward ladder: post-only buys must rest
+    // BELOW market or MEXC rejects them, so never stair up for maker symbols.
+    const recentDrop = !isMakerSymbol(gc.symbol) && (startAtPrice || (volatility && volatility.atrPercentile > 50))
     const startPrice = recentDrop ? center : center - spacing
     const direction = recentDrop ? 1 : -1  // Up if recovering, down if normal
     
@@ -143,7 +181,29 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   if (volatility && volatility.surge) {
     await log("info", `Grid ${gc.symbol}: ${volatility.reason}`)
   }
-  if (orders.length > 0) await db.insert(gridOrders).values(orders)
+
+  // Maker (live): place each buy as a real resting post-only order and store
+  // its MEXC order id. Market/paper path inserts virtual rows as before.
+  if (cfg.mode === "live" && isMakerSymbol(gc.symbol)) {
+    for (const ord of orders) {
+      try {
+        const res: any = await placePostOnlyOrder({
+          symbol: ord.symbol,
+          side: 1,
+          price: ord.price,
+          volume: ord.quantity,
+          leverage: ord.leverage,
+        })
+              const oid = extractOrderId(res)
+              await db.insert(gridOrders).values({ ...ord, mexcOrderId: oid, exchangeStatus: "new" })
+              await log("info", `Grid ${gc.symbol} (maker): resting buy @ ${ord.price.toFixed(6)} id=${oid}`)
+            } catch (err) {
+              await log("error", `Grid ${gc.symbol} (maker): buy rejected @ ${ord.price.toFixed(6)}: ${dbErr(err)}`)
+      }
+    }
+  } else if (orders.length > 0) {
+    await db.insert(gridOrders).values(orders)
+  }
 
   await db
     .update(botConfig)
@@ -172,6 +232,18 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
 
 export async function teardownGrid(cfg: BotConfig, currentPrice: number | null): Promise<void> {
   const active = await getActiveOrders(cfg.symbol, cfg.timeframe)
+
+  // Maker: cancel real resting orders on the exchange first so we never leave
+  // orphaned post-only orders behind after a manual stop.
+  const makerIds = active.filter((o) => o.mexcOrderId && isMakerSymbol(o.symbol)).map((o) => o.mexcOrderId!) as string[]
+  if (makerIds.length > 0) {
+    try {
+      await cancelOrders(makerIds)
+      await log("info", `Grid teardown: cancelled ${makerIds.length} resting maker orders on exchange`)
+    } catch (err) {
+      await log("error", `Grid teardown: failed cancelling maker orders: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
 
   // Liquidate held inventory (filled buys awaiting sells) at market
   const holding = active.filter((o) => o.side === "sell")
@@ -276,7 +348,165 @@ async function settleGridSell(
   )
 }
 
+// Maker settle: the resting post-only sell already executed on the exchange,
+// so we do NOT place any order here — we only record the trade and books.
+async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConfig): Promise<void> {
+  const buyPrice = order.buyPrice ?? order.price
+  const sizeUsdt = (buyPrice * order.quantity) / order.leverage
+  const grossPnl = (exitPrice - buyPrice) * order.quantity
+  const buyFee = buyPrice * order.quantity * TAKER_FEE
+  const sellFee = exitPrice * order.quantity * TAKER_FEE
+  const fees = buyFee + sellFee
+  const netPnl = grossPnl - fees
+
+  const [trade] = await db
+    .insert(trades)
+    .values({
+      symbol: order.symbol,
+      side: "long",
+      entryPrice: buyPrice,
+      exitPrice,
+      sizeUsdt,
+      leverage: order.leverage,
+      pnl: netPnl,
+      fees,
+      exitReason: "tp",
+      strategy: "grid",
+    })
+    .returning({ id: trades.id })
+
+  await db
+    .update(gridOrders)
+    .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
+    .where(eq(gridOrders.id, order.id))
+
+  await db
+    .update(botConfig)
+    .set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - sellFee}` })
+    .where(eq(botConfig.id, 1))
+
+  if (trade && order.entryFeatures) {
+    try {
+      const model = await loadModel()
+      await trainOnTrade(
+        model,
+        order.entryFeatures as unknown as FeatureVector,
+        netPnl > 0,
+        sizeUsdt > 0 ? (netPnl / sizeUsdt) * 100 : 0,
+        cfg.mlLearningRate,
+        trade.id,
+        null,
+      )
+    } catch (err) {
+      await log("error", `Grid ML update failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  await log(
+    "trade",
+    `Grid ${order.symbol} (maker) sell filled @ ${exitPrice.toFixed(6)} (bought ${buyPrice.toFixed(6)}) | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`,
+  )
+}
+
+// Maker tick: fills are detected from REAL MEXC order status, not price
+// crossing. v1 intentionally omits auto-pause and auto-recenter — watch it.
+async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): Promise<void> {
+  const active = await getActiveOrders(gc.symbol, gc.timeframe)
+  const volatility = detectVolatilitySurge(gc.symbol, snap)
+
+  if (active.length === 0) {
+    if (!gc.enabled) return
+    await log("info", `Grid ${gc.symbol} (maker): setting up fresh resting ladder`)
+    await setupGrid(cfg, gc, snap, volatility, undefined, true)
+    return
+  }
+
+  const spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
+
+  // Poll resting BUY orders for real fills
+  const buys = active.filter((o) => o.side === "buy" && o.mexcOrderId)
+  for (const o of buys) {
+    const st: any = await fetchOrderStatus(o.mexcOrderId as string)
+    if (!st) continue
+    const state = Number(st.state)
+    if (state === 3) {
+      const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
+      await db
+        .update(gridOrders)
+        .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
+        .where(eq(gridOrders.id, o.id))
+      const buyFee = fillPrice * o.quantity * TAKER_FEE
+      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} - ${buyFee}` }).where(eq(botConfig.id, 1))
+
+      const sellPrice = fillPrice + spacing
+      try {
+        const res: any = await placePostOnlyOrder({
+          symbol: o.symbol,
+          side: 4,
+          price: sellPrice,
+          volume: o.quantity,
+          leverage: o.leverage,
+        })
+              const sid = extractOrderId(res)
+        await db.insert(gridOrders).values({
+          symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
+          spacing, levelIndex: o.levelIndex, side: "sell",
+          price: sellPrice, quantity: o.quantity, buyPrice: fillPrice,
+          entryFeatures: { ...snap.features, sideLong: 1 },
+          mexcOrderId: sid, exchangeStatus: "new", status: "pending",
+        })
+        await log("trade", `Grid ${o.symbol} (maker) buy filled @ ${fillPrice.toFixed(6)} | resting sell @ ${sellPrice.toFixed(6)}`)
+      } catch (err) {
+              await log("error", `Grid ${o.symbol} (maker): sell placement failed @ ${sellPrice.toFixed(6)}: ${dbErr(err)}`)
+      }
+    } else if (state === 4 || state === 5) {
+      await db.update(gridOrders).set({ status: "cancelled", exchangeStatus: "cancelled" }).where(eq(gridOrders.id, o.id))
+    }
+  }
+
+  // Poll resting SELL orders for real fills
+  const sells = active.filter((o) => o.side === "sell" && o.mexcOrderId)
+  for (const o of sells) {
+    const st: any = await fetchOrderStatus(o.mexcOrderId as string)
+    if (!st) continue
+    const state = Number(st.state)
+    if (state === 3) {
+      const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
+      await settleMakerSell(o, exitPrice, cfg)
+      // Re-arm a resting maker buy back at the original level
+      if (o.buyPrice != null) {
+        try {
+          const res: any = await placePostOnlyOrder({
+            symbol: o.symbol,
+            side: 1,
+            price: o.buyPrice,
+            volume: o.quantity,
+            leverage: o.leverage,
+          })
+              const bid = extractOrderId(res)
+          await db.insert(gridOrders).values({
+            symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
+            spacing: o.spacing, levelIndex: o.levelIndex, side: "buy",
+            price: o.buyPrice, quantity: o.quantity,
+            mexcOrderId: bid, exchangeStatus: "new", status: "pending",
+          })
+        } catch (err) {
+              await log("error", `Grid ${o.symbol} (maker): re-arm buy failed @ ${o.buyPrice.toFixed(6)}: ${dbErr(err)}`)
+        }
+      }
+    } else if (state === 4 || state === 5) {
+      await db.update(gridOrders).set({ status: "cancelled", exchangeStatus: "cancelled" }).where(eq(gridOrders.id, o.id))
+    }
+  }
+}
+
 export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime, exchange?: ExchangeClient): Promise<void> {
+  // Maker mode (live + enabled symbol): use the real-order polling path and
+  // skip the entire virtual-fill engine below.
+  if (cfg.mode === "live" && isMakerSymbol(gc.symbol)) {
+    return runGridTickMaker(cfg, gc, snap, regime)
+  }
+
   const active = await getActiveOrders(gc.symbol, gc.timeframe)
 
   // Detect volatility surge for adaptive spacing
