@@ -32,7 +32,7 @@ export const dynamic = "force-dynamic"
 
 export async function GET() {
   try {
-    const [cfgRows, openPosRows, recentTrades, equity, logs, modelRows, activeGridOrders, decisions, gridConfigRows] = await Promise.all([
+    const [cfgRows, openPosRows, recentTrades, equity, logs, modelRows, activeGridOrders, decisions, gridConfigRows, lifetimeTradesRaw] = await Promise.all([
       db.select().from(botConfig).where(eq(botConfig.id, 1)),
       db.select().from(positions).where(eq(positions.status, "open")),
       db.select().from(trades).orderBy(desc(trades.closedAt)).limit(50),
@@ -42,7 +42,18 @@ export async function GET() {
       db.select().from(gridOrders).where(eq(gridOrders.status, "pending")).orderBy(desc(gridOrders.price)),
       db.select().from(classifierDecisions).orderBy(desc(classifierDecisions.createdAt)).limit(100),
       db.select().from(gridConfigs).orderBy(gridConfigs.symbol),
+      db.select({ pnl: trades.pnl }).from(trades),
     ])
+
+    // True all-time stats, computed over every trade ever (not the 50-row
+    // recent list above, which exists only for the trades table display).
+    // Note: the trades table has no live/paper flag, so this is one combined
+    // total across everything ever recorded, not split by mode.
+    const lifetimeStats = {
+      totalTrades: lifetimeTradesRaw.length,
+      totalPnl: lifetimeTradesRaw.reduce((s, t) => s + (t.pnl || 0), 0),
+      winRate: lifetimeTradesRaw.length > 0 ? lifetimeTradesRaw.filter((t) => (t.pnl || 0) > 0).length / lifetimeTradesRaw.length : 0,
+    }
 
     const cfg = cfgRows[0]
     if (!cfg) return NextResponse.json({ error: "Config not found" }, { status: 500 })
@@ -153,7 +164,7 @@ export async function GET() {
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,
       markPrice, unrealizedPnl: totalGridUnrealized,
       equity: cfg.paperBalance + totalGridUnrealized,
-      trades: recentTrades, winRate, equityCurve: equity.reverse(), logs,
+      trades: recentTrades, winRate, lifetimeStats, equityCurve: equity.reverse(), logs,
       model: modelRows[0] ?? null, classifierAnalytics, ticker, chart, liveAccount, regime, adxValue,
       grid: { orders: selectedGridOrders, allOrders: activeGridOrders, holdingCount: gridHolding.length, unrealizedPnl: gridUnrealized, realizedPnl: gridRealized },
       gridConfigs: gridConfigsState,

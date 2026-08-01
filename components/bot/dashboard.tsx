@@ -102,12 +102,10 @@ export function Dashboard() {
         const equity = live ? live.equity : state.equity
         const balance = live ? live.availableBalance : state.config.paperBalance
         const upnl = live ? live.unrealized : state.unrealizedPnl
-        const allTrades = state.trades || []
-  const paperTrades = allTrades.filter((t: any) => !t.live)
-  const liveTrades = allTrades.filter((t: any) => t.live)
-  const totalPnl = isLive 
-    ? liveTrades.reduce((s: number, t: any) => s + (t.pnl || 0), 0)
-    : paperTrades.reduce((s: number, t: any) => s + (t.pnl || 0), 0)
+        const lifetime = (state as any).lifetimeStats
+        const totalPnl = lifetime?.totalPnl ?? 0
+        const totalTradesCount = lifetime?.totalTrades ?? 0
+        const historicWinRate = lifetime?.winRate ?? 0
         return (
           <>
             {liveError && <Card className="border-danger/40"><CardContent className="px-4 py-2 text-xs text-danger">Live account balance unavailable: {liveError}. Showing tracked values instead.</CardContent></Card>}
@@ -115,9 +113,9 @@ export function Dashboard() {
               <Stat label={live ? "Equity (live)" : "Equity"} value={`${fmt(equity)} USDT`} />
               <Stat label={live ? "Available (live)" : "Balance"} value={`${fmt(balance)} USDT`} />
               <Stat label="Unrealized PnL" value={`${upnl >= 0 ? "+" : ""}${fmt(upnl)}`} tone={upnl > 0 ? "pos" : upnl < 0 ? "neg" : undefined} />
-              <Stat label={isLive ? "Live P0026L" : "Paper P0026L"} value={`${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)} USDT`} tone={totalPnl > 0 ? "pos" : totalPnl < 0 ? "neg" : undefined} />
-              <Stat label="Win Rate" value={state.trades.length > 0 ? `${(state.winRate * 100).toFixed(0)}%` : "—"} />
-              <Stat label="Trades" value={String(state.trades.length)} />
+              <Stat label="Historic PnL" value={`${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)} USDT`} tone={totalPnl > 0 ? "pos" : totalPnl < 0 ? "neg" : undefined} />
+              <Stat label="Win Rate" value={totalTradesCount > 0 ? `${(historicWinRate * 100).toFixed(0)}%` : "—"} />
+              <Stat label="Trades" value={String(totalTradesCount)} />
             </div>
           </>
         )

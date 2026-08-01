@@ -1,8 +1,8 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import useSWR, { useSWRConfig } from "swr"
-import { ArrowRightLeft, Check, LoaderCircle, Radio } from "lucide-react"
+import { ArrowRightLeft, Check, ChevronsUpDown, LoaderCircle, Radio } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -44,6 +44,26 @@ export function MarketBar({ state }: { state: BotState }) {
   const [leverage, setLeverage] = useState(String(state.config.leverage))
   const [saving, setSaving] = useState(false)
   const [feedback, setFeedback] = useState<string | null>(null)
+  const [comboOpen, setComboOpen] = useState(false)
+  const [query, setQuery] = useState("")
+  const comboRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (comboRef.current && !comboRef.current.contains(event.target as Node)) {
+        setComboOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [])
+
+  const filteredMarkets = useMemo(() => {
+    if (!data?.markets) return []
+    const q = query.trim().toUpperCase()
+    const pool = q ? data.markets.filter((m) => m.symbol.includes(q) || m.displayName.toUpperCase().includes(q)) : data.markets
+    return pool.slice(0, 50)
+  }, [data?.markets, query])
 
   useEffect(() => {
     setSymbol(state.config.symbol)
@@ -108,20 +128,44 @@ export function MarketBar({ state }: { state: BotState }) {
         </div>
 
         <div className="flex flex-col gap-2 lg:flex-row lg:items-end">
-          <label className="flex min-w-44 flex-1 flex-col gap-1 text-xs text-muted-foreground">
+          <div ref={comboRef} className="relative flex min-w-44 flex-1 flex-col gap-1 text-xs text-muted-foreground">
             Contract
-            <Input
-              value={symbol}
-              list="mexc-contracts"
-              onChange={(event) => setSymbol(event.target.value.toUpperCase())}
-              placeholder="BTC_USDT"
-              className="h-9 font-mono text-foreground"
-              autoComplete="off"
-            />
-            <datalist id="mexc-contracts">
-              {data?.markets.map((market) => <option key={market.symbol} value={market.symbol}>{market.displayName}</option>)}
-            </datalist>
-          </label>
+            <div className="relative">
+              <Input
+                value={comboOpen ? query : symbol}
+                onFocus={() => { setQuery(""); setComboOpen(true) }}
+                onChange={(event) => setQuery(event.target.value.toUpperCase())}
+                placeholder="Search coins…"
+                className="h-9 pr-8 font-mono text-foreground"
+                autoComplete="off"
+              />
+              <ChevronsUpDown aria-hidden="true" className="pointer-events-none absolute right-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            </div>
+            {comboOpen && (
+              <div className="absolute top-full z-20 mt-1 max-h-64 w-full min-w-56 overflow-y-auto rounded-lg border border-border bg-card shadow-lg">
+                {filteredMarkets.length === 0 ? (
+                  <div className="px-3 py-2 text-sm text-muted-foreground">No matching contracts</div>
+                ) : (
+                  filteredMarkets.map((market) => (
+                    <button
+                      key={market.symbol}
+                      type="button"
+                      onMouseDown={(event) => {
+                        event.preventDefault()
+                        setSymbol(market.symbol)
+                        setQuery("")
+                        setComboOpen(false)
+                      }}
+                      className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-mono text-foreground hover:bg-accent"
+                    >
+                      <span>{market.displayName}</span>
+                      <span className="text-xs text-muted-foreground">{market.maxLeverage}x max</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
 
           <label className="flex flex-col gap-1 text-xs text-muted-foreground">
             Timeframe
