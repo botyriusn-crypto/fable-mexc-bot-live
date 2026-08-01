@@ -1,19 +1,25 @@
-// Grid trading engine: a ladder of buy levels below price with paired sell
-// targets one spacing above. Profits from oscillation inside a range.
-// Complements the signal strategies — regime detection auto-pauses the grid
-// when the market starts trending (a breakout is the grid's worst enemy).
-
 import { db } from "./db"
 import { botConfig, gridConfigs, gridOrders, trades, botLogs, type BotConfig, type GridOrder } from "./db/schema"
-import { eq, sql, and, inArray, desc } from "drizzle-orm"
+import { eq, sql, and, inArray, desc } from 'drizzle-orm'
 import type { FeatureVector, IndicatorSnapshot } from "./indicators"
 import { detectVolatilitySurge, adaptiveSpacing, type VolatilityState } from "./volatility-guard"
 import type { Regime } from "./strategy"
 import { loadModel, trainOnTrade } from "./ml"
 import { getExchangeClient, type ExchangeClient } from "./exchange"
-import { placePostOnlyOrder, fetchOrderStatus, cancelOrders } from "./mexc/private"
+import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderStatus, cancelOrders } from "./mexc/private"
+import { fetchTicker } from "./mexc/public"
+
+// Grid trading engine: a ladder of buy levels below price with paired sell
+// targets one spacing above. Profits from oscillation inside a range.
+// Complements the signal strategies — regime detection auto-pauses the grid
+// when the market starts trending (a breakout is the grid's worst enemy).
+
 
 const TAKER_FEE = 0.0002
+// Maker mode risk controls: protect held inventory regardless of pause state.
+const MAKER_STOP_LOSS_PCT = 0.04   // close at market if price moves 4% against entry
+const MAKER_MAX_HOLD_MINUTES = 240 // force-close after 4 hours regardless of price
+const MAKER_RECENTER_DRIFT_PCT = 0.15 // rebuild buy ladder if price drifts 15% from all resting buys
 
 // MEXC's order/create returns the id nested (e.g. { data: { orderId } }) or as a
 // bare value depending on endpoint. Extract a clean string id, never "[object Object]".
@@ -410,15 +416,119 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
 
 // Maker tick: fills are detected from REAL MEXC order status, not price
 // crossing. v1 intentionally omits auto-pause and auto-recenter — watch it.
+async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: BotConfig, reason: "stop-loss" | "max-hold"): Promise<void> {
+  if (order.mexcOrderId) {
+    try {
+      await cancelOrders([order.mexcOrderId])
+    } catch (err) {
+      await log("error", `Grid ${order.symbol} (maker): failed cancelling resting sell before ${reason}: ${dbErr(err)}`)
+    }
+  }
+  try {
+    await makerMarketOrder({ symbol: order.symbol, side: 4, volume: order.quantity, leverage: order.leverage })
+  } catch (err) {
+    await log("error", `Grid ${order.symbol} (maker): ${reason} market close FAILED, will retry next tick: ${dbErr(err)}`)
+    return
+  }
+
+  const buyPrice = order.buyPrice ?? order.price
+  const sizeUsdt = (buyPrice * order.quantity) / order.leverage
+  const grossPnl = (exitPrice - buyPrice) * order.quantity
+  const buyFee = buyPrice * order.quantity * TAKER_FEE
+  const sellFee = exitPrice * order.quantity * TAKER_FEE
+  const fees = buyFee + sellFee
+  const netPnl = grossPnl - fees
+
+  const [trade] = await db
+    .insert(trades)
+    .values({
+      symbol: order.symbol, side: "long", entryPrice: buyPrice, exitPrice,
+      sizeUsdt, leverage: order.leverage, pnl: netPnl, fees,
+      exitReason: reason, strategy: "grid",
+    })
+    .returning({ id: trades.id })
+
+  await db.update(gridOrders).set({ status: "filled", exchangeStatus: "cancelled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, order.id))
+  await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - sellFee}` }).where(eq(botConfig.id, 1))
+
+  if (trade && order.entryFeatures) {
+    try {
+      const model = await loadModel()
+      await trainOnTrade(model, order.entryFeatures as unknown as FeatureVector, netPnl > 0, sizeUsdt > 0 ? (netPnl / sizeUsdt) * 100 : 0, cfg.mlLearningRate, trade.id, null)
+    } catch (err) {
+      await log("error", `Grid ML update failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  await log("trade", `Grid ${order.symbol} (maker) ${reason.toUpperCase()} closed @ ${exitPrice.toFixed(6)} (bought ${buyPrice.toFixed(6)}) | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
+}
+
 async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): Promise<void> {
-  const active = await getActiveOrders(gc.symbol, gc.timeframe)
+  let active = await getActiveOrders(gc.symbol, gc.timeframe)
   const volatility = detectVolatilitySurge(gc.symbol, snap)
+  const paused = gc.autoPause && regime === "trend"
+
+  const gridConfigRow = await db.select().from(gridConfigs).where(
+    and(eq(gridConfigs.symbol, gc.symbol), eq(gridConfigs.timeframe, gc.timeframe))
+  ).limit(1)
+
+  if (gridConfigRow.length > 0 && gridConfigRow[0].paused !== paused) {
+    await db.update(gridConfigs).set({ paused }).where(eq(gridConfigs.id, gridConfigRow[0].id))
+    if (paused) {
+      const restingBuys = active.filter((o) => o.side === "buy" && o.mexcOrderId)
+      if (restingBuys.length > 0) {
+        try {
+          await cancelOrders(restingBuys.map((o) => o.mexcOrderId!) as string[])
+          await db.update(gridOrders)
+            .set({ status: "cancelled", exchangeStatus: "cancelled" })
+            .where(inArray(gridOrders.id, restingBuys.map((o) => o.id)))
+          await log("info", `Grid ${gc.symbol} (maker): trend detected — cancelled ${restingBuys.length} resting buy(s) on exchange`)
+        } catch (err) {
+          await log("error", `Grid ${gc.symbol} (maker): trend detected but failed cancelling resting buys: ${dbErr(err)}`)
+        }
+      } else {
+        await log("info", `Grid ${gc.symbol} (maker): trend detected — auto-paused, no resting buys to cancel`)
+      }
+    } else {
+      await log("info", `Grid ${gc.symbol} (maker): ranging conditions restored — resuming buy ladder`)
+    }
+    active = await getActiveOrders(gc.symbol, gc.timeframe)
+  }
 
   if (active.length === 0) {
     if (!gc.enabled) return
+    if (paused) return
     await log("info", `Grid ${gc.symbol} (maker): setting up fresh resting ladder`)
     await setupGrid(cfg, gc, snap, volatility, undefined, true)
     return
+  }
+
+  // Auto-recenter: cancel stale resting buys and rebuild near current price
+  // if the market has moved too far away for them to realistically fill.
+  if (!paused) {
+    const restingBuys = active.filter((o) => o.side === "buy" && o.mexcOrderId)
+    if (restingBuys.length > 0) {
+      let livePrice: number | null = null
+      try {
+        livePrice = (await fetchTicker(gc.symbol)).lastPrice
+      } catch {}
+      if (livePrice != null) {
+        const minDrift = Math.min(...restingBuys.map((o) => Math.abs(livePrice! - o.price) / livePrice!))
+        if (minDrift > MAKER_RECENTER_DRIFT_PCT) {
+          await log("info", `Grid ${gc.symbol} (maker): price drifted ${(minDrift * 100).toFixed(1)}% from resting buys. Recentering at ${livePrice.toFixed(6)}.`)
+          try {
+            await cancelOrders(restingBuys.map((o) => o.mexcOrderId!) as string[])
+            await db.update(gridOrders)
+              .set({ status: "cancelled", exchangeStatus: "cancelled" })
+              .where(inArray(gridOrders.id, restingBuys.map((o) => o.id)))
+            await setupGrid(cfg, gc, snap, volatility, undefined, true)
+          } catch (err) {
+            await log("error", `Grid ${gc.symbol} (maker): recenter failed: ${dbErr(err)}`)
+          }
+          return
+        }
+      }
+    }
   }
 
   const spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
@@ -474,7 +584,7 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
       const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
       await settleMakerSell(o, exitPrice, cfg)
       // Re-arm a resting maker buy back at the original level
-      if (o.buyPrice != null) {
+      if (o.buyPrice != null && !paused) {
         try {
           const res: any = await placePostOnlyOrder({
             symbol: o.symbol,
@@ -496,6 +606,29 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
       }
     } else if (state === 4 || state === 5) {
       await db.update(gridOrders).set({ status: "cancelled", exchangeStatus: "cancelled" }).where(eq(gridOrders.id, o.id))
+    }
+  }
+
+  // Risk control: protect held inventory regardless of pause/regime state.
+  const heldSells = active.filter((o) => o.side === "sell" && o.buyPrice != null && o.status === "pending")
+  if (heldSells.length > 0) {
+    let currentPrice: number | null = null
+    try {
+      currentPrice = (await fetchTicker(gc.symbol)).lastPrice
+    } catch {}
+    if (currentPrice != null) {
+      for (const o of heldSells) {
+        const buyPrice = o.buyPrice as number
+        const adverseMove = (currentPrice - buyPrice) / buyPrice
+        const heldMinutes = o.createdAt ? (Date.now() - new Date(o.createdAt as any).getTime()) / 60000 : 0
+        if (adverseMove <= -MAKER_STOP_LOSS_PCT) {
+          await log("info", `Grid ${o.symbol} (maker): stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% below entry ${buyPrice.toFixed(6)}`)
+          await settleMakerStopLoss(o, currentPrice, cfg, "stop-loss")
+        } else if (heldMinutes >= MAKER_MAX_HOLD_MINUTES) {
+          await log("info", `Grid ${o.symbol} (maker): max-hold triggered — held ${heldMinutes.toFixed(0)}m, closing at market`)
+          await settleMakerStopLoss(o, currentPrice, cfg, "max-hold")
+        }
+      }
     }
   }
 }
