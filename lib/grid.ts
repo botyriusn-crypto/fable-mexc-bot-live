@@ -51,7 +51,7 @@ const MAKER_ENABLED = process.env.GRID_MAKER === "1"
 // Scope which symbols use maker mode. We intentionally do NOT read a symbols
 // env var here (the deploy pipeline mangles that name). Default scope is the
 // single test symbol below; edit this array to add more once proven.
-const MAKER_SYMBOLS: string[] = ["BANK_USDT"]
+const MAKER_SYMBOLS: string[] = ["BANK_USDT", "RIVER_USDT"]
 function isMakerSymbol(symbol: string): boolean {
   return MAKER_ENABLED && (MAKER_SYMBOLS.length === 0 || MAKER_SYMBOLS.includes(symbol))
 }
