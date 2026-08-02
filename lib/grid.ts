@@ -44,16 +44,13 @@ function dbErr(err: unknown): string {
 }
 
 // --- Maker mode (post-only resting orders) ---
-// OFF by default. Enable with GRID_MAKER=1. Scope to specific symbols with
-// GRID_MAKER_SYMBOLS="BANK_USDT,ADA_USDT" (empty list = all symbols when on).
+// Global kill switch: OFF entirely unless GRID_MAKER=1. Per-symbol enablement
+// is now DB-driven via gridConfigs.makerMode, settable from the dashboard —
+// no more code edits/rebuilds needed to bring a new pair into maker mode.
 // Only affects LIVE mode; paper mode always uses the virtual-fill path.
 const MAKER_ENABLED = process.env.GRID_MAKER === "1"
-// Scope which symbols use maker mode. We intentionally do NOT read a symbols
-// env var here (the deploy pipeline mangles that name). Default scope is the
-// single test symbol below; edit this array to add more once proven.
-const MAKER_SYMBOLS: string[] = ["BANK_USDT", "RIVER_USDT"]
-function isMakerSymbol(symbol: string): boolean {
-  return MAKER_ENABLED && (MAKER_SYMBOLS.length === 0 || MAKER_SYMBOLS.includes(symbol))
+function isMakerSymbol(gc: { makerMode?: boolean }): boolean {
+  return MAKER_ENABLED && !!gc.makerMode
 }
 
 function roundForMexc(symbol: string, price: number, quantity: number): { price: number, quantity: number } {
@@ -85,9 +82,17 @@ export interface GridConfig {
   leverage: number
   feeMarginMult: number
   autoPause: boolean
+  makerMode: boolean
 }
+// Returns ALL grid configs, not just enabled ones. Disabling a pair should
+// stop new buy ladders but must not abandon existing held inventory (a
+// pending sell representing a real position) — the tick loop needs to keep
+// seeing disabled-but-still-holding pairs so it can close that inventory out.
+// runGridTick/runGridTickMaker already skip building fresh ladders via their
+// own `if (!gc.enabled) return` checks, so filtering here is unnecessary and
+// was silently orphaning held positions on any pair you disabled.
 export async function getGridConfigs(): Promise<GridConfig[]> {
-  const rows = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
+  const rows = await db.select().from(gridConfigs)
   return rows.map(r => ({
     id: r.id,
     symbol: r.symbol,
@@ -99,10 +104,11 @@ export async function getGridConfigs(): Promise<GridConfig[]> {
     leverage: r.leverage,
     feeMarginMult: r.feeMarginMult,
     autoPause: r.autoPause,
+    makerMode: r.makerMode,
   }))
 }
 
-async function log(level: "info" | "trade" | "error", message: string, details?: unknown) {
+export async function log(level: "info" | "trade" | "error", message: string, details?: unknown) {
   await db.insert(botLogs).values({
     level,
     message,
@@ -165,7 +171,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
     // This catches the recovery instead of waiting for more downside.
     // Maker mode forces the normal downward ladder: post-only buys must rest
     // BELOW market or MEXC rejects them, so never stair up for maker symbols.
-    const recentDrop = !isMakerSymbol(gc.symbol) && (startAtPrice || (volatility && volatility.atrPercentile > 50))
+    const recentDrop = !isMakerSymbol(gc) && (startAtPrice || (volatility && volatility.atrPercentile > 50))
     const startPrice = recentDrop ? center : center - spacing
     const direction = recentDrop ? 1 : -1  // Up if recovering, down if normal
     
@@ -190,7 +196,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
 
   // Maker (live): place each buy as a real resting post-only order and store
   // its MEXC order id. Market/paper path inserts virtual rows as before.
-  if (cfg.mode === "live" && isMakerSymbol(gc.symbol)) {
+  if (cfg.mode === "live" && isMakerSymbol(gc)) {
     for (const ord of orders) {
       try {
         const res: any = await placePostOnlyOrder({
@@ -241,7 +247,7 @@ export async function teardownGrid(cfg: BotConfig, currentPrice: number | null):
 
   // Maker: cancel real resting orders on the exchange first so we never leave
   // orphaned post-only orders behind after a manual stop.
-  const makerIds = active.filter((o) => o.mexcOrderId && isMakerSymbol(o.symbol)).map((o) => o.mexcOrderId!) as string[]
+  const makerIds = active.filter((o) => o.mexcOrderId).map((o) => o.mexcOrderId!) as string[]
   if (makerIds.length > 0) {
     try {
       await cancelOrders(makerIds)
@@ -285,13 +291,17 @@ async function settleGridSell(
   cfg: BotConfig,
   reason: "tp" | "manual",
   exchange?: ExchangeClient
-): Promise<void> {
+): Promise<boolean> {
   if (cfg.mode === "live") {
     try {
       if (exchange) { const r = roundForMexc(order.symbol, order.price, order.quantity); await exchange.placeMarketOrder({ symbol: order.symbol, side: 4, volume: r.quantity, leverage: order.leverage }) }
     } catch (err) {
       await log("error", `LIVE grid sell failed: ${err instanceof Error ? err.message : String(err)}`)
-      return
+      // Real sell failed on the exchange (e.g. position already closed
+      // manually, or a transient API error). The caller must NOT re-arm a
+      // fresh buy in this case — that was silently happening before and
+      // caused the same doomed retry every single tick.
+      return false
     }
   }
 
@@ -353,6 +363,7 @@ async function settleGridSell(
     "trade",
     `Grid sell filled @ ${exitPrice.toFixed(2)} (bought ${buyPrice.toFixed(2)}) | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`,
   )
+  return true
 }
 
 // Maker settle: the resting post-only sell already executed on the exchange,
@@ -639,7 +650,7 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
 export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime, exchange?: ExchangeClient): Promise<void> {
   // Maker mode (live + enabled symbol): use the real-order polling path and
   // skip the entire virtual-fill engine below.
-  if (cfg.mode === "live" && isMakerSymbol(gc.symbol)) {
+  if (cfg.mode === "live" && isMakerSymbol(gc)) {
     return runGridTickMaker(cfg, gc, snap, regime)
   }
 
@@ -738,9 +749,11 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
   // 1) Sell fills: price rose to/above a pending sell level
   const sells = active.filter((o) => o.side === "sell" && price >= o.price)
   for (const o of sells) {
-    await settleGridSell(o, o.price, cfg, "tp", exchange)
-    // Re-arm the buy at its original level
-    if (o.buyPrice != null) {
+    const sold = await settleGridSell(o, o.price, cfg, "tp", exchange)
+    // Re-arm the buy at its original level — only if the sell actually
+    // succeeded. Re-arming after a failed sell (e.g. the position no longer
+    // existed on the exchange) just recreates the same doomed order forever.
+    if (sold && o.buyPrice != null) {
       await db.insert(gridOrders).values({
         symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
         spacing: o.spacing, levelIndex: o.levelIndex, side: "buy",

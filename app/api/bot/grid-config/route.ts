@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { gridConfigs, gridOrders } from "@/lib/db/schema"
-import { eq, and } from "drizzle-orm"
+import { eq, and, inArray } from "drizzle-orm"
+import { cancelOrders } from "@/lib/mexc/private"
+import { log } from "@/lib/grid"
 
 export const dynamic = "force-dynamic"
 
@@ -37,6 +39,7 @@ export async function POST(request: Request) {
       leverage: 3,
       feeMarginMult: 3,
       autoPause: true,
+      makerMode: !!body.makerMode,
     })
     return NextResponse.json({ ok: true })
   } catch (err) {
@@ -52,7 +55,7 @@ export async function PATCH(request: Request) {
       return NextResponse.json({ error: "symbol and timeframe required" }, { status: 400 })
     }
     
-    const allowed = ["levels", "rangeAtrMult", "budgetPct", "leverage", "feeMarginMult", "autoPause", "enabled"]
+    const allowed = ["levels", "rangeAtrMult", "budgetPct", "leverage", "feeMarginMult", "autoPause", "enabled", "makerMode"]
     const filtered: Record<string, unknown> = {}
     for (const key of Object.keys(updates)) {
       if (allowed.includes(key)) filtered[key] = updates[key]
@@ -60,9 +63,28 @@ export async function PATCH(request: Request) {
     
     // Handle cancelBuys action
     if (body.cancelBuys) {
-      await db.update(gridOrders)
-        .set({ status: "cancelled" })
+      const pendingBuys = await db.select().from(gridOrders)
         .where(and(eq(gridOrders.symbol, symbol), eq(gridOrders.timeframe, timeframe), eq(gridOrders.side, "buy"), eq(gridOrders.status, "pending")))
+
+      // Real resting maker orders need to be cancelled ON THE EXCHANGE first,
+      // or disabling just orphans them — they'd keep resting live on MEXC
+      // with nothing in our DB tracking or managing them anymore.
+      const realOrderIds = pendingBuys.filter((o) => o.mexcOrderId).map((o) => o.mexcOrderId!) as string[]
+      if (realOrderIds.length > 0) {
+        try {
+          await cancelOrders(realOrderIds)
+          await log("info", `Grid ${symbol}: disabled — cancelled ${realOrderIds.length} real resting buy(s) on exchange`)
+        } catch (err) {
+          await log("error", `Grid ${symbol}: disable requested but failed cancelling real resting buys on exchange: ${err instanceof Error ? err.message : String(err)}`)
+          return NextResponse.json({ error: "Failed to cancel real resting orders on exchange — grid NOT disabled, orders still live. Try again." }, { status: 500 })
+        }
+      }
+
+      if (pendingBuys.length > 0) {
+        await db.update(gridOrders)
+          .set({ status: "cancelled", exchangeStatus: realOrderIds.length > 0 ? "cancelled" : undefined })
+          .where(inArray(gridOrders.id, pendingBuys.map((o) => o.id)))
+      }
       return NextResponse.json({ ok: true, message: "Buys cancelled, sells kept" })
     }
 
