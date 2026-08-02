@@ -1,11 +1,110 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { useBotState } from "@/lib/use-bot-state"
 import { useSWRConfig } from "swr"
+import useSWR from "swr"
+import { ChevronsUpDown, Plus } from "lucide-react"
+
+interface MarketOption { symbol: string; displayName: string; maxLeverage: number }
+
+const marketsFetcher = async (url: string) => {
+  const response = await fetch(url)
+  if (!response.ok) throw new Error("Could not load exchange markets")
+  return response.json() as Promise<{ markets: MarketOption[] }>
+}
+
+function AddPairControl({ existingSymbols, onAdded }: { existingSymbols: string[]; onAdded: () => void }) {
+  const { data } = useSWR("/api/bot/market", marketsFetcher, { revalidateOnFocus: false })
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState("")
+  const [adding, setAdding] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [])
+
+  const filtered = useMemo(() => {
+    if (!data?.markets) return []
+    const q = query.trim().toUpperCase()
+    const pool = data.markets.filter((m) => !existingSymbols.includes(m.symbol))
+    const matched = q ? pool.filter((m) => m.symbol.includes(q) || m.displayName.toUpperCase().includes(q)) : pool
+    return matched.slice(0, 50)
+  }, [data?.markets, query, existingSymbols])
+
+  const addPair = async (symbol: string) => {
+    setAdding(true)
+    setError(null)
+    try {
+      const res = await fetch("/api/bot/grid-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol, timeframe: "Min15" }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? "Failed to add pair")
+      setOpen(false)
+      setQuery("")
+      onAdded()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to add pair")
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  return (
+    <div ref={ref} className="relative">
+      <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs" onClick={() => setOpen((v) => !v)}>
+        <Plus className="size-3" aria-hidden="true" /> Add pair
+      </Button>
+      {open && (
+        <div className="absolute right-0 top-full z-20 mt-1 w-64 rounded-lg border border-border bg-card shadow-lg">
+          <div className="relative border-b border-border p-2">
+            <Input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value.toUpperCase())}
+              placeholder="Search coins…"
+              className="h-8 pr-7 font-mono text-xs"
+              autoComplete="off"
+            />
+            <ChevronsUpDown aria-hidden="true" className="pointer-events-none absolute right-4 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          </div>
+          <div className="max-h-56 overflow-y-auto">
+            {error && <div className="px-3 py-2 text-xs text-danger">{error}</div>}
+            {filtered.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground">No matching contracts</div>
+            ) : (
+              filtered.map((m) => (
+                <button
+                  key={m.symbol}
+                  type="button"
+                  disabled={adding}
+                  onMouseDown={(e) => { e.preventDefault(); addPair(m.symbol) }}
+                  className="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs font-mono text-foreground hover:bg-accent disabled:opacity-50"
+                >
+                  <span>{m.displayName}</span>
+                  <span className="text-[10px] text-muted-foreground">{m.maxLeverage}x max</span>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 interface GridState {
   symbol: string
@@ -196,6 +295,7 @@ export function MultiGridCard() {
         <div className="flex items-center gap-3 text-xs font-mono">
           <span className={totalRealized >= 0 ? "text-success" : "text-danger"}>Real: {totalRealized >= 0 ? "+" : ""}{fmt(totalRealized, 2)}</span>
           <span className={totalUnrealized >= 0 ? "text-success" : "text-danger"}>Unreal: {totalUnrealized >= 0 ? "+" : ""}{fmt(totalUnrealized, 2)}</span>
+          <AddPairControl existingSymbols={grids.map((g) => g.symbol)} onAdded={handleRefresh} />
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">

@@ -14,6 +14,36 @@ export async function GET() {
   }
 }
 
+export async function POST(request: Request) {
+  try {
+    const body = await request.json()
+    const { symbol, timeframe } = body
+    if (!symbol || !timeframe) {
+      return NextResponse.json({ error: "symbol and timeframe required" }, { status: 400 })
+    }
+    const existing = await db.select().from(gridConfigs)
+      .where(and(eq(gridConfigs.symbol, symbol.toUpperCase()), eq(gridConfigs.timeframe, timeframe)))
+      .limit(1)
+    if (existing.length > 0) {
+      return NextResponse.json({ error: "This pair already exists" }, { status: 409 })
+    }
+    await db.insert(gridConfigs).values({
+      symbol: symbol.toUpperCase(),
+      timeframe,
+      enabled: false,
+      levels: 5,
+      rangeAtrMult: 0.5,
+      budgetPct: 5,
+      leverage: 3,
+      feeMarginMult: 3,
+      autoPause: true,
+    })
+    return NextResponse.json({ ok: true })
+  } catch (err) {
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Unknown" }, { status: 500 })
+  }
+}
+
 export async function PATCH(request: Request) {
   try {
     const body = await request.json()
