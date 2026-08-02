@@ -112,6 +112,7 @@ export const trades = pgTable("trades", {
   entryConfidence: doublePrecision("entry_confidence"),
   openedAt: timestamp("opened_at", { withTimezone: true }),
   closedAt: timestamp("closed_at", { withTimezone: true }).notNull().defaultNow(),
+  live: boolean("live").notNull().default(false),
 })
 
 export const equitySnapshots = pgTable("equity_snapshots", {

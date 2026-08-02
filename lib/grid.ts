@@ -316,6 +316,7 @@ async function settleGridSell(
       fees,
       exitReason: reason,
       strategy: "grid",
+      live: cfg.mode === "live",
     })
     .returning({ id: trades.id })
 
@@ -378,6 +379,7 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
       fees,
       exitReason: "tp",
       strategy: "grid",
+      live: cfg.mode === "live",
     })
     .returning({ id: trades.id })
 
@@ -445,6 +447,7 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
       symbol: order.symbol, side: "long", entryPrice: buyPrice, exitPrice,
       sizeUsdt, leverage: order.leverage, pnl: netPnl, fees,
       exitReason: reason, strategy: "grid",
+      live: cfg.mode === "live",
     })
     .returning({ id: trades.id })
 

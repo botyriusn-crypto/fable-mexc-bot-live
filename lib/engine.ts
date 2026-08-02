@@ -205,6 +205,7 @@ export async function closePosition(
       strategy: position.strategy ?? "trend",
       entryConfidence: position.entryConfidence,
       openedAt: position.openedAt,
+      live: cfg.mode === "live",
     })
     .returning()
 

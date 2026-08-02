@@ -42,17 +42,15 @@ export async function GET() {
       db.select().from(gridOrders).where(eq(gridOrders.status, "pending")).orderBy(desc(gridOrders.price)),
       db.select().from(classifierDecisions).orderBy(desc(classifierDecisions.createdAt)).limit(100),
       db.select().from(gridConfigs).orderBy(gridConfigs.symbol),
-      db.select({ pnl: trades.pnl }).from(trades),
+      db.select({ pnl: trades.pnl, live: trades.live }).from(trades),
     ])
 
-    // True all-time stats, computed over every trade ever (not the 50-row
-    // recent list above, which exists only for the trades table display).
-    // Note: the trades table has no live/paper flag, so this is one combined
-    // total across everything ever recorded, not split by mode.
+    // True all-time stats for LIVE trades only (paper/backtest excluded).
+    const liveOnly = lifetimeTradesRaw.filter((t) => t.live)
     const lifetimeStats = {
-      totalTrades: lifetimeTradesRaw.length,
-      totalPnl: lifetimeTradesRaw.reduce((s, t) => s + (t.pnl || 0), 0),
-      winRate: lifetimeTradesRaw.length > 0 ? lifetimeTradesRaw.filter((t) => (t.pnl || 0) > 0).length / lifetimeTradesRaw.length : 0,
+      totalTrades: liveOnly.length,
+      totalPnl: liveOnly.reduce((s, t) => s + (t.pnl || 0), 0),
+      winRate: liveOnly.length > 0 ? liveOnly.filter((t) => (t.pnl || 0) > 0).length / liveOnly.length : 0,
     }
 
     const cfg = cfgRows[0]
