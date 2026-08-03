@@ -47,6 +47,31 @@ export async function POST(request: Request) {
   }
 }
 
+export async function DELETE(request: Request) {
+  try {
+    const { searchParams } = new URL(request.url)
+    const symbol = searchParams.get("symbol")
+    const timeframe = searchParams.get("timeframe")
+    if (!symbol || !timeframe) {
+      return NextResponse.json({ error: "symbol and timeframe required" }, { status: 400 })
+    }
+
+    const pending = await db.select().from(gridOrders)
+      .where(and(eq(gridOrders.symbol, symbol), eq(gridOrders.timeframe, timeframe), eq(gridOrders.status, "pending")))
+    if (pending.length > 0) {
+      return NextResponse.json({
+        error: `Cannot delete: ${pending.length} pending order(s)/position still open. Disable the pair and wait for them to close first.`,
+      }, { status: 409 })
+    }
+
+    await db.delete(gridConfigs)
+      .where(and(eq(gridConfigs.symbol, symbol), eq(gridConfigs.timeframe, timeframe)))
+    return NextResponse.json({ ok: true })
+  } catch (err) {
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Unknown" }, { status: 500 })
+  }
+}
+
 export async function PATCH(request: Request) {
   try {
     const body = await request.json()

@@ -40,3 +40,22 @@ export function intervalToSeconds(interval: string): number {
   const m: Record<string, number> = { Min1: 60, Min5: 300, Min15: 900, Min30: 1800, Min60: 3600, Hour4: 14400, Hour8: 28800, Day1: 86400 }
   return m[interval] ?? 300
 }
+
+// Added for grid.ts and indicators.ts
+export function getTicker(symbol: string): Promise<any> {
+  return fetchTicker(symbol);
+}
+
+export function getCandles(symbol: string, timeframe: string, limit: number): Promise<any> {
+  return fetchKlines(symbol, timeframe, limit);
+}
+
+export interface Candle {
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  quoteAssetVolume?: number;
+}

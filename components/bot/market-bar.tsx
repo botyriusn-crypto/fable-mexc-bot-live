@@ -121,10 +121,36 @@ export function MarketBar({ state }: { state: BotState }) {
                 {state.markPrice?.toLocaleString(undefined, { maximumFractionDigits: 6 }) ?? "—"}
               </span>
               <span className="text-xs text-muted-foreground">
-                {state.regime ? `${state.regime.toUpperCase()} · ADX ${state.adxValue?.toFixed(1) ?? "—"}` : "Market data loading"}
+                {state.ticker ? `${state.ticker.riseFallRate >= 0 ? "+" : ""}${(state.ticker.riseFallRate * 100).toFixed(2)}%` : ""}
               </span>
             </div>
           </div>
+        </div>
+
+        {/* REGIME BADGE + ADX — bigger, centered */}
+        <div className="flex items-center gap-3">
+          {state.regime ? (
+            <>
+              <Badge 
+                className={`text-xs px-3 py-1.5 font-bold uppercase ${
+                  state.regime === "trend" 
+                    ? "bg-danger/20 text-danger border-danger/40 animate-pulse shadow-[0_0_12px_var(--color-danger)]" 
+                    : state.regime === "range" 
+                    ? "bg-yellow-500/20 text-yellow-400 border-yellow-500/40 animate-pulse shadow-[0_0_12px_rgba(234,179,8,0.6)]" 
+                    : "bg-muted text-muted-foreground border-border"
+                }`}
+              >
+                {state.regime === "trend" ? "🔥 TRENDING" : state.regime === "range" ? "📦 RANGING" : "⚪ NEUTRAL"}
+              </Badge>
+              {state.adxValue != null && (
+                <span className="text-sm font-bold text-white font-mono tracking-wider">
+                  ADX <span className="text-base">{state.adxValue.toFixed(1)}</span>
+                </span>
+              )}
+            </>
+          ) : (
+            <span className="text-xs text-muted-foreground">Market data loading…</span>
+          )}
         </div>
 
         <div className="flex flex-col gap-2 lg:flex-row lg:items-end">

@@ -17,7 +17,7 @@ import { and, eq, isNull, sql } from "drizzle-orm"
 import { type Candle } from "./mexc/public"
 import { getExchangeClient, type Exchange } from "./exchange"
 import { classifyLorentzian, combineConfirmation } from "./lorentzian"
-import { computeSnapshot, type FeatureVector, type IndicatorSnapshot } from "./indicators"
+import { computeSnapshot, getFeatures, type FeatureVector, type IndicatorSnapshot } from "./indicators"
 import { loadModel, trainOnTrade, gateEntry } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs } from "./grid"
@@ -227,15 +227,11 @@ export async function closePosition(
   // Learning loop: every closed trade trains the model
   if (position.entryFeatures) {
     try {
-      const model = await loadModel()
       await trainOnTrade(
-        model,
-        position.entryFeatures as unknown as FeatureVector,
-        netPnl > 0,
+        position.entryFeatures as unknown as Record<string, number>,
+        netPnl > 0 ? 1 : -1,
         pnlPct,
-        cfg.mlLearningRate,
-        trade.id,
-        position.id,
+        "trend"
       )
       await log("info", `Model updated from trade #${trade.id} (${netPnl > 0 ? "win" : "loss"})`)
     } catch (err) {
@@ -327,18 +323,18 @@ export async function runWebhookSignal(
 
 async function syncWithMexc(cfg: BotConfig) {
   if (cfg.mode !== "live") return
-  
+
   try {
     const exchange = getExchangeClient(cfg.exchange as Exchange)
     const mexPositions = await exchange.getOpenPositions() as any[]
-    
+
     if (Array.isArray(mexPositions)) {
       // Get all DB pending orders
       const dbOrders = await db.select().from(gridOrders).where(eq(gridOrders.status, "pending"))
-      
+
       // Get MEXC open orders - these are the real ones
       const mexcSymbols = new Set(mexPositions.map((p: any) => p.symbol))
-      
+
       // Cancel any DB orders for symbols that have NO real MEXC positions
       for (const order of dbOrders) {
         if (!mexcSymbols.has(order.symbol)) {
@@ -347,7 +343,7 @@ async function syncWithMexc(cfg: BotConfig) {
             .where(eq(gridOrders.id, order.id))
         }
       }
-      
+
       // Log the sync
       const cancelledCount = dbOrders.filter(o => !mexcSymbols.has(o.symbol)).length
       if (cancelledCount > 0) {
@@ -362,7 +358,7 @@ async function syncWithMexc(cfg: BotConfig) {
 export async function runTick(): Promise<{ status: string; detail?: string }> {
   const cfg = await getConfig()
   if (cfg.status !== "running") return { status: "skipped", detail: "Bot is stopped" }
-  
+
   // Sync with MEXC to remove ghost orders
   await syncWithMexc(cfg)
 
@@ -380,7 +376,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     const tickerCache = new Map<string, any>()
     const exchange = getExchangeClient(cfg.exchange as Exchange)
     const gridCfgs = await getGridConfigs()
-    
+
     for (const gc of gridCfgs) {
       try {
         const [candles, ticker] = await Promise.all([
@@ -503,8 +499,8 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
           const result = await analyzeTradesForMarket(cfg.symbol, cfg.timeframe)
           if (result?.recommendations.length) {
             await log("info", `AI Advisor: ${result.recommendations.length} recommendations`)
-            const highConfidence = result.recommendations.filter((r: any) => 
-              typeof r.suggested === 'number' && typeof r.current === 'number' && 
+            const highConfidence = result.recommendations.filter((r: any) =>
+              typeof r.suggested === 'number' && typeof r.current === 'number' &&
               Math.abs(r.suggested - r.current) / Math.abs(r.current) < 0.5
             )
             if (highConfidence.length > 0) {

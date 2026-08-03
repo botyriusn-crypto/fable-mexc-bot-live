@@ -121,6 +121,7 @@ interface GridState {
   budgetPct: number
   leverage: number
   atrMult?: number
+  makerMode?: boolean
 }
 
 const fmt = (v: number | null | undefined, d = 4) =>
@@ -179,6 +180,43 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
     }
   }
 
+  const [makerBusy, setMakerBusy] = useState(false)
+  const handleToggleMaker = async () => {
+    setMakerBusy(true)
+    try {
+      await fetch("/api/bot/grid-config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: grid.symbol, timeframe: grid.timeframe, makerMode: !grid.makerMode }),
+      })
+      onRefresh()
+    } catch (err) {
+      console.error("Failed to toggle maker mode:", err)
+    } finally {
+      setMakerBusy(false)
+    }
+  }
+
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const handleDelete = async () => {
+    if (!window.confirm(`Delete ${grid.symbol} (${grid.timeframe}) from the grid list? This only works if the pair is fully flat.`)) return
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      const res = await fetch(`/api/bot/grid-config?symbol=${encodeURIComponent(grid.symbol)}&timeframe=${encodeURIComponent(grid.timeframe)}`, {
+        method: "DELETE",
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? "Failed to delete")
+      onRefresh()
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete")
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   const toggleExpand = async () => {
     if (!expanded) {
       setLoadingOrders(true)
@@ -214,6 +252,14 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
           </Badge>
           <span className="text-muted-foreground shrink-0">{grid.timeframe}</span>
           {grid.paused && <Badge variant="outline" className="border-chart-3/40 text-chart-3 shrink-0">PAUSED</Badge>}
+          <Badge
+            variant="outline"
+            className={`shrink-0 cursor-pointer ${grid.makerMode ? "border-success/40 text-success" : "text-muted-foreground/60"}`}
+            onClick={handleToggleMaker}
+            title="Toggle maker mode (real resting orders + safety features)"
+          >
+            {makerBusy ? "…" : grid.makerMode ? "MAKER" : "market"}
+          </Badge>
         </div>
         <div className="flex items-center gap-2">
           {editing ? (
@@ -233,10 +279,21 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
               <span className="font-mono text-muted-foreground">{grid.budgetPct}%</span>
               <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => setEditing(true)}>Edit</Button>
               <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={handleToggle}>{grid.enabled ? "Disable" : "Enable"}</Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 px-2 text-xs text-danger hover:text-danger"
+                onClick={handleDelete}
+                disabled={deleting || grid.buyCount > 0 || grid.sellCount > 0}
+                title={grid.buyCount > 0 || grid.sellCount > 0 ? "Cannot delete while orders/position are open" : "Delete this pair"}
+              >
+                {deleting ? "…" : "Delete"}
+              </Button>
             </>
           )}
         </div>
       </div>
+      {deleteError && <div className="text-danger text-[10px]">{deleteError}</div>}
       <div className="flex items-center gap-4 font-mono text-muted-foreground" onClick={toggleExpand} style={{cursor: "pointer"}}>
         <span>{grid.buyCount}B/{grid.sellCount}S</span>
         <span className={grid.unrealizedPnl >= 0 ? "text-success" : "text-danger"}>

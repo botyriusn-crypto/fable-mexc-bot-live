@@ -1,5 +1,5 @@
-import { Dashboard } from "@/components/bot/dashboard"
+import { DashboardV2 } from "@/components/bot/dashboard-v2"
 
 export default function Page() {
-  return <Dashboard />
+  return <DashboardV2 />
 }

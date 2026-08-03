@@ -135,6 +135,7 @@ export async function GET() {
         realizedPnl: realized,
         budgetPct: gc.budgetPct,
         leverage: gc.leverage,
+        makerMode: gc.makerMode,
       }
     }))
 

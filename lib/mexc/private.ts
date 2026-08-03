@@ -1,7 +1,7 @@
 import crypto from "crypto"
 import { roundMexcQuantity, roundMexcPrice } from "./precision"
 
-const BASE_URL = "https://contract.mexc.com/api/v1/private"
+const BASE_URL = "https://api.mexc.com/api/v1/private"
 
 function sign(apiKey: string, secret: string, timestamp: string, paramString: string): string {
   const signStr = `${apiKey}${timestamp}${paramString}`
