@@ -12,6 +12,7 @@ import {
   classifierDecisions,
   type BotConfig,
   type Position,
+  gridConfigs,
 } from "./db/schema"
 import { and, eq, isNull, sql } from "drizzle-orm"
 import { type Candle } from "./mexc/public"
@@ -387,7 +388,16 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         const snap = computeSnapshot(candles, { ...cfg, symbol: gc.symbol, timeframe: gc.timeframe })
         snap.price = ticker.lastPrice
         marks.set(gc.symbol, snap.price)
-        await runGridTick(cfg, gc, snap, detectRegime(snap, { ...cfg, symbol: gc.symbol, timeframe: gc.timeframe }), exchange)
+        // Regime-aware auto-tuning: wider ATR in trending, tighter in ranging
+        const regime = detectRegime(snap, { ...cfg, symbol: gc.symbol, timeframe: gc.timeframe })
+        if (regime === "trend" && gc.rangeAtrMult < 2.0) {
+          await db.update(gridConfigs).set({ rangeAtrMult: Math.min(gc.rangeAtrMult * 1.3, 3.0) }).where(eq(gridConfigs.id, gc.id))
+          gc.rangeAtrMult = Math.min(gc.rangeAtrMult * 1.3, 3.0)
+        } else if (regime === "range" && gc.rangeAtrMult > 0.8) {
+          await db.update(gridConfigs).set({ rangeAtrMult: Math.max(gc.rangeAtrMult * 0.9, 0.5) }).where(eq(gridConfigs.id, gc.id))
+          gc.rangeAtrMult = Math.max(gc.rangeAtrMult * 0.9, 0.5)
+        }
+        await runGridTick(cfg, gc, snap, regime, exchange)
       } catch (err) {
         await log("error", `Grid ${gc.symbol} tick failed: ${err instanceof Error ? err.message : String(err)}`)
       }

@@ -136,6 +136,7 @@ export async function GET() {
         budgetPct: gc.budgetPct,
         leverage: gc.leverage,
         makerMode: gc.makerMode,
+        direction: gc.direction || "long",
       }
     }))
 

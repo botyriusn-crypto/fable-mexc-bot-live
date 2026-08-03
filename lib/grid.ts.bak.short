@@ -130,20 +130,32 @@ export async function getActiveOrders(symbol?: string, timeframe?: string): Prom
 export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, volatility?: VolatilityState, exchange?: ExchangeClient, startAtPrice = false): Promise<void> {
   const center = snap.price
   const configuredHalf = snap.atr * gc.rangeAtrMult
+
+  // Fee-aware spacing floor. A completed cycle earns one spacing and pays a
+  // buy+sell round trip. The configured level count is a ceiling: thin the
+  // ladder when volatility is too low for every rung to clear the fee floor.
   const breakeven = center * 2 * TAKER_FEE
   const feeBasedMin = breakeven * gc.feeMarginMult
+  // Minimum 0.3% spacing for low-price coins where fee calculation rounds to 0
   const pctBasedMin = center * 0.003
   const minSpacing = Math.max(feeBasedMin, pctBasedMin)
   const configuredWidth = configuredHalf * 2
   const atrSpacing = configuredWidth / gc.levels
   const maxLevelsForRange = Math.floor(configuredWidth / minSpacing)
   const effectiveLevels = Math.min(gc.levels, Math.max(1, maxLevelsForRange))
+  // Adapt spacing to volatility — wider during surges to capture extremes
   const baseSpacing = Math.max(atrSpacing, minSpacing)
-  const spacing = volatility ? adaptiveSpacing(baseSpacing, volatility, minSpacing) : baseSpacing
-  const totalLevels = Math.max(1, Math.floor(effectiveLevels / 2))
-  const effectiveHalf = Math.max(configuredHalf, spacing * totalLevels)
+  const spacing = volatility 
+    ? adaptiveSpacing(baseSpacing, volatility, minSpacing)
+    : baseSpacing
+
+  // Ensure the persisted/displayed range contains every generated rung. This
+  // matters when even two fee-safe rungs do not fit inside the ATR range.
+  const buyLevels = Math.max(1, Math.floor(effectiveLevels / 2))
+  const effectiveHalf = Math.max(configuredHalf, spacing * buyLevels)
   const lower = center - effectiveHalf
   const upper = center + effectiveHalf
+  // Use live balance for sizing in live mode, paper balance for paper mode
   let effectiveBalance = cfg.paperBalance
   if (cfg.mode === "live") {
     try {
@@ -154,20 +166,33 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
     } catch (err) {}
   }
   const budget = (effectiveBalance * gc.budgetPct) / 100
-  const notionalPerLevel = (budget / totalLevels) * gc.leverage
+  const notionalPerLevel = (budget / buyLevels) * gc.leverage
+
+  const orders = []
+  // After a big drop, place buys at current price with stairs going UP
+    // This catches the recovery instead of waiting for more downside.
+    // Maker mode forces the normal downward ladder: post-only buys must rest
+    // BELOW market or MEXC rejects them, so never stair up for maker symbols.
+    const recentDrop = !isMakerSymbol(gc) && (startAtPrice || (volatility && volatility.atrPercentile > 50))
+    const startPrice = recentDrop ? center : center - spacing
+    const stairDirection = recentDrop ? 1 : -1  // Up if recovering, down if normal
+  console.log(`[DIRECTION-DEBUG] symbol=${gc.symbol} direction=${gc.direction}`)
   const isShort = gc.direction === "short"
-  const orders: any[] = []
-  for (let i = 1; i <= totalLevels; i++) {
-    const orderPrice = isShort ? center + spacing * i : center - spacing * i
+    
+    for (let i = 1; i <= buyLevels; i++) {
+      const orderPrice = isShort ? center + spacing * i : startPrice + stairDirection * spacing * (i - 1)
+    const side = isShort ? "sell" : "buy"
     if (orderPrice <= 0) continue
+    const price = orderPrice
+      if (price <= 0) continue
     orders.push({
       symbol: gc.symbol,
       timeframe: gc.timeframe,
       leverage: gc.leverage,
       spacing,
       levelIndex: i,
-      side: isShort ? "sell" : "buy",
-      price: orderPrice,
+      side: side as "buy" | "sell",
+      price,
       quantity: notionalPerLevel / orderPrice,
       status: "pending" as const,
     })
@@ -175,36 +200,64 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   if (volatility && volatility.surge) {
     await log("info", `Grid ${gc.symbol}: ${volatility.reason}`)
   }
-  if (cfg.mode === "live") {
+
+  // Maker (live): place each buy as a real resting post-only order and store
+  // its MEXC order id. Market/paper path inserts virtual rows as before.
+  if (cfg.mode === "live" && isMakerSymbol(gc)) {
     for (const ord of orders) {
       try {
-        const side = isShort ? (ord.side === "sell" ? 3 : 2) : (ord.side === "sell" ? 4 : 1)
         const res: any = await placePostOnlyOrder({
           symbol: ord.symbol,
-          side,
-          volume: ord.quantity,
+          side: gc.direction === "short" ? (ord.side === "sell" ? 2 : 4) : (ord.side === "sell" ? 3 : 1),
           price: ord.price,
+          volume: ord.quantity,
           leverage: ord.leverage,
         })
-        const oid = extractOrderId(res)
-        await db.insert(gridOrders).values({ ...ord, mexcOrderId: oid, exchangeStatus: "new" })
-        await log("info", `Grid ${gc.symbol}: resting ${ord.side} @ ${ord.price.toFixed(6)} id=${oid}`)
-      } catch (err) {
-        await log("error", `Grid ${gc.symbol}: ${ord.side} rejected @ ${ord.price.toFixed(6)}: ${dbErr(err)}`)
+              const oid = extractOrderId(res)
+              await db.insert(gridOrders).values({ ...ord, mexcOrderId: oid, exchangeStatus: "new" })
+              await log("info", `Grid ${gc.symbol} (maker): resting buy @ ${ord.price.toFixed(6)} id=${oid}`)
+            } catch (err) {
+              await log("error", `Grid ${gc.symbol} (maker): order rejected @ ${ord.price.toFixed(6)}: ${dbErr(err)}`)
       }
     }
-  } else {
-    if (orders.length > 0) await db.insert(gridOrders).values(orders)
+  } else if (orders.length > 0) {
+    await db.insert(gridOrders).values(orders)
   }
-  await db.update(botConfig).set({ gridCenter: center, gridLower: lower, gridUpper: upper, gridSpacing: spacing, gridEffectiveLevels: effectiveLevels, gridPaused: false }).where(eq(botConfig.id, 1))
-  await log("info", `Grid set up: ${orders.length} ${isShort ? "sell" : "buy"} levels between ${lower.toFixed(2)} and ${upper.toFixed(2)} | spacing ${spacing.toFixed(6)} (breakeven ${breakeven.toFixed(6)}) | budget ${budget.toFixed(2)} USDT x${gc.leverage}`)
+
+  await db
+    .update(botConfig)
+    .set({
+      gridCenter: center,
+      gridLower: lower,
+      gridUpper: upper,
+      gridSpacing: spacing,
+      gridEffectiveLevels: effectiveLevels,
+      gridPaused: false,
+    })
+    .where(eq(botConfig.id, 1))
+
+  await log(
+    "info",
+    `Grid set up: ${orders.length} ${gc.direction === "short" ? "sell" : "buy"} levels between ${lower.toFixed(2)} and ${center.toFixed(2)} | spacing ${spacing.toFixed(6)} (breakeven ${breakeven.toFixed(6)}) | budget ${budget.toFixed(2)} USDT x${gc.leverage}`,
+  )
+
   if (spacing > atrSpacing * 1.001) {
-    await log("info", `Grid spacing widened for fees: ATR spacing ${atrSpacing.toFixed(2)} was below the fee floor ${minSpacing.toFixed(4)}. Using ${effectiveLevels} of ${gc.levels} configured levels`)
+    await log(
+      "info",
+      `Grid spacing widened for fees: ATR spacing ${atrSpacing.toFixed(2)} was below the fee floor ${minSpacing.toFixed(4)}. Using ${effectiveLevels} of ${gc.levels} configured levels — raise "Range (ATR x)" to keep more levels.`,
+    )
   }
 }
 
 export async function teardownGrid(cfg: BotConfig, currentPrice: number | null): Promise<void> {
   const active = await getActiveOrders(cfg.symbol, cfg.timeframe)
+  // Detect direction change: if existing orders are opposite side, teardown and rebuild
+  const hasWrongSideOrders = active.some(o => (gc.direction === "short" && o.side === "buy") || (gc.direction === "long" && o.side === "sell"))
+  if (hasWrongSideOrders) {
+    await db.update(gridOrders).set({ status: "cancelled" }).where(and(eq(gridOrders.symbol, gc.symbol), eq(gridOrders.timeframe, gc.timeframe), eq(gridOrders.status, "pending")))
+    await setupGrid(cfg, gc, snap, undefined, exchange)
+    return
+  }
 
   // Maker: cancel real resting orders on the exchange first so we never leave
   // orphaned post-only orders behind after a manual stop.
@@ -564,7 +617,7 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
         try {
           const res: any = await placePostOnlyOrder({
             symbol: o.symbol,
-            side: 1,
+            side: gc.direction === "short" ? (ord.side === "sell" ? 2 : 4) : (ord.side === "sell" ? 3 : 1),
             price: o.buyPrice,
             volume: o.quantity,
             leverage: o.leverage,
@@ -617,6 +670,14 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
   }
 
   const active = await getActiveOrders(gc.symbol, gc.timeframe)
+  if (gc.direction === "short") { return handleShortGridTickMaker(cfg, gc, snap, regime) }
+  // Detect direction change: if existing orders are opposite side, teardown and rebuild
+  const hasWrongSideOrders = active.some(o => (gc.direction === "short" && o.side === "buy") || (gc.direction === "long" && o.side === "sell"))
+  if (hasWrongSideOrders) {
+    await db.update(gridOrders).set({ status: "cancelled" }).where(and(eq(gridOrders.symbol, gc.symbol), eq(gridOrders.timeframe, gc.timeframe), eq(gridOrders.status, "pending")))
+    await setupGrid(cfg, gc, snap, undefined, exchange)
+    return
+  }
   if (gc.direction === "short") { return handleShortGridTick(cfg, gc, snap, exchange) }
 
   // Detect volatility surge for adaptive spacing
@@ -768,296 +829,159 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
   }
 }
 
+async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, exchange?: ExchangeClient): Promise<void> {
+  const active = await getActiveOrders(gc.symbol, gc.timeframe)
+  if (gc.direction === "short") { return handleShortGridTickMaker(cfg, gc, snap, regime) }
+  // Detect direction change: if existing orders are opposite side, teardown and rebuild
+  const hasWrongSideOrders = active.some(o => (gc.direction === "short" && o.side === "buy") || (gc.direction === "long" && o.side === "sell"))
+  if (hasWrongSideOrders) {
+    await db.update(gridOrders).set({ status: "cancelled" }).where(and(eq(gridOrders.symbol, gc.symbol), eq(gridOrders.timeframe, gc.timeframe), eq(gridOrders.status, "pending")))
+    await setupGrid(cfg, gc, snap, undefined, exchange)
+    return
+  }
+  if (gc.direction === "short") { return handleShortGridTick(cfg, gc, snap, exchange) }
+  if (active.length === 0) {
+    await setupGrid(cfg, gc, snap, undefined, exchange)
+    return
+  }
+  let price = snap.price
+  try {
+    if (exchange) {
+      const ticker = await exchange.fetchTicker(gc.symbol)
+      if (ticker?.lastPrice) price = ticker.lastPrice
+    }
+  } catch (err) {}
+  const spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
+
+  // Short sell fills: price >= sell price -> open short, place buy to close lower
+  const sells = active.filter((o) => o.side === "sell" && price >= o.price)
+  for (const o of sells) {
+    await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
+    const closePrice = o.price - spacing
+    await db.insert(gridOrders).values({
+      symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
+      spacing, levelIndex: o.levelIndex, side: "buy",
+      price: closePrice, quantity: o.quantity, status: "pending",
+    })
+    await log("trade", `Short grid ${o.symbol} sell filled @ ${o.price.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
+  }
+
+  // Short buy fills: price <= buy price -> close short, take profit
+  const buys = active.filter((o) => o.side === "buy" && price <= o.price)
+  for (const o of buys) {
+    const sellPrice = o.price + spacing
+    const grossPnl = sellPrice - o.price
+    const fees = (sellPrice + o.price) * o.quantity * TAKER_FEE
+    const netPnl = grossPnl - fees
+    await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
+    await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
+    await db.insert(trades).values({
+      symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice: o.price,
+      sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage,
+      pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live",
+    })
+    await log("trade", `Short grid ${o.symbol} closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
+    const newSellPrice = o.price + spacing
+    await db.insert(gridOrders).values({
+      symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
+      spacing, levelIndex: o.levelIndex, side: "sell",
+      price: newSellPrice, quantity: o.quantity, status: "pending",
+    })
+  }
+}
+
 
 async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): Promise<void> {
   let active = await getActiveOrders(gc.symbol, gc.timeframe)
-  for (const o of active.filter(o => o.side === "buy" && o.mexcOrderId)) {
-    try { await cancelOrders([o.mexcOrderId]) } catch {}
-    await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
-  }
-  active = await getActiveOrders(gc.symbol, gc.timeframe)
   if (active.length === 0) {
     await setupGrid(cfg, gc, snap, undefined, undefined)
     return
   }
+
+  // Cancel any existing buy orders (wrong direction)
+  const buys = active.filter((o) => o.side === "buy")
+  for (const o of buys) {
+    if (o.mexcOrderId) {
+      try { await cancelOrders([o.mexcOrderId]) } catch {}
+    }
+    await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
+  }
+  active = await getActiveOrders(gc.symbol, gc.timeframe)
+
   const spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
-  for (const o of active.filter(o => o.side === "sell" && o.mexcOrderId)) {
+
+  // Detect filled sells -> place buy to close
+  const sells = active.filter((o) => o.side === "sell" && o.mexcOrderId)
+  for (const o of sells) {
     const st: any = await fetchOrderStatus(o.mexcOrderId as string)
     if (!st) continue
-    if (Number(st.state) === 3) {
+    const state = Number(st.state)
+    if (state === 3) {
       const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
+      await db.update(gridOrders).set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
       const closePrice = fillPrice - spacing
       try {
-        const res: any = await placePostOnlyOrder({ symbol: o.symbol, side: 2, price: closePrice, volume: o.quantity, leverage: o.leverage })
+        const res: any = await placePostOnlyOrder({ symbol: o.symbol, side: 4, price: closePrice, volume: o.quantity, leverage: o.leverage })
         const bid = extractOrderId(res)
-        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, mexcOrderId: bid, exchangeStatus: "new", status: "pending" })
-        await log("trade", `Short ${o.symbol} sell filled @ ${fillPrice.toFixed(6)} | buy to close @ ${closePrice.toFixed(6)}`)
+        await db.insert(gridOrders).values({
+          symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
+          spacing, levelIndex: o.levelIndex, side: "buy",
+          price: closePrice, quantity: o.quantity, buyPrice: null, sellPrice: fillPrice,
+          mexcOrderId: bid, exchangeStatus: "new", status: "pending",
+        })
+        await log("trade", `Short grid ${o.symbol} (maker) sell filled @ ${fillPrice.toFixed(6)} | resting buy to close @ ${closePrice.toFixed(6)}`)
       } catch (err) {
-        await log("error", `Short ${o.symbol} buy placement failed: ${dbErr(err)}`)
+        await log("error", `Short grid ${o.symbol} (maker) buy placement failed: ${dbErr(err)}`)
       }
-    } else if ([4,5].includes(Number(st.state))) {
-      await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
+    } else if (state === 4 || state === 5) {
+      await db.update(gridOrders).set({ status: "cancelled", exchangeStatus: "cancelled" }).where(eq(gridOrders.id, o.id))
     }
   }
-  for (const o of active.filter(o => o.side === "buy" && o.mexcOrderId)) {
+
+  // Detect filled buys (close short) -> profit and re-arm sell
+  const buysClose = active.filter((o) => o.side === "buy" && o.mexcOrderId)
+  for (const o of buysClose) {
     const st: any = await fetchOrderStatus(o.mexcOrderId as string)
     if (!st) continue
-    if (Number(st.state) === 3) {
+    const state = Number(st.state)
+    if (state === 3) {
       const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
       const sellPrice = exitPrice + spacing
       const grossPnl = sellPrice - exitPrice
       const fees = (sellPrice + exitPrice) * o.quantity * TAKER_FEE
       const netPnl = grossPnl - fees
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
+      await db.update(gridOrders).set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
       await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
-      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice, sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
-      await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(6)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
+      await db.insert(trades).values({
+        symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice, sizeUsdt: (sellPrice * o.quantity) / o.leverage,
+        leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live",
+      })
+      await log("trade", `Short grid ${o.symbol} (maker) closed @ ${exitPrice.toFixed(6)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
       try {
-        const res: any = await placePostOnlyOrder({ symbol: o.symbol, side: 3, price: sellPrice, volume: o.quantity, leverage: o.leverage })
+        const res: any = await placePostOnlyOrder({ symbol: o.symbol, side: 2, price: sellPrice, volume: o.quantity, leverage: o.leverage })
         const sid = extractOrderId(res)
-        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "sell", price: sellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
+        await db.insert(gridOrders).values({
+          symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
+          spacing, levelIndex: o.levelIndex, side: "sell",
+          price: sellPrice, quantity: o.quantity, buyPrice: null, sellPrice: null,
+          mexcOrderId: sid, exchangeStatus: "new", status: "pending",
+        })
       } catch (err) {
-        await log("error", `Short ${o.symbol} re-arm sell failed: ${dbErr(err)}`)
+        await log("error", `Short grid ${o.symbol} (maker) re-arm sell failed: ${dbErr(err)}`)
       }
-    } else if ([4,5].includes(Number(st.state))) {
-      await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
+    } else if (state === 4 || state === 5) {
+      await db.update(gridOrders).set({ status: "cancelled", exchangeStatus: "cancelled" }).where(eq(gridOrders.id, o.id))
     }
   }
-  const pendingSells = (await getActiveOrders(gc.symbol, gc.timeframe)).filter(o => o.side === "sell")
+
+  // Rebuild sell ladder if needed (no pending sells)
+  const pendingSells = (await getActiveOrders(gc.symbol, gc.timeframe)).filter((o) => o.side === "sell")
   if (pendingSells.length === 0) {
     await setupGrid(cfg, gc, snap, undefined, undefined)
   }
 }
 
-async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, exchange?: ExchangeClient): Promise<void> {
-  let active = await getActiveOrders(gc.symbol, gc.timeframe)
-  for (const o of active.filter(o => o.side === "buy")) {
-    if (o.mexcOrderId) { try { await cancelOrders([o.mexcOrderId]) } catch {} }
-    await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
-  }
-  active = await getActiveOrders(gc.symbol, gc.timeframe)
-  if (active.length === 0) {
-    await setupGrid(cfg, gc, snap, undefined, exchange)
-    return
-  }
-  const spacing = active.find(o => o.spacing)?.spacing ?? snap.atr * gc.rangeAtrMult
-  let price = snap.price
-  try { if (exchange) { const t = await exchange.fetchTicker(gc.symbol); if (t?.lastPrice) price = t.lastPrice } } catch {}
-  for (const o of active.filter(o => o.side === "sell")) {
-    if (o.mexcOrderId) {
-      const st: any = await fetchOrderStatus(o.mexcOrderId)
-      if (st && Number(st.state) === 3) {
-        const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
-        await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-        const closePrice = fillPrice - spacing
-        if (cfg.mode === "live") {
-          try {
-            const res: any = await placePostOnlyOrder({ symbol: o.symbol, side: 2, price: closePrice, volume: o.quantity, leverage: o.leverage })
-            const bid = extractOrderId(res)
-            await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, mexcOrderId: bid, exchangeStatus: "new", status: "pending" })
-          } catch (err) { await log("error", `Short buy close failed: ${dbErr(err)}`) }
-        } else {
-          await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, status: "pending" })
-        }
-        await log("trade", `Short ${o.symbol} sell filled @ ${fillPrice.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
-      }
-    } else if (price >= o.price) {
-      if (cfg.mode === "live" && exchange) {
-        try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 3, volume: o.quantity, leverage: o.leverage }) } catch (err) { await log("error", `Short open failed: ${dbErr(err)}`) }
-      }
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      const closePrice = o.price - spacing
-      await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, status: "pending" })
-      await log("trade", `Short ${o.symbol} sell @ ${o.price.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
-    }
-  }
-  for (const o of active.filter(o => o.side === "buy")) {
-    if (o.mexcOrderId) {
-      const st: any = await fetchOrderStatus(o.mexcOrderId)
-      if (st && Number(st.state) === 3) {
-        const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
-        const sellPrice = exitPrice + spacing
-        const grossPnl = sellPrice - exitPrice
-        const fees = (sellPrice + exitPrice) * o.quantity * TAKER_FEE
-        const netPnl = grossPnl - fees
-        await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
-        await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice, sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
-        await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
-        const newSellPrice = exitPrice + spacing
-        if (cfg.mode === "live") {
-          try {
-            const res: any = await placePostOnlyOrder({ symbol: o.symbol, side: 3, price: newSellPrice, volume: o.quantity, leverage: o.leverage })
-            const sid = extractOrderId(res)
-            await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
-          } catch (err) { await log("error", `Short re-arm sell failed: ${dbErr(err)}`) }
-        } else {
-          await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, status: "pending" })
-        }
-      }
-    } else if (price <= o.price) {
-      const sellPrice = o.price + spacing
-      if (cfg.mode === "live" && exchange) {
-        try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (err) { await log("error", `Short close failed: ${dbErr(err)}`) }
-      }
-      const grossPnl = sellPrice - o.price
-      const fees = (sellPrice + o.price) * o.quantity * TAKER_FEE
-      const netPnl = grossPnl - fees
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
-      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice: o.price, sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
-      await log("trade", `Short ${o.symbol} closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
-      const newSellPrice = o.price + spacing
-      if (cfg.mode === "live") {
-        try {
-          const res: any = await placePostOnlyOrder({ symbol: o.symbol, side: 3, price: newSellPrice, volume: o.quantity, leverage: o.leverage })
-          const sid = extractOrderId(res)
-          await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
-        } catch (err) { await log("error", `Short re-arm sell failed: ${dbErr(err)}`) }
-      } else {
-        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, status: "pending" })
-      }
-    }
-  }
-  const pendingSells = (await getActiveOrders(gc.symbol, gc.timeframe)).filter(o => o.side === "sell")
-  if (pendingSells.length === 0) {
-    await setupGrid(cfg, gc, snap, undefined, exchange)
-  }
-}
 export async function gridUnrealizedPnl(currentPrice: number, symbol?: string, timeframe?: string): Promise<number> {
-async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): Promise<void> {
-  let active = await getActiveOrders(gc.symbol, gc.timeframe)
-  for (const o of active.filter(o => o.side === "buy" && o.mexcOrderId)) {
-    try { await cancelOrders([o.mexcOrderId]) } catch {}
-    await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
-  }
-  active = await getActiveOrders(gc.symbol, gc.timeframe)
-  if (active.length === 0) { await setupGrid(cfg, gc, snap, undefined, undefined); return }
-  const spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
-  for (const o of active.filter(o => o.side === "sell" && o.mexcOrderId)) {
-    const st: any = await fetchOrderStatus(o.mexcOrderId as string)
-    if (!st) continue
-    if (Number(st.state) === 3) {
-      const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      const closePrice = fillPrice - spacing
-      try {
-        const res: any = await placePostOnlyOrder({ symbol: o.symbol, side: 2, price: closePrice, volume: o.quantity, leverage: o.leverage })
-        const bid = extractOrderId(res)
-        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, mexcOrderId: bid, exchangeStatus: "new", status: "pending" })
-        await log("trade", `Short ${o.symbol} sell filled @ ${fillPrice.toFixed(6)} | buy to close @ ${closePrice.toFixed(6)}`)
-      } catch (err) { await log("error", `Short buy close failed: ${dbErr(err)}`) }
-    } else if ([4,5].includes(Number(st.state))) { await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id)) }
-  }
-  for (const o of active.filter(o => o.side === "buy" && o.mexcOrderId)) {
-    const st: any = await fetchOrderStatus(o.mexcOrderId as string)
-    if (!st) continue
-    if (Number(st.state) === 3) {
-      const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
-      const sellPrice = exitPrice + spacing
-      const grossPnl = sellPrice - exitPrice
-      const fees = (sellPrice + exitPrice) * o.quantity * TAKER_FEE
-      const netPnl = grossPnl - fees
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
-      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice, sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
-      await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(6)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
-      try {
-        const res: any = await placePostOnlyOrder({ symbol: o.symbol, side: 3, price: sellPrice, volume: o.quantity, leverage: o.leverage })
-        const sid = extractOrderId(res)
-        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "sell", price: sellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
-      } catch (err) { await log("error", `Short re-arm sell failed: ${dbErr(err)}`) }
-    } else if ([4,5].includes(Number(st.state))) { await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id)) }
-  }
-  const pendingSells = (await getActiveOrders(gc.symbol, gc.timeframe)).filter(o => o.side === "sell")
-  if (pendingSells.length === 0) { await setupGrid(cfg, gc, snap, undefined, undefined) }
-}
-
-async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, exchange?: ExchangeClient): Promise<void> {
-  let active = await getActiveOrders(gc.symbol, gc.timeframe)
-  for (const o of active.filter(o => o.side === "buy")) {
-    if (o.mexcOrderId) { try { await cancelOrders([o.mexcOrderId]) } catch {} }
-    await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
-  }
-  active = await getActiveOrders(gc.symbol, gc.timeframe)
-  if (active.length === 0) { await setupGrid(cfg, gc, snap, undefined, exchange); return }
-  const spacing = active.find(o => o.spacing)?.spacing ?? snap.atr * gc.rangeAtrMult
-  let price = snap.price
-  try { if (exchange) { const t = await exchange.fetchTicker(gc.symbol); if (t?.lastPrice) price = t.lastPrice } } catch {}
-  for (const o of active.filter(o => o.side === "sell")) {
-    if (o.mexcOrderId) {
-      const st: any = await fetchOrderStatus(o.mexcOrderId as string)
-      if (st && Number(st.state) === 3) {
-        const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
-        await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-        const closePrice = fillPrice - spacing
-        if (cfg.mode === "live") {
-          try {
-            const res: any = await placePostOnlyOrder({ symbol: o.symbol, side: 2, price: closePrice, volume: o.quantity, leverage: o.leverage })
-            const bid = extractOrderId(res)
-            await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, mexcOrderId: bid, exchangeStatus: "new", status: "pending" })
-          } catch (err) { await log("error", `Short buy close failed: ${dbErr(err)}`) }
-        } else { await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, status: "pending" }) }
-        await log("trade", `Short ${o.symbol} sell filled @ ${fillPrice.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
-      }
-    } else if (price >= o.price) {
-      if (cfg.mode === "live" && exchange) {
-        try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 3, volume: o.quantity, leverage: o.leverage }) } catch (err) { await log("error", `Short open failed: ${dbErr(err)}`) }
-      }
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      const closePrice = o.price - spacing
-      await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, status: "pending" })
-      await log("trade", `Short ${o.symbol} sell @ ${o.price.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
-    }
-  }
-  for (const o of active.filter(o => o.side === "buy")) {
-    if (o.mexcOrderId) {
-      const st: any = await fetchOrderStatus(o.mexcOrderId as string)
-      if (st && Number(st.state) === 3) {
-        const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
-        const sellPrice = exitPrice + spacing
-        const grossPnl = sellPrice - exitPrice
-        const fees = (sellPrice + exitPrice) * o.quantity * TAKER_FEE
-        const netPnl = grossPnl - fees
-        await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
-        await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice, sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
-        await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
-        const newSellPrice = exitPrice + spacing
-        if (cfg.mode === "live") {
-          try {
-            const res: any = await placePostOnlyOrder({ symbol: o.symbol, side: 3, price: newSellPrice, volume: o.quantity, leverage: o.leverage })
-            const sid = extractOrderId(res)
-            await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
-          } catch (err) { await log("error", `Short re-arm sell failed: ${dbErr(err)}`) }
-        } else { await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, status: "pending" }) }
-      }
-    } else if (price <= o.price) {
-      const sellPrice = o.price + spacing
-      if (cfg.mode === "live" && exchange) {
-        try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (err) { await log("error", `Short close failed: ${dbErr(err)}`) }
-      }
-      const grossPnl = sellPrice - o.price
-      const fees = (sellPrice + o.price) * o.quantity * TAKER_FEE
-      const netPnl = grossPnl - fees
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
-      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice: o.price, sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
-      await log("trade", `Short ${o.symbol} closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
-      const newSellPrice = o.price + spacing
-      if (cfg.mode === "live") {
-        try {
-          const res: any = await placePostOnlyOrder({ symbol: o.symbol, side: 3, price: newSellPrice, volume: o.quantity, leverage: o.leverage })
-          const sid = extractOrderId(res)
-          await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
-        } catch (err) { await log("error", `Short re-arm sell failed: ${dbErr(err)}`) }
-      } else { await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, status: "pending" }) }
-    }
-  }
-  const pendingSells = (await getActiveOrders(gc.symbol, gc.timeframe)).filter(o => o.side === "sell")
-  if (pendingSells.length === 0) { await setupGrid(cfg, gc, snap, undefined, exchange) }
-}
   const conditions = [eq(gridOrders.status, "pending"), eq(gridOrders.side, "sell")]
   if (symbol) conditions.push(eq(gridOrders.symbol, symbol))
   if (timeframe) conditions.push(eq(gridOrders.timeframe, timeframe))

@@ -1,5 +1,5 @@
 // MEXC Futures public market data client
-const BASE_URL = "https://contract.mexc.com/api/v1/contract"
+const BASE_URL = "https://api.mexc.com/api/v1/contract"
 
 export interface Candle { time: number; open: number; high: number; low: number; close: number; volume: number }
 export interface Ticker { symbol: string; lastPrice: number; fairPrice: number; fundingRate: number; riseFallRate: number; volume24: number }

@@ -225,6 +225,7 @@ export const gridConfigs = pgTable("grid_configs", {
   autoPause: boolean("auto_pause").notNull().default(true),
   paused: boolean("paused").notNull().default(false),
   makerMode: boolean("maker_mode").notNull().default(false),
+  direction: text("direction").notNull().default("long"),
   center: doublePrecision("center"),
   lower: doublePrecision("lower"),
   upper: doublePrecision("upper"),

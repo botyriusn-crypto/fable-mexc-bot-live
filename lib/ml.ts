@@ -1,62 +1,135 @@
-// lib/ml.ts
-// This is the complete file - replace your entire ml.ts with this
+// Online logistic regression — learns from every closed trade.
 
-// ============================================
-// EXISTING CODE - Keep your original code here
-// ============================================
+import { db } from "./db"
+import { mlModel, tradeFeatures } from "./db/schema"
+import { eq, sql } from "drizzle-orm"
+import type { FeatureVector } from "./indicators"
 
-// If you have any existing imports, keep them
-// If you have any existing functions, keep them
-
-// ============================================
-// ADD/UPDATE THESE EXPORTS
-// ============================================
+export const FEATURE_KEYS: (keyof FeatureVector)[] = [
+  "emaSpread",
+  "crossover",
+  "rsi",
+  "macdHist",
+  "atrPct",
+  "roc",
+  "adx",
+  "volSurge",
+  "sideLong",
+]
 
 export interface MlState {
-  modelLoaded: boolean;
-  lastPrediction: any;
-  trainingData: any[];
-  lastTrade?: any;
-  model?: any;
+  weights: Record<string, number>
+  bias: number
+  sampleCount: number
+  correctCount: number
+  rollingAccuracy: number
 }
 
-// If validateFeatures already exists, REMOVE this duplicate
-// If it doesn't exist, keep this
-export function validateFeatures(features: any): boolean {
-  if (!features) return false;
-  // Add your validation logic here
-  return true;
-}
+const sigmoid = (z: number) => 1 / (1 + Math.exp(-z))
 
-export async function loadModel(modelPath?: string): Promise<any> {
-  console.log('Loading ML model...');
+export async function loadModel(): Promise<MlState> {
+  const rows = await db.select().from(mlModel).where(eq(mlModel.id, 1))
+  if (rows.length === 0) {
+    const weights = Object.fromEntries(FEATURE_KEYS.map((k) => [k, 0]))
+    await db.insert(mlModel).values({ id: 1, weights }).onConflictDoNothing()
+    return { weights, bias: 0, sampleCount: 0, correctCount: 0, rollingAccuracy: 0.5 }
+  }
+  const r = rows[0]
   return {
-    loaded: true,
-    predict: (features: any) => {
-      const score = features?.emaSpread || 0;
-      return {
-        prediction: score > 0 ? 1 : -1,
-        confidence: Math.abs(score)
-      };
-    }
-  };
-}
-
-export function gateEntry(features: any, model: any): boolean {
-  if (!model || !model.loaded) return true;
-  try {
-    const result = model.predict(features);
-    return result.confidence > 0.3;
-  } catch (err) {
-    console.error('Gate entry error:', err);
-    return true;
+    weights: r.weights,
+    bias: r.bias,
+    sampleCount: r.sampleCount,
+    correctCount: r.correctCount,
+    rollingAccuracy: r.rollingAccuracy,
   }
 }
 
-// If trainOnTrade already exists, REMOVE this duplicate
-// If it doesn't exist, keep this
-export async function trainOnTrade(trade: any, model: any): Promise<void> {
-  console.log('Training on trade:', trade);
-  // Add your training logic here
-  return Promise.resolve();
+// Probability that this entry will be profitable.
+export function predict(model: MlState, features: FeatureVector): number {
+  let z = model.bias
+  for (const key of FEATURE_KEYS) {
+    z += (model.weights[key] ?? 0) * (features[key] ?? 0)
+  }
+  return sigmoid(z)
+}
+
+// Confidence gate: cold-start neutral (defers to indicators), tightens with samples.
+// Returns { allowed, confidence } — while sampleCount is low the effective
+// threshold is relaxed toward 0.5 so the model can gather data.
+export function gateEntry(
+  model: MlState,
+  features: FeatureVector,
+  configuredThreshold: number,
+): { allowed: boolean; confidence: number } {
+  const confidence = predict(model, features)
+  const rampSamples = 30
+  const ramp = Math.min(model.sampleCount / rampSamples, 1)
+  const effectiveThreshold = 0.5 + (configuredThreshold - 0.5) * ramp
+  return { allowed: confidence >= effectiveThreshold, confidence }
+}
+
+// SGD update from a closed trade. label: 1 = win, 0 = loss.
+// pnlWeight scales the gradient by PnL magnitude (bigger wins/losses teach more).
+export async function trainOnTrade(
+  model: MlState,
+  features: FeatureVector,
+  won: boolean,
+  pnlPct: number,
+  learningRate: number,
+  tradeId: number,
+  positionId: number | null,
+): Promise<MlState> {
+  const label = won ? 1 : 0
+  const prediction = predict(model, features)
+  const error = prediction - label
+  const pnlWeight = Math.min(1 + Math.abs(pnlPct) / 2, 3) // cap at 3x
+  const lr = learningRate * pnlWeight
+
+  const newWeights: Record<string, number> = { ...model.weights }
+  for (const key of FEATURE_KEYS) {
+    const grad = error * (features[key] ?? 0)
+    // L2 regularization keeps weights small and generalizable
+    newWeights[key] = (newWeights[key] ?? 0) - lr * grad - lr * 0.01 * (newWeights[key] ?? 0)
+  }
+  const newBias = model.bias - lr * error
+
+  // Track whether the model's prediction agreed with the outcome
+  const predictedWin = prediction >= 0.5
+  const correct = predictedWin === won
+  const newSampleCount = model.sampleCount + 1
+  const newCorrectCount = model.correctCount + (correct ? 1 : 0)
+  // Exponential rolling accuracy (alpha=0.1)
+  const newRollingAccuracy =
+    model.sampleCount === 0
+      ? correct
+        ? 1
+        : 0
+      : model.rollingAccuracy * 0.9 + (correct ? 1 : 0) * 0.1
+
+  await db
+    .update(mlModel)
+    .set({
+      weights: newWeights,
+      bias: newBias,
+      sampleCount: newSampleCount,
+      correctCount: newCorrectCount,
+      rollingAccuracy: newRollingAccuracy,
+      updatedAt: sql`NOW()`,
+    })
+    .where(eq(mlModel.id, 1))
+
+  await db.insert(tradeFeatures).values({
+    tradeId,
+    positionId,
+    features: features as unknown as Record<string, number>,
+    label,
+  })
+
+  return {
+    weights: newWeights,
+    bias: newBias,
+    sampleCount: newSampleCount,
+    correctCount: newCorrectCount,
+    rollingAccuracy: newRollingAccuracy,
+  }
 }

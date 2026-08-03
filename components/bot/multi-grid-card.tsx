@@ -181,6 +181,37 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
   }
 
   const [makerBusy, setMakerBusy] = useState(false)
+  const [clearing, setClearing] = useState(false)
+  const [directionBusy, setDirectionBusy] = useState(false)
+  const handleToggleDirection = async () => {
+    setDirectionBusy(true)
+    try {
+      await fetch("/api/bot/grid-config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: grid.symbol, timeframe: grid.timeframe, direction: grid.direction === "long" ? "short" : "long" }),
+      })
+      onRefresh()
+    } catch (err) {
+      console.error("Failed to toggle direction:", err)
+    } finally {
+      setDirectionBusy(false)
+    }
+  }
+  const handleClearLadder = async () => {
+    if (!window.confirm(`Clear all pending orders for ${grid.symbol}? This will cancel all open buy/sell orders.`)) return
+    setClearing(true)
+    try {
+      const res = await fetch(`/api/bot/grid-ladder?symbol=${encodeURIComponent(grid.symbol)}&timeframe=${encodeURIComponent(grid.timeframe)}`, { method: "DELETE" })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? "Failed to clear")
+      onRefresh()
+    } catch (err) {
+      console.error("Failed to clear ladder:", err)
+    } finally {
+      setClearing(false)
+    }
+  }
   const handleToggleMaker = async () => {
     setMakerBusy(true)
     try {
@@ -260,6 +291,14 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
           >
             {makerBusy ? "…" : grid.makerMode ? "MAKER" : "market"}
           </Badge>
+          <Badge
+            variant="outline"
+            className={`shrink-0 cursor-pointer ${grid.direction === "short" ? "border-danger/40 bg-danger/15 text-danger" : "border-success/40 bg-success/15 text-success"}`}
+            onClick={handleToggleDirection}
+            title="Toggle direction (long/short)"
+          >
+            {directionBusy ? "…" : grid.direction === "short" ? "SHORT" : "LONG"}
+          </Badge>
         </div>
         <div className="flex items-center gap-2">
           {editing ? (
@@ -268,6 +307,16 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
               <input type="number" value={atrMult} onChange={e => setAtrMult(Number(e.target.value))} className="w-14 rounded border bg-background px-1 py-0.5 font-mono text-xs" min={0.1} max={5} step={0.1} title="ATR Multiplier" />
               <input type="number" value={budget} onChange={e => setBudget(Number(e.target.value))} className="w-12 rounded border bg-background px-1 py-0.5 font-mono text-xs" min={1} max={100} title="Budget %" />
               <input type="number" value={lev} onChange={e => setLev(Number(e.target.value))} className="w-10 rounded border bg-background px-1 py-0.5 font-mono text-xs" min={1} max={10} title="Leverage" />
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground"
+                onClick={handleClearLadder}
+                disabled={clearing}
+                title="Cancel all pending orders and reset the ladder"
+              >
+                {clearing ? "…" : "Clear"}
+              </Button>
               <Button size="sm" variant="default" className="h-6 px-2 text-xs" onClick={handleSave} disabled={saving}>{saving ? "…" : "Save"}</Button>
               <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => setEditing(false)}>✕</Button>
             </>
