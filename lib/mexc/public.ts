@@ -17,12 +17,42 @@ export async function fetchKlines(symbol: string, interval: string, limit = 200)
 }
 
 export async function fetchTicker(symbol: string): Promise<Ticker> {
-  const res = await fetch(`${BASE_URL}/ticker?symbol=${symbol}`, { cache: "no-store" })
-  if (!res.ok) throw new Error(`MEXC ticker fetch failed: ${res.status}`)
-  const json = await res.json()
-  if (!json.success || !json.data) throw new Error("MEXC ticker response unsuccessful")
-  const d = json.data
-  return { symbol: d.symbol, lastPrice: d.lastPrice, fairPrice: d.fairPrice, fundingRate: d.fundingRate, riseFallRate: d.riseFallRate, volume24: d.volume24 }
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json"
+  }
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(`${BASE_URL}/ticker?symbol=${symbol}`, { cache: "no-store", headers })
+      if (res.status === 429) {
+        // Rate limited, wait 500ms and retry
+        await new Promise(r => setTimeout(r, 500))
+        continue
+      }
+      if (!res.ok) throw new Error(`MEXC ticker fetch failed: ${res.status}`)
+      
+      const json = await res.json()
+      if (!json.success || !json.data) {
+        // MEXC sometimes returns 200 OK but with an error object if rate limited
+        if (json.code === 429 || json.code === 411) {
+          await new Promise(r => setTimeout(r, 500))
+          continue
+        }
+        throw new Error("MEXC ticker response unsuccessful")
+      }
+      
+      const d = json.data
+      return { symbol: d.symbol, lastPrice: d.lastPrice, fairPrice: d.fairPrice, fundingRate: d.fundingRate, riseFallRate: d.riseFallRate, volume24: d.volume24 }
+    } catch (err) {
+      if (attempt < 2) {
+        await new Promise(r => setTimeout(r, 500))
+        continue
+      }
+      throw err
+    }
+  }
+  throw new Error("MEXC ticker failed after 3 retries")
 }
 
 export async function fetchMarkets() {
