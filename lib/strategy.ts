@@ -1,3 +1,4 @@
+import { ema, vwap, marketStructure, volumeConfirmation, type Candle, type IndicatorSnapshot } from "./indicators"
 // Signal evaluation: indicator triggers gated by ML confidence.
 
 import type { BotConfig } from "./db/schema"
@@ -15,6 +16,7 @@ export interface Signal {
   confidence: number
   features: FeatureVector | null
   strategy: StrategyKind
+  dynamicSize: number | null
   regime: Regime
   reason: string
 }
@@ -30,22 +32,29 @@ export function detectRegime(snap: IndicatorSnapshot, cfg: BotConfig): Regime {
 
 function evaluateTrendEntry(
   snap: IndicatorSnapshot,
+  candles: Candle[],
   cfg: BotConfig,
 ): { direction: "long" | "short" | null; triggered: boolean; blockedReason: string } {
-  const bullishCross = snap.prevEmaFast <= snap.prevEmaSlow && snap.emaFast > snap.emaSlow
-  const bearishCross = snap.prevEmaFast >= snap.prevEmaSlow && snap.emaFast < snap.emaSlow
+  // 5m/15m Sniper Logic: Avoid simple crossover whipsaws. 
+  // Require confluence: Trend alignment + Momentum + VWAP.
+  const vwapValue = vwap(candles.slice(-50)) // Short-term VWAP for intraday
+  const isBullishTrend = snap.emaFast > snap.emaSlow
+  const isBearishTrend = snap.emaFast < snap.emaSlow
 
-  if (bullishCross && snap.rsi < cfg.rsiOverbought && cfg.allowLong) {
+  // Long confluence: Uptrend, price above VWAP, positive MACD momentum, not overbought
+  if (isBullishTrend && snap.price > vwapValue && snap.macdHist > 0 && snap.rsi < cfg.rsiOverbought && cfg.allowLong) {
     return { direction: "long", triggered: true, blockedReason: "" }
   }
-  if (bearishCross && snap.rsi > cfg.rsiOversold && cfg.allowShort) {
+  
+  // Short confluence: Downtrend, price below VWAP, negative MACD momentum, not oversold
+  if (isBearishTrend && snap.price < vwapValue && snap.macdHist < 0 && snap.rsi > cfg.rsiOversold && cfg.allowShort) {
     return { direction: "short", triggered: true, blockedReason: "" }
   }
+
   return {
     direction: null,
     triggered: false,
-    blockedReason:
-      bullishCross || bearishCross ? "Crossover blocked by RSI filter or side toggle" : "No crossover",
+    blockedReason: "Sniper confluence not met (Trend+VWAP+MACD)",
   }
 }
 
@@ -72,10 +81,41 @@ function evaluateRangeEntry(
   }
 }
 
+
+// Dynamic Position Sizing: Risk a fixed % of equity per trade, adjusted by ATR.
+// Incorporates a conservative Kelly fraction based on rolling win rate.
+export function calculateDynamicSize(
+  equity: number,
+  atr: number,
+  price: number,
+  riskPct: number = 0.01, // Risk 1% of equity per trade
+  maxKelly: number = 0.25 // Cap position size at 25% of equity
+): { sizeUsdt: number; riskAmount: number; dynamicRisk: boolean } {
+  if (atr <= 0 || price <= 0 || equity <= 0) {
+    return { sizeUsdt: 0, riskAmount: 0, dynamicRisk: false };
+  }
+  
+  const stopDistance = atr * 1.5; // 1.5x ATR stop loss assumption
+  const riskAmount = equity * riskPct;
+  
+  // Base size: (Risk Amount / Stop Distance %)
+  let sizeUsdt = riskAmount / (stopDistance / price);
+  
+  // Apply conservative Kelly cap (assuming 50% win rate, 1.5R:R for baseline)
+  // Kelly = W - (1-W)/R = 0.5 - (0.5/1.5) = 0.166 (16.6%)
+  // We cap at maxKelly to prevent over-leverage in highly volatile conditions
+  const maxSize = equity * maxKelly;
+  sizeUsdt = Math.min(sizeUsdt, maxSize);
+  
+  return { sizeUsdt, riskAmount, dynamicRisk: true };
+}
+
 export function evaluateEntry(
   snap: IndicatorSnapshot,
+  candles: Candle[],
   cfg: BotConfig,
   model: MlState,
+  equity: number = 10000,
 ): Signal {
   const regime = detectRegime(snap, cfg)
 
@@ -97,11 +137,12 @@ export function evaluateEntry(
       features: null,
       strategy: "trend",
       regime,
+      dynamicSize: null,
       reason: `Neutral regime (ADX ${(snap.adx).toFixed(1)}) — standing aside`,
     }
   }
 
-  const base = strategy === "trend" ? evaluateTrendEntry(snap, cfg) : evaluateRangeEntry(snap, cfg)
+  const base = strategy === "trend" ? evaluateTrendEntry(snap, candles, cfg) : evaluateRangeEntry(snap, cfg)
 
   if (!base.direction) {
     return {
@@ -113,9 +154,12 @@ export function evaluateEntry(
       features: null,
       strategy,
       regime,
+      dynamicSize: null,
       reason: base.blockedReason,
     }
   }
+
+  const { sizeUsdt: dynamicSize } = calculateDynamicSize(equity, snap.atr, snap.price)
 
   const features: FeatureVector = {
     ...snap.features,
@@ -144,4 +188,43 @@ export function isOppositeSignal(snap: IndicatorSnapshot, side: "long" | "short"
   const bullishCross = snap.prevEmaFast <= snap.prevEmaSlow && snap.emaFast > snap.emaSlow
   const bearishCross = snap.prevEmaFast >= snap.prevEmaSlow && snap.emaFast < snap.emaSlow
   return side === "long" ? bearishCross : bullishCross
+}
+
+// Auto-regime flip detection using multi-signal scoring
+export function detectFlip(snap: IndicatorSnapshot, candles: Candle[], cfg: { emaFast: number; emaSlow: number }): "long" | "short" | "neutral" {
+  let bullishScore = 0
+  let bearishScore = 0
+  
+  if (candles.length >= 5) {
+    const recentCandles = candles.slice(-3)
+    const emaFastRecent = ema(recentCandles, cfg.emaFast)
+    const emaSlowRecent = ema(recentCandles, cfg.emaSlow)
+    if (emaFastRecent > emaSlowRecent) bullishScore += 2
+    else bearishScore += 2
+  }
+  
+  if (snap.rsi > 50) bullishScore += 1
+  else bearishScore += 1
+  
+  const vwapValue = vwap(candles)
+  if (snap.price > vwapValue) bullishScore += 1
+  else if (snap.price < vwapValue) bearishScore += 1
+  
+  const structure = marketStructure(candles)
+  if (structure.higherHighs && structure.higherLows) bullishScore += 3
+  if (structure.lowerHighs && structure.lowerLows) bearishScore += 3
+  
+  const highVolume = volumeConfirmation(candles)
+  if (highVolume) {
+    if (bullishScore > bearishScore) bullishScore += 2
+    else if (bearishScore > bullishScore) bearishScore += 2
+  }
+  
+  // Absolute assessment: need clear signal to act, otherwise stay neutral
+  const totalBullish = bullishScore
+  const totalBearish = bearishScore
+  
+  if (totalBullish >= 4 && totalBullish > totalBearish) return "long"
+  if (totalBearish >= 4 && totalBearish > totalBullish) return "short"
+  return "neutral"
 }

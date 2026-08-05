@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server"
+import { initRealtimeEngine } from "@/lib/engine"
 import { runTick } from "@/lib/engine"
 
 export const dynamic = "force-dynamic"
@@ -15,6 +16,8 @@ export async function GET(request: Request) {
     }
   }
 
+  await initRealtimeEngine("BTC_USDT", "Min5") // Start WS for BTC
+  await initRealtimeEngine("SOL_USDT", "Min5") // Start WS for SOL
   const result = await runTick()
   return NextResponse.json(result)
 }

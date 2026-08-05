@@ -1,0 +1,123 @@
+import WebSocket from "ws"
+import { log } from "../grid" // Reusing your DB logger
+
+export interface KlineUpdate {
+  symbol: string
+  open: number
+  close: number
+  high: number
+  low: number
+  volume: number
+  startTime: number
+  isClosed: boolean
+}
+
+export class MexcWebSocketManager {
+  private ws: WebSocket | null = null
+  private url: string
+  private symbol: string
+  private interval: string
+  private onKline: (kline: KlineUpdate) => void
+  private isReconnecting = false
+  private heartbeatInterval: NodeJS.Timeout | null = null
+  private lastKlineTime: number | null = null
+
+  constructor(symbol: string, interval: string, onKline: (kline: KlineUpdate) => void) {
+    // MEXC Contract (Futures) WebSocket endpoint
+    this.url = "wss://contract.mexc.com/edge"
+    this.symbol = symbol.toLowerCase()
+    // MEXC Contract intervals are like Min1, Min5, Min15 (capitalized)
+    this.interval = interval.charAt(0).toUpperCase() + interval.slice(1)
+    this.onKline = onKline
+  }
+
+  public connect() {
+    log("info", `[WS] Connecting to MEXC Contract WebSocket for ${this.symbol.toUpperCase()}...`)
+    this.ws = new WebSocket(this.url)
+
+    this.ws.on("open", () => {
+      log("info", `[WS] Connected. Subscribing to ${this.symbol.toUpperCase()} ${this.interval} klines...`)
+      
+      // MEXC Contract Subscription message format
+      const subMsg = {
+        method: "sub.kline",
+        param: {
+          symbol: this.symbol.toUpperCase(),
+          interval: this.interval
+        }
+      }
+      this.ws?.send(JSON.stringify(subMsg))
+
+      // Clear any existing heartbeat
+      if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
+      
+      // Proactively send ping every 10s to prevent MEXC 30s heartbeat timeout
+      this.heartbeatInterval = setInterval(() => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ method: "ping" })) // MEXC contract expects a plain string "ping"
+        }
+      }, 10000)
+    })
+
+    this.ws.on("message", (data: WebSocket.RawData) => {
+      const msg = data.toString()
+      
+      // MEXC contract sends a plain string "pong" back
+      if (msg === "pong") return
+
+      try {
+        const parsed = JSON.parse(msg)
+
+        // Parse contract kline data (MEXC format: { data: { t, o, c, h, l, ... } })
+        if (parsed.channel && parsed.channel.startsWith("push.kline") && parsed.data) {
+          const k = parsed.data
+          const currentStartTime = k.t
+          
+          // If we have a previous timestamp, and the new timestamp is greater, 
+          // it means the previous candle just closed!
+          if (this.lastKlineTime !== null && currentStartTime > this.lastKlineTime) {
+            const kline: KlineUpdate = {
+              symbol: k.symbol || this.symbol.toUpperCase(),
+              open: parseFloat(k.o),
+              close: parseFloat(k.c),
+              high: parseFloat(k.h),
+              low: parseFloat(k.l),
+              volume: parseFloat(k.a), // 'a' is base volume in MEXC contract
+              startTime: this.lastKlineTime,
+              isClosed: true
+            }
+            this.onKline(kline)
+          }
+          
+          // Update the last known timestamp
+          this.lastKlineTime = currentStartTime
+        }
+      } catch (err) {
+        // Silently ignore non-JSON or unexpected messages
+      }
+    })
+
+    this.ws.on("error", (err: Error) => {
+      log("error", `[WS] Error: ${err.message}`)
+    })
+
+    this.ws.on("close", () => {
+      log("info", `[WS] Disconnected. Reconnecting in 3s...`)
+      if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
+      if (!this.isReconnecting) {
+        this.isReconnecting = true
+        setTimeout(() => {
+          this.isReconnecting = false
+          this.connect()
+        }, 3000)
+      }
+    })
+  }
+
+  public disconnect() {
+    if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
+    this.ws?.close()
+    this.ws = null
+    log("info", `[WS] Disconnected from ${this.symbol.toUpperCase()}.`)
+  }
+}

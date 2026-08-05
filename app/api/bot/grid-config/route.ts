@@ -18,7 +18,7 @@ const GRID_TEMPLATE = {
   feeMarginMult: 3,
   autoPause: true,
   makerMode: true,         // Default to maker for all new pairs
-  direction: "long",
+  direction: "auto",
 }
 
 export async function GET() {

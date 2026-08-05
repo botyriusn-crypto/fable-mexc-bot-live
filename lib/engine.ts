@@ -23,6 +23,13 @@ import { loadModel, trainOnTrade, gateEntry } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs } from "./grid"
 import { computeInitialStops, evaluateExit } from "./exits"
+import { MexcWebSocketManager } from "./mexc/ws"
+
+// Chandelier Exit calculation: Trails from highest high/lowest low
+function calcChandelierExit(isLong: boolean, extremePrice: number, atr: number, mult: number): number {
+  const safeMult = Math.max(1, mult) // Ensure multiplier is at least 1
+  return isLong ? extremePrice - (atr * safeMult) : extremePrice + (atr * safeMult)
+}
 
 const TAKER_FEE = 0.0002 // 0.02%
 
@@ -390,12 +397,30 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         marks.set(gc.symbol, snap.price)
         // Regime-aware auto-tuning: wider ATR in trending, tighter in ranging
         const regime = detectRegime(snap, { ...cfg, symbol: gc.symbol, timeframe: gc.timeframe })
-        if (regime === "trend" && gc.rangeAtrMult < 2.0) {
-          await db.update(gridConfigs).set({ rangeAtrMult: Math.min(gc.rangeAtrMult * 1.3, 3.0) }).where(eq(gridConfigs.id, gc.id))
-          gc.rangeAtrMult = Math.min(gc.rangeAtrMult * 1.3, 3.0)
-        } else if (regime === "range" && gc.rangeAtrMult > 0.8) {
-          await db.update(gridConfigs).set({ rangeAtrMult: Math.max(gc.rangeAtrMult * 0.9, 0.5) }).where(eq(gridConfigs.id, gc.id))
-          gc.rangeAtrMult = Math.max(gc.rangeAtrMult * 0.9, 0.5)
+        if (gc.direction === "auto") {
+          // 1. Auto-Tune ATR Spacing
+          if (regime === "trend" && gc.rangeAtrMult < 2.0) {
+            await db.update(gridConfigs).set({ rangeAtrMult: Math.min(gc.rangeAtrMult * 1.3, 3.0) }).where(eq(gridConfigs.id, gc.id))
+            gc.rangeAtrMult = Math.min(gc.rangeAtrMult * 1.3, 3.0)
+          } else if (regime === "range" && gc.rangeAtrMult > 0.8) {
+            await db.update(gridConfigs).set({ rangeAtrMult: Math.max(gc.rangeAtrMult * 0.9, 0.5) }).where(eq(gridConfigs.id, gc.id))
+            gc.rangeAtrMult = Math.max(gc.rangeAtrMult * 0.9, 0.5)
+          }
+
+          // 2. Auto-Direction Detection (Macro Trend: EMA 50 vs EMA 200)
+          const closes = candles.map(c => c.close)
+          const getEma = (vals: number[], p: number) => {
+            const k = 2 / (p + 1); let prev = vals[0] || 0;
+            for (let i = 0; i < vals.length; i++) { prev = i === 0 ? vals[0] : vals[i] * k + prev * (1 - k); }
+            return prev;
+          }
+          const emaFast = getEma(closes, 50)
+          const emaSlow = getEma(closes, 200)
+          if (emaFast > emaSlow) {
+            (gc as any)._autoSide = "long"
+          } else {
+            (gc as any)._autoSide = "short"
+          }
         }
         await runGridTick(cfg, gc, snap, regime, exchange)
       } catch (err) {
@@ -437,7 +462,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
 
         if (isSelected) await resolveClassifierOutcomes(symbol, timeframe, candles)
         if (isSelected && !marketPosition) {
-          const signal = evaluateEntry(snap, marketCfg, model)
+          const signal = evaluateEntry(snap, candles, marketCfg, model)
           if (signal.baseTriggered && signal.candidateDirection && signal.features) {
             const lorentzian = classifyLorentzian(candles, lorentzianOptions(marketCfg))
             const confirmation = combineConfirmation(
@@ -534,4 +559,31 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     await log("error", `Tick failed: ${message}`)
     return { status: "error", detail: message }
   }
+}
+
+// --- Real-time WebSocket Engine ---
+declare global {
+  // eslint-disable-next-line no-var
+  var __wsManagers: Record<string, MexcWebSocketManager> | undefined
+}
+
+export async function initRealtimeEngine(symbol: string, timeframe: string) {
+  if (!globalThis.__wsManagers) globalThis.__wsManagers = {}
+  // If a WS already exists for this symbol, don't create a duplicate
+  if (globalThis.__wsManagers[symbol]) return
+  
+  console.log(`[Engine] Initializing real-time WebSocket engine for ${symbol}...`)
+  const manager = new MexcWebSocketManager(symbol, timeframe, async (kline) => {
+    if (kline.isClosed) {
+      console.log(`[WS] ${symbol} candle closed. Triggering instant tick...`)
+      try {
+        await runTick()
+      } catch (err) {
+        console.error(`[WS] Error during ${symbol} WS-triggered tick:`, err)
+      }
+    }
+  })
+  
+  globalThis.__wsManagers[symbol] = manager
+  manager.connect()
 }

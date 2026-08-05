@@ -2,14 +2,22 @@ import { drizzle } from "drizzle-orm/node-postgres"
 import { Pool } from "pg"
 import * as schema from "./schema"
 
-// Neon-compatible pool with retry and keep-alive
+// Get connection string and strip any quotes
+let dbUrl = (process.env.DATABASE_URL || "").replace(/"/g, "")
+if (dbUrl.includes("sslmode=require") && !dbUrl.includes("uselibpqcompat")) {
+  dbUrl += (dbUrl.includes("?") ? "&" : "?") + "uselibpqcompat=true"
+}
+
+// Debug: Log sanitized connection string (hides password)
+console.log('[DB] Connecting to:', dbUrl.replace(/:[^:@]+@/, ':****@'))
+
+// Configure pool for Neon with proper settings
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: 5,
-  idleTimeoutMillis: 30000,
+  connectionString: dbUrl,
+  ssl: { rejectUnauthorized: false },
+  max: 2, // Keep pool small for serverless
+  idleTimeoutMillis: 10000, // Shorter idle timeout
   connectionTimeoutMillis: 10000,
-  keepAlive: true,
-  keepAliveInitialDelayMillis: 10000,
 })
 
 // Retry wrapper for Neon cold starts
@@ -19,8 +27,10 @@ pool.query = async (...args: any[]) => {
     try {
       return await originalQuery(...args)
     } catch (err: any) {
-      if (err?.code === 'ETIMEDOUT' && attempt < 2) {
-        console.log(`[DB] Neon waking up, retry ${attempt + 1}/3...`)
+      console.error('[DB] Query error:', err.message, 'Code:', err.code)
+      // Retry on common transient network errors (Neon cold starts, DNS drops, etc.)
+      if (['ETIMEDOUT', 'ENETUNREACH', 'ECONNRESET', 'EAI_AGAIN'].includes(err?.code) && attempt < 2) {
+        console.log(`[DB] Connection issue, retry ${attempt + 1}/3...`)
         await new Promise(r => setTimeout(r, 5000))
         continue
       }
@@ -28,4 +38,5 @@ pool.query = async (...args: any[]) => {
     }
   }
 }
+
 export const db = drizzle(pool, { schema })

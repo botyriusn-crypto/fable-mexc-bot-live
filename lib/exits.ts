@@ -19,14 +19,27 @@ export interface ExitDecision {
   momentum: number
 }
 
+// Safety margin against liquidation: isolated-margin futures liquidate at
+// roughly entryPrice/leverage away from entry (ignoring maintenance margin,
+// which only tightens this further). Without a cap, ATR-based stop sizing
+// can place the stop-loss BEYOND where the exchange would already have
+// force-liquidated the position at high leverage — meaning the bot's own
+// safety net never fires; the exchange's liquidation does, at a worse price
+// plus a liquidation penalty. Capping SL at a fraction of that distance
+// guarantees the coded stop always triggers well before liquidation.
+const LIQUIDATION_SAFETY_FACTOR = 0.75
+
 export function computeInitialStops(
   side: "long" | "short",
   entryPrice: number,
   atrValue: number,
-  cfg: Pick<BotConfig, "slAtrMult" | "tpAtrMult">,
+  cfg: Pick<BotConfig, "slAtrMult" | "tpAtrMult" | "leverage">,
 ): { stopLoss: number; takeProfit: number } {
-  const slDist = atrValue * cfg.slAtrMult
+  const atrSlDist = atrValue * cfg.slAtrMult
   const tpDist = atrValue * cfg.tpAtrMult
+  const liquidationDistApprox = entryPrice / cfg.leverage
+  const maxSafeSlDist = liquidationDistApprox * LIQUIDATION_SAFETY_FACTOR
+  const slDist = Math.min(atrSlDist, maxSafeSlDist)
   return side === "long"
     ? { stopLoss: entryPrice - slDist, takeProfit: entryPrice + tpDist }
     : { stopLoss: entryPrice + slDist, takeProfit: entryPrice - tpDist }

@@ -49,6 +49,7 @@ const neutralResult = (reason: string): LorentzianResult => ({
 })
 
 function normalize(values: number[], smooth = 1): number[] {
+  // Strictly chronological EMA to prevent look-ahead bias during backtest iteration
   const smoothed = smooth > 1 ? ema(values, smooth) : values
   return smoothed.map((value) => Math.max(0, Math.min(1, value / 100)))
 }
@@ -104,14 +105,15 @@ function rationalQuadratic(values: number[], lookback = 8, relativeWeight = 8): 
 }
 
 export function classifyLorentzian(candles: Candle[], options: LorentzianOptions): LorentzianResult {
+  const sniperOptions = options
   if (candles.length < 80) return neutralResult(`Warming up: ${candles.length}/80 closed candles`)
 
   const rows = featureRows(candles)
   const closes = candles.map((c) => c.close)
   const currentIndex = candles.length - 1
   const current = rows[currentIndex]
-  const first = Math.max(30, candles.length - Math.max(80, options.lookback))
-  const lastLabeled = currentIndex - 4
+  const first = Math.max(30, candles.length - Math.max(80, sniperOptions.lookback))
+  const lastLabeled = currentIndex - 4 // Hard stop to prevent future data peeking
   const candidates: Array<{ distance: number; label: number; index: number }> = []
 
   // Four-bar labels deliberately stop four bars before the current closed candle.
@@ -125,7 +127,7 @@ export function classifyLorentzian(candles: Candle[], options: LorentzianOptions
 
   const neighbors = candidates
     .sort((a, b) => a.distance - b.distance || a.index - b.index)
-    .slice(0, Math.max(1, options.neighbors))
+    .slice(0, Math.max(1, sniperOptions.neighbors))
   if (neighbors.length === 0) return neutralResult("No labeled neighbors available")
 
   const vote = neighbors.reduce((sum, neighbor) => sum + neighbor.label, 0)
@@ -134,24 +136,24 @@ export function classifyLorentzian(candles: Candle[], options: LorentzianOptions
 
   const atrFast = atr(candles, 1)[currentIndex]
   const atrSlow = atr(candles, 10)[currentIndex]
-  const volatility = !options.useVolatilityFilter || atrFast > atrSlow
+  const volatility = !sniperOptions.useVolatilityFilter || atrFast > atrSlow
   const adxValue = adx(candles, 14)[currentIndex]
-  const adxPass = !options.useAdxFilter || adxValue >= options.adxThreshold
+  const adxPass = !sniperOptions.useAdxFilter || adxValue >= sniperOptions.adxThreshold
   const longEma = ema(closes, 200)
   const slope = currentIndex < 4 || longEma[currentIndex - 4] === 0
     ? 0
     : ((longEma[currentIndex] - longEma[currentIndex - 4]) / longEma[currentIndex - 4]) * 100
-  const regime = !options.useRegimeFilter || Math.abs(slope) >= Math.abs(options.regimeThreshold)
+  const regime = !sniperOptions.useRegimeFilter || Math.abs(slope) >= Math.abs(sniperOptions.regimeThreshold)
   const kernel = rationalQuadratic(closes)
   const kernelDirection: LorentzianDirection = kernel[currentIndex] > kernel[currentIndex - 1]
     ? "long"
     : kernel[currentIndex] < kernel[currentIndex - 1]
       ? "short"
       : "neutral"
-  const kernelPass = !options.useKernelFilter || direction === kernelDirection
+  const kernelPass = !sniperOptions.useKernelFilter || direction === kernelDirection
   const filters = { volatility, regime, adx: adxPass, kernel: kernelPass }
   const filtersPass = Object.values(filters).every(Boolean)
-  const allowed = direction !== "neutral" && confidence >= options.confidenceThreshold && filtersPass
+  const allowed = direction !== "neutral" && confidence >= sniperOptions.confidenceThreshold && filtersPass
 
   let reason = `${direction} vote ${vote > 0 ? "+" : ""}${vote}/${neighbors.length} (${Math.round(confidence * 100)}%)`
   if (!filtersPass) reason += `; blocked by ${Object.entries(filters).filter(([, pass]) => !pass).map(([name]) => name).join(", ")}`

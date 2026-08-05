@@ -241,9 +241,126 @@ export function computeSnapshot(
 
 // Composite momentum score in [0, 1] — used for hype detection.
 // direction: 1 for long positions, -1 for short.
+export function vwap(candles: Candle[]): number {
+  if (candles.length === 0) return 0
+  let cumulativeTPV = 0
+  let cumulativeVolume = 0
+  for (const c of candles) {
+    const typicalPrice = (c.high + c.low + c.close) / 3
+    const volume = c.volume || 0
+    cumulativeTPV += typicalPrice * volume
+    cumulativeVolume += volume
+  }
+  return cumulativeVolume > 0 ? cumulativeTPV / cumulativeVolume : 0
+}
+
+export function marketStructure(candles: Candle[], lookback: number = 20): { higherHighs: boolean, higherLows: boolean, lowerHighs: boolean, lowerLows: boolean } {
+  if (candles.length < lookback) return { higherHighs: false, higherLows: false, lowerHighs: false, lowerLows: false }
+  const slice = candles.slice(-lookback)
+  const highs = slice.map(c => c.high)
+  const lows = slice.map(c => c.low)
+  const swingHighs: number[] = []
+  const swingLows: number[] = []
+  for (let i = 2; i < slice.length - 2; i++) {
+    if (highs[i] > highs[i-1] && highs[i] > highs[i-2] && highs[i] > highs[i+1] && highs[i] > highs[i+2]) swingHighs.push(highs[i])
+    if (lows[i] < lows[i-1] && lows[i] < lows[i-2] && lows[i] < lows[i+1] && lows[i] < lows[i+2]) swingLows.push(lows[i])
+  }
+  const last3Highs = swingHighs.slice(-3)
+  const last3Lows = swingLows.slice(-3)
+  return {
+    higherHighs: last3Highs.length >= 2 && last3Highs[last3Highs.length-1] > last3Highs[last3Highs.length-2],
+    higherLows: last3Lows.length >= 2 && last3Lows[last3Lows.length-1] > last3Lows[last3Lows.length-2],
+    lowerHighs: last3Highs.length >= 2 && last3Highs[last3Highs.length-1] < last3Highs[last3Highs.length-2],
+    lowerLows: last3Lows.length >= 2 && last3Lows[last3Lows.length-1] < last3Lows[last3Lows.length-2]
+  }
+}
+
+export function volumeConfirmation(candles: Candle[], threshold: number = 1.5): boolean {
+  if (candles.length < 20) return false
+  const recent = candles.slice(-5)
+  const older = candles.slice(-20, -5)
+  const avgRecentVolume = recent.reduce((s, c) => s + (c.volume || 0), 0) / recent.length
+  const avgOlderVolume = older.reduce((s, c) => s + (c.volume || 0), 0) / older.length
+  return avgOlderVolume > 0 && (avgRecentVolume / avgOlderVolume) >= threshold
+}
+
 export function momentumScore(snap: IndicatorSnapshot, direction: 1 | -1): number {
   const rocComponent = clamp((snap.roc * direction) / 3, 0, 1) // strong directional ROC
   const volComponent = clamp((snap.volSurge - 1) / 2, 0, 1) // volume surge above average
   const adxComponent = clamp((snap.adx - 20) / 30, 0, 1) // trending market
   return rocComponent * 0.45 + volComponent * 0.3 + adxComponent * 0.25
+}
+
+// Get features from candles with validation. Returns all 9 features as a Record.
+// Validates that features are sane (not NaN, in reasonable range).
+export async function getFeatures(
+  candles: Candle[],
+  cfg: {
+    emaFast?: number
+    emaSlow?: number
+    rsiPeriod?: number
+    atrPeriod?: number
+  } = {},
+): Promise<Record<string, number>> {
+  if (!candles || candles.length < 50) {
+    // Not enough candles; return neutral features
+    return {
+      emaSpread: 0,
+      crossover: 0,
+      rsi: 0,
+      macdHist: 0,
+      atrPct: 0,
+      roc: 0,
+      adx: 0,
+      volSurge: 0,
+      sideLong: 0,
+    }
+  }
+
+  try {
+    const snap = computeSnapshot(candles, {
+      emaFast: cfg.emaFast ?? 9,
+      emaSlow: cfg.emaSlow ?? 21,
+      rsiPeriod: cfg.rsiPeriod ?? 14,
+      atrPeriod: cfg.atrPeriod ?? 14,
+    })
+
+    // Determine sideLong: 1 if fast EMA above slow EMA (bullish), -1 otherwise
+    const sideLong = snap.emaFast > snap.emaSlow ? 1 : -1
+
+    const features: Record<string, number> = {
+      emaSpread: snap.features.emaSpread,
+      crossover: snap.features.crossover,
+      rsi: snap.features.rsi,
+      macdHist: snap.features.macdHist,
+      atrPct: snap.features.atrPct,
+      roc: snap.features.roc,
+      adx: snap.features.adx,
+      volSurge: snap.features.volSurge,
+      sideLong,
+    }
+
+    // Validate all features
+    for (const [name, value] of Object.entries(features)) {
+      if (!isFinite(value)) {
+        console.warn(`[indicators] Feature ${name} is not finite (${value}), resetting to 0`)
+        features[name] = 0
+      }
+    }
+
+    return features
+  } catch (err) {
+    console.error(`[indicators] getFeatures failed:`, err)
+    return {
+      emaSpread: 0,
+      crossover: 0,
+      rsi: 0,
+      macdHist: 0,
+      atrPct: 0,
+      roc: 0,
+      adx: 0,
+      volSurge: 0,
+      sideLong: 0,
+    }
+  }
 }

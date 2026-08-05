@@ -20,6 +20,17 @@ export function ActivityLog({ state }: { state: BotState }) {
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="text-sm font-medium text-muted-foreground">Activity Log</CardTitle>
+          <button
+            onClick={async () => {
+              if (confirm("Clear all activity logs?")) {
+                await fetch("/api/bot/clear-logs", { method: "DELETE" })
+                window.location.reload()
+              }
+            }}
+            className="ml-auto text-[10px] text-muted-foreground hover:text-foreground px-2 py-0.5 rounded border border-border hover:bg-muted transition-colors"
+          >
+            Clear
+          </button>
       </CardHeader>
       <CardContent>
         {state.logs.length === 0 ? (

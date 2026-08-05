@@ -1,0 +1,101 @@
+import crypto from "crypto"
+import { roundMexcQuantity } from "./precision"
+
+const BASE_URL = "https://contract.mexc.com/api/v1/private"
+
+function sign(apiKey: string, secret: string, timestamp: string, paramString: string): string {
+  const signStr = `${apiKey}${timestamp}${paramString}`
+  return crypto.createHmac("sha256", secret).update(signStr).digest("hex")
+}
+
+async function privateRequest(
+  method: "GET" | "POST" | "DELETE",
+  path: string,
+  params: Record<string, unknown> = {},
+): Promise<unknown> {
+  const apiKey = process.env.MEXC_API_KEY
+  const secret = process.env.MEXC_API_SECRET
+  if (!apiKey || !secret) throw new Error("MEXC_API_KEY / MEXC_API_SECRET not configured")
+
+  const timestamp = Date.now().toString()
+  let url = `${BASE_URL}${path}`
+  let body = ""
+  let paramString = ""
+
+  if (method === "GET") {
+    const qs = Object.entries(params).map(([k, v]) => `${k}=${v}`).join("&")
+    paramString = qs
+    if (qs) url += `?${qs}`
+  } else {
+    body = JSON.stringify(params)
+    paramString = body
+  }
+
+  const signature = sign(apiKey, secret, timestamp, paramString)
+
+  const res = await fetch(url, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      ApiKey: apiKey,
+      "Request-Time": timestamp,
+      Signature: signature,
+    },
+    body: method === "GET" ? undefined : body,
+    cache: "no-store",
+  })
+
+  const json = await res.json().catch(() => null)
+
+  // MEXC returns HTTP 200 even for business-logic failures (e.g. a
+  // rejected order due to precision, insufficient margin, etc). The
+  // real success/failure indicator lives in the body as `success`/
+  // `code`, NOT the HTTP status -- checking only `res.ok` (as before)
+  // meant rejected orders were silently treated as successful.
+  const businessFailed =
+    json?.success === false || (typeof json?.code === "number" && json.code !== 0)
+
+  if (!res.ok || businessFailed) {
+    throw new Error(
+      `MEXC private API error (${path}): ${json?.code ?? res.status} ${json?.message ?? res.statusText}`,
+    )
+  }
+
+  if (path === "/order/create") {
+    console.log("MEXC order response:", JSON.stringify(json))
+  }
+
+  return json
+}
+
+export async function placeMarketOrder(opts: {
+  symbol: string
+  side: 1 | 2 | 3 | 4
+  volume: number
+  leverage: number
+  price?: number
+}): Promise<unknown> {
+  const vol = roundMexcQuantity(opts.symbol, opts.price ?? 0, opts.volume)
+  return privateRequest("POST", "/order/create", {
+    symbol: opts.symbol,
+    side: opts.side,
+    vol,
+    leverage: opts.leverage,
+    type: 5,
+    openType: 1,
+  })
+}
+
+export async function getAccountAssets(): Promise<unknown> {
+  const result = await privateRequest("GET", "/account/assets")
+  // MEXC returns {success: true, data: [...]} — extract the data array
+  if (result && typeof result === "object" && "data" in result) {
+    return (result as any).data
+  }
+  return result
+}
+
+export async function getOpenPositions(symbol?: string): Promise<unknown> {
+  const path = symbol ? `/position/open?symbol=${symbol}` : "/position/open"
+  return privateRequest("GET", path)
+}

@@ -186,10 +186,11 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
   const handleToggleDirection = async () => {
     setDirectionBusy(true)
     try {
+      const nextDir = grid.direction === "long" ? "short" : grid.direction === "short" ? "auto" : "long"
       await fetch("/api/bot/grid-config", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol: grid.symbol, timeframe: grid.timeframe, direction: grid.direction === "long" ? "short" : "long" }),
+        body: JSON.stringify({ symbol: grid.symbol, timeframe: grid.timeframe, direction: nextDir }),
       })
       onRefresh()
     } catch (err) {
@@ -293,11 +294,15 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
           </Badge>
           <Badge
             variant="outline"
-            className={`shrink-0 cursor-pointer ${grid.direction === "short" ? "border-danger/40 bg-danger/15 text-danger" : "border-success/40 bg-success/15 text-success"}`}
+            className={`shrink-0 cursor-pointer ${
+              grid.direction === "short" ? "border-danger/40 bg-danger/15 text-danger" 
+              : grid.direction === "auto" ? "border-chart-3/40 bg-chart-3/15 text-chart-3"
+              : "border-success/40 bg-success/15 text-success"
+            }`}
             onClick={handleToggleDirection}
-            title="Toggle direction (long/short)"
+            title="Toggle direction (long/short/auto)"
           >
-            {directionBusy ? "…" : grid.direction === "short" ? "SHORT" : "LONG"}
+            {directionBusy ? "…" : grid.direction === "short" ? "SHORT" : grid.direction === "auto" ? "AUTO" : "LONG"}
           </Badge>
         </div>
         <div className="flex items-center gap-2">
@@ -383,6 +388,26 @@ export function MultiGridCard() {
   if (!state) return null
 
   const grids: GridState[] = state.gridConfigs || []
+  const [scanning, setScanning] = useState(false)
+  const handleScanMarket = async () => {
+    setScanning(true)
+    try {
+      const res = await fetch("/api/bot/scan-coins")
+      const json = await res.json()
+      if (!json.success) throw new Error(json.error || "Scan failed")
+      
+      const picks = json.picks.map((p: any, i: number) => 
+        `${i + 1}. ${p.symbol} | Vol: $${(p.volumeUsdt/1000000).toFixed(1)}M | ATR: ${p.atrPct}% | ADX: ${p.adx}\n   Reason: ${p.reason}`
+      ).join("\n\n")
+      
+      window.alert(`Top 5 Grid Candidates:\n\n${picks}`)
+    } catch (err) {
+      console.error("Market scan failed:", err)
+      window.alert("Failed to scan market. Check logs.")
+    } finally {
+      setScanning(false)
+    }
+  }
   const totalRealized = grids.reduce((s, g) => s + g.realizedPnl, 0)
   const totalUnrealized = grids.reduce((s, g) => s + g.unrealizedPnl, 0)
   const totalOrders = grids.reduce((s, g) => s + g.buyCount + g.sellCount, 0)
@@ -402,6 +427,16 @@ export function MultiGridCard() {
           <span className={totalRealized >= 0 ? "text-success" : "text-danger"}>Real: {totalRealized >= 0 ? "+" : ""}{fmt(totalRealized, 2)}</span>
           <span className={totalUnrealized >= 0 ? "text-success" : "text-danger"}>Unreal: {totalUnrealized >= 0 ? "+" : ""}{fmt(totalUnrealized, 2)}</span>
           <AddPairControl existingSymbols={grids.map((g) => g.symbol)} onAdded={handleRefresh} />
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 border-success/50 bg-success/15 text-success hover:bg-success/25 hover:text-success"
+            onClick={handleScanMarket}
+            disabled={scanning}
+            title="Scan MEXC for the best grid trading coins right now"
+          >
+            {scanning ? "Scanning..." : "Scan Market"}
+          </Button>
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">

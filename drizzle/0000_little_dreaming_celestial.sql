@@ -1,0 +1,222 @@
+CREATE TABLE "ai_recommendations" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"symbol" text NOT NULL,
+	"timeframe" text NOT NULL,
+	"analysis_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"trade_count" integer NOT NULL,
+	"avg_return" double precision NOT NULL,
+	"win_rate" double precision NOT NULL,
+	"current_settings" jsonb NOT NULL,
+	"recommendations" jsonb NOT NULL,
+	"status" text DEFAULT 'pending' NOT NULL,
+	"applied_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "bot_config" (
+	"id" integer PRIMARY KEY DEFAULT 1 NOT NULL,
+	"symbol" text DEFAULT 'BTC_USDT' NOT NULL,
+	"timeframe" text DEFAULT 'Min5' NOT NULL,
+	"ema_fast" integer DEFAULT 9 NOT NULL,
+	"ema_slow" integer DEFAULT 21 NOT NULL,
+	"rsi_period" integer DEFAULT 14 NOT NULL,
+	"rsi_overbought" double precision DEFAULT 70 NOT NULL,
+	"rsi_oversold" double precision DEFAULT 30 NOT NULL,
+	"atr_period" integer DEFAULT 14 NOT NULL,
+	"strategy_mode" text DEFAULT 'auto' NOT NULL,
+	"adx_trend_threshold" double precision DEFAULT 25 NOT NULL,
+	"adx_range_threshold" double precision DEFAULT 20 NOT NULL,
+	"bb_period" integer DEFAULT 20 NOT NULL,
+	"bb_std" double precision DEFAULT 2 NOT NULL,
+	"sl_atr_mult" double precision DEFAULT 1.5 NOT NULL,
+	"tp_atr_mult" double precision DEFAULT 2.5 NOT NULL,
+	"trail_atr_mult" double precision DEFAULT 1.2 NOT NULL,
+	"momentum_threshold" double precision DEFAULT 0.6 NOT NULL,
+	"ml_confidence_threshold" double precision DEFAULT 0.55 NOT NULL,
+	"ml_learning_rate" double precision DEFAULT 0.05 NOT NULL,
+	"confirmation_mode" text DEFAULT 'observe' NOT NULL,
+	"lorentzian_confidence_threshold" double precision DEFAULT 0.25 NOT NULL,
+	"lorentzian_neighbors" integer DEFAULT 8 NOT NULL,
+	"lorentzian_lookback" integer DEFAULT 500 NOT NULL,
+	"lorentzian_use_volatility_filter" boolean DEFAULT true NOT NULL,
+	"lorentzian_use_regime_filter" boolean DEFAULT true NOT NULL,
+	"lorentzian_use_adx_filter" boolean DEFAULT false NOT NULL,
+	"lorentzian_regime_threshold" double precision DEFAULT -0.1 NOT NULL,
+	"lorentzian_adx_threshold" integer DEFAULT 20 NOT NULL,
+	"lorentzian_kernel_filter" boolean DEFAULT true NOT NULL,
+	"lorentzian_webhooks" boolean DEFAULT false NOT NULL,
+	"leverage" integer DEFAULT 5 NOT NULL,
+	"position_size_usdt" double precision DEFAULT 500 NOT NULL,
+	"allow_long" boolean DEFAULT true NOT NULL,
+	"allow_short" boolean DEFAULT true NOT NULL,
+	"grid_enabled" boolean DEFAULT false NOT NULL,
+	"grid_levels" integer DEFAULT 10 NOT NULL,
+	"grid_range_atr_mult" double precision DEFAULT 2 NOT NULL,
+	"grid_budget_pct" double precision DEFAULT 30 NOT NULL,
+	"grid_leverage" integer DEFAULT 2 NOT NULL,
+	"grid_auto_pause" boolean DEFAULT true NOT NULL,
+	"grid_paused" boolean DEFAULT false NOT NULL,
+	"grid_fee_margin_mult" double precision DEFAULT 3 NOT NULL,
+	"grid_center" double precision,
+	"grid_lower" double precision,
+	"grid_upper" double precision,
+	"grid_spacing" double precision,
+	"grid_effective_levels" integer,
+	"exchange" text DEFAULT 'mexc' NOT NULL,
+	"ai_advisor_enabled" boolean DEFAULT false NOT NULL,
+	"ai_analysis_schedule" text DEFAULT 'manual' NOT NULL,
+	"mode" text DEFAULT 'paper' NOT NULL,
+	"status" text DEFAULT 'stopped' NOT NULL,
+	"paper_balance" double precision DEFAULT 10000 NOT NULL,
+	"paper_starting_balance" double precision DEFAULT 10000 NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "bot_logs" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"level" text DEFAULT 'info' NOT NULL,
+	"message" text NOT NULL,
+	"details" jsonb,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "classifier_decisions" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"symbol" text NOT NULL,
+	"timeframe" text NOT NULL,
+	"candle_time" integer NOT NULL,
+	"candidate_direction" text NOT NULL,
+	"strategy" text NOT NULL,
+	"regime" text NOT NULL,
+	"entry_price" double precision NOT NULL,
+	"confirmation_mode" text NOT NULL,
+	"logistic_allowed" boolean NOT NULL,
+	"logistic_confidence" double precision NOT NULL,
+	"lorentzian_direction" text NOT NULL,
+	"lorentzian_vote" integer NOT NULL,
+	"lorentzian_confidence" double precision NOT NULL,
+	"lorentzian_allowed" boolean NOT NULL,
+	"lorentzian_filters" jsonb,
+	"final_allowed" boolean NOT NULL,
+	"reason" text NOT NULL,
+	"outcome_direction" text,
+	"outcome_return" double precision,
+	"outcome_correct_logistic" boolean,
+	"outcome_correct_lorentzian" boolean,
+	"resolved_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "equity_snapshots" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"balance" double precision NOT NULL,
+	"equity" double precision NOT NULL,
+	"unrealized_pnl" double precision DEFAULT 0 NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "grid_configs" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"symbol" text DEFAULT 'BTC_USDT' NOT NULL,
+	"timeframe" text DEFAULT 'Min15' NOT NULL,
+	"enabled" boolean DEFAULT true NOT NULL,
+	"levels" integer DEFAULT 5 NOT NULL,
+	"range_atr_mult" double precision DEFAULT 0.5 NOT NULL,
+	"budget_pct" double precision DEFAULT 30 NOT NULL,
+	"leverage" integer DEFAULT 2 NOT NULL,
+	"fee_margin_mult" double precision DEFAULT 3 NOT NULL,
+	"auto_pause" boolean DEFAULT true NOT NULL,
+	"paused" boolean DEFAULT false NOT NULL,
+	"maker_mode" boolean DEFAULT false NOT NULL,
+	"direction" text DEFAULT 'long' NOT NULL,
+	"center" double precision,
+	"lower" double precision,
+	"upper" double precision,
+	"spacing" double precision,
+	"effective_levels" integer,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "grid_orders" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"symbol" text DEFAULT 'BTC_USDT' NOT NULL,
+	"timeframe" text DEFAULT 'Min5' NOT NULL,
+	"leverage" integer DEFAULT 2 NOT NULL,
+	"spacing" double precision,
+	"level_index" integer NOT NULL,
+	"side" text NOT NULL,
+	"price" double precision NOT NULL,
+	"quantity" double precision NOT NULL,
+	"buy_price" double precision,
+	"entry_features" jsonb,
+	"status" text DEFAULT 'pending' NOT NULL,
+	"mexc_order_id" text,
+	"exchange_status" text,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"filled_at" timestamp with time zone
+);
+--> statement-breakpoint
+CREATE TABLE "ml_model" (
+	"id" integer PRIMARY KEY DEFAULT 1 NOT NULL,
+	"weights" jsonb NOT NULL,
+	"bias" double precision DEFAULT 0 NOT NULL,
+	"sample_count" integer DEFAULT 0 NOT NULL,
+	"correct_count" integer DEFAULT 0 NOT NULL,
+	"rolling_accuracy" double precision DEFAULT 0.5 NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "positions" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"symbol" text NOT NULL,
+	"timeframe" text DEFAULT 'Min5' NOT NULL,
+	"side" text NOT NULL,
+	"entry_price" double precision NOT NULL,
+	"size_usdt" double precision NOT NULL,
+	"quantity" double precision NOT NULL,
+	"leverage" integer NOT NULL,
+	"stop_loss" double precision,
+	"take_profit" double precision,
+	"trailing_stop" double precision,
+	"trailing_active" boolean DEFAULT false NOT NULL,
+	"break_even_moved" boolean DEFAULT false NOT NULL,
+	"highest_price" double precision,
+	"lowest_price" double precision,
+	"entry_confidence" double precision,
+	"entry_features" jsonb,
+	"atr_at_entry" double precision,
+	"strategy" text DEFAULT 'trend' NOT NULL,
+	"range_target" double precision,
+	"status" text DEFAULT 'open' NOT NULL,
+	"opened_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"closed_at" timestamp with time zone
+);
+--> statement-breakpoint
+CREATE TABLE "trade_features" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"trade_id" integer,
+	"position_id" integer,
+	"features" jsonb NOT NULL,
+	"label" double precision,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "trades" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"position_id" integer,
+	"symbol" text NOT NULL,
+	"side" text NOT NULL,
+	"entry_price" double precision NOT NULL,
+	"exit_price" double precision NOT NULL,
+	"size_usdt" double precision NOT NULL,
+	"leverage" integer NOT NULL,
+	"pnl" double precision NOT NULL,
+	"fees" double precision NOT NULL,
+	"exit_reason" text NOT NULL,
+	"strategy" text DEFAULT 'trend' NOT NULL,
+	"entry_confidence" double precision,
+	"opened_at" timestamp with time zone,
+	"closed_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"live" boolean DEFAULT false NOT NULL
+);

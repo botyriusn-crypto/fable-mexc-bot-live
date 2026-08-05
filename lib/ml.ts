@@ -1,4 +1,5 @@
 // Online logistic regression — learns from every closed trade.
+// Mode separation: trend trades train the trend model, grid trades train separately.
 
 import { db } from "./db"
 import { mlModel, tradeFeatures } from "./db/schema"
@@ -26,6 +27,41 @@ export interface MlState {
 }
 
 const sigmoid = (z: number) => 1 / (1 + Math.exp(-z))
+
+// Extract real order id from MEXC response. Never return "[object Object]".
+export function extractOrderId(res: any): string | null {
+  const d = res?.data ?? res
+  if (d == null) return null
+  if (typeof d === "object") {
+    const id = d.orderId ?? d.order_id ?? d.id
+    return id != null ? String(id) : null
+  }
+  return String(d)
+}
+
+// Surface real Postgres error reason (normally discarded by Drizzle).
+export function dbErr(err: unknown): string {
+  if (err instanceof Error) {
+    const cause = (err as any).cause
+    const detail = cause?.detail ?? cause?.message ?? cause?.code
+    return detail ? `${err.message} | cause: ${detail}` : err.message
+  }
+  return String(err)
+}
+
+// Validate features are sane (not NaN, in reasonable range).
+export function validateFeatures(features: Record<string, number>): { valid: boolean; reason?: string } {
+  for (const name of FEATURE_KEYS) {
+    const v = features[name]
+    if (v == null || !isFinite(v)) {
+      return { valid: false, reason: `${name} is NaN or infinite` }
+    }
+    if (Math.abs(v) > 100) {
+      return { valid: false, reason: `${name} = ${v} is out of sane range` }
+    }
+  }
+  return { valid: true }
+}
 
 export async function loadModel(): Promise<MlState> {
   const rows = await db.select().from(mlModel).where(eq(mlModel.id, 1))
@@ -70,6 +106,7 @@ export function gateEntry(
 
 // SGD update from a closed trade. label: 1 = win, 0 = loss.
 // pnlWeight scales the gradient by PnL magnitude (bigger wins/losses teach more).
+// NEW: tradeMode parameter separates grid vs trend learning (optional for backward compat).
 export async function trainOnTrade(
   model: MlState,
   features: FeatureVector,
@@ -78,18 +115,33 @@ export async function trainOnTrade(
   learningRate: number,
   tradeId: number,
   positionId: number | null,
+  tradeMode?: "grid" | "trend",
 ): Promise<MlState> {
   const label = won ? 1 : 0
+  
+  // Mode gating: if specified, only train on matching mode to prevent data poisoning.
+  // ML_MODE from env: if GRID_MAKER=1, we're in trend mode; otherwise grid mode.
+  const ML_MODE = process.env.GRID_MAKER === "1" ? "trend" : "grid"
+  if (tradeMode && tradeMode !== ML_MODE) {
+    return model // Skip training, return unchanged state
+  }
+
   const prediction = predict(model, features)
   const error = prediction - label
-  const pnlWeight = Math.min(1 + Math.abs(pnlPct) / 2, 3) // cap at 3x
+  // Softened from a 3x cap: a single very large loss/win could otherwise
+  // apply a gradient step big enough to bias most subsequent predictions for
+  // a long stretch, especially since real market features are autocorrelated
+  // (a given regime persists across many consecutive candles).
+  const pnlWeight = Math.min(1 + Math.abs(pnlPct) / 2, 1.5) // cap at 1.5x
   const lr = learningRate * pnlWeight
 
   const newWeights: Record<string, number> = { ...model.weights }
   for (const key of FEATURE_KEYS) {
     const grad = error * (features[key] ?? 0)
-    // L2 regularization keeps weights small and generalizable
-    newWeights[key] = (newWeights[key] ?? 0) - lr * grad - lr * 0.01 * (newWeights[key] ?? 0)
+    // L2 regularization (strengthened from 0.01) pulls weights back toward
+    // neutral faster between updates, so a small handful of early samples
+    // can't leave a lasting bias before the model has real breadth of data.
+    newWeights[key] = (newWeights[key] ?? 0) - lr * grad - lr * 0.03 * (newWeights[key] ?? 0)
   }
   const newBias = model.bias - lr * error
 

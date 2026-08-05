@@ -110,6 +110,7 @@ export function MarketBar({ state }: { state: BotState }) {
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="truncate font-mono text-lg font-semibold">{state.config.symbol.replace("_", "/")}</h2>
+              <Badge variant="outline" className="border-primary/40 bg-primary/15 text-primary text-[10px] px-1.5 ml-1 shrink-0">ACTIVE</Badge>
               <Badge variant="secondary">{timeframeLabel[state.config.timeframe] ?? state.config.timeframe}</Badge>
               <Badge variant="outline">{state.config.leverage}x</Badge>
               <Badge variant="outline" className="gap-1">

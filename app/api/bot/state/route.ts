@@ -137,6 +137,7 @@ export async function GET() {
         leverage: gc.leverage,
         makerMode: gc.makerMode,
         direction: gc.direction || "long",
+        autoDirection: gc.direction === "auto" ? (gc as any)._autoSide || "neutral" : null,
       }
     }))
 
