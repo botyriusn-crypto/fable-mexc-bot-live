@@ -138,7 +138,9 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   const minSpacing = Math.max(feeBasedMin, pctBasedMin)
   // GEOMETRIC SPACING: Widens gap between orders as price moves away from center.
   // Protects budget from deploying too fast during flash crashes/pumps.
-  const baseSpacing = Math.max(snap.atr * gc.rangeAtrMult * 0.5, minSpacing)
+  const bbWidth = snap.bbUpper - snap.bbLower
+  const bbBaseSpacing = bbWidth / 4
+  const baseSpacing = Math.max(bbBaseSpacing, minSpacing)
   const geomRatio = 1.15 // Each level is 15% further than the last
   const totalLevels = Math.max(1, Math.floor(gc.levels / 2))
   const effectiveLevels = gc.levels
