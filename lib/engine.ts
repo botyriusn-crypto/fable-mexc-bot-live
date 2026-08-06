@@ -363,7 +363,14 @@ async function syncWithMexc(cfg: BotConfig) {
   }
 }
 
+let isTicking = false
+
 export async function runTick(): Promise<{ status: string; detail?: string }> {
+  if (isTicking) return { status: "skipped", detail: "Tick already in progress" }
+  isTicking = true
+  try {
+  if (isTicking) return { status: "skipped", detail: "Tick already in progress" }
+  isTicking = true
   const cfg = await getConfig()
   if (cfg.status !== "running") return { status: "skipped", detail: "Bot is stopped" }
 
@@ -562,7 +569,8 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
 }
 
 // --- Real-time WebSocket Engine ---
-declare global {
+declare global} finally { isTicking = false }
+}{
   // eslint-disable-next-line no-var
   var __wsManagers: Record<string, MexcWebSocketManager> | undefined
 }

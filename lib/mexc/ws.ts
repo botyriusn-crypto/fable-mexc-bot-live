@@ -19,6 +19,7 @@ export class MexcWebSocketManager {
   private interval: string
   private onKline: (kline: KlineUpdate) => void
   private isReconnecting = false
+  private reconnectDelay = 3000
   private heartbeatInterval: NodeJS.Timeout | null = null
   private lastKlineTime: number | null = null
 
@@ -36,6 +37,7 @@ export class MexcWebSocketManager {
     this.ws = new WebSocket(this.url)
 
     this.ws.on("open", () => {
+      this.reconnectDelay = 3000 // Reset backoff on success
       log("info", `[WS] Connected. Subscribing to ${this.symbol.toUpperCase()} ${this.interval} klines...`)
       
       // MEXC Contract Subscription message format
@@ -102,16 +104,22 @@ export class MexcWebSocketManager {
     })
 
     this.ws.on("close", () => {
-      log("info", `[WS] Disconnected. Reconnecting in 3s...`)
       if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
       if (!this.isReconnecting) {
         this.isReconnecting = true
+        log("info", `[WS] Disconnected. Reconnecting in ${this.reconnectDelay / 1000}s...`)
         setTimeout(() => {
           this.isReconnecting = false
+          // Exponential backoff: double the delay up to max 30s
+          this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000)
           this.connect()
-        }, 3000)
+        }, this.reconnectDelay)
       }
     })
+
+    // Reset reconnect delay on successful connection
+    const originalOnOpen = this.ws.on.bind(this.ws)
+    // (We override the open handler reset logic below in the script)
   }
 
   public disconnect() {
