@@ -125,7 +125,7 @@ async function openPosition(
   }
 
   if (cfg.mode === "live") {
-  
+    try {
       const exchange = getExchangeClient(cfg.exchange as Exchange)
       await exchange.placeMarketOrder({
         symbol: cfg.symbol,
@@ -178,7 +178,7 @@ export async function closePosition(
   cfg: BotConfig,
 ): Promise<void> {
   if (cfg.mode === "live") {
-  
+    try {
       const exchange = getExchangeClient(cfg.exchange as Exchange)
       await exchange.placeMarketOrder({
         symbol: position.symbol,
@@ -234,7 +234,7 @@ export async function closePosition(
 
   // Learning loop: every closed trade trains the model
   if (position.entryFeatures) {
-  
+    try {
       await trainOnTrade(
         position.entryFeatures as unknown as Record<string, number>,
         netPnl > 0 ? 1 : -1,
@@ -264,7 +264,7 @@ export async function runWebhookSignal(
     return { status: "skipped", detail: "Bot is stopped" }
   }
 
-
+  try {
     const exchange = getExchangeClient(cfg.exchange as Exchange)
     const [candles, ticker] = await Promise.all([
       exchange.fetchKlines(cfg.symbol, cfg.timeframe, cfg.lorentzianWebhooks ? Math.max(200, cfg.lorentzianLookback + 40) : 200),
@@ -332,7 +332,7 @@ export async function runWebhookSignal(
 async function syncWithMexc(cfg: BotConfig) {
   if (cfg.mode !== "live") return
 
-
+  try {
     const exchange = getExchangeClient(cfg.exchange as Exchange)
     const mexPositions = await exchange.getOpenPositions() as any[]
 
@@ -366,11 +366,10 @@ async function syncWithMexc(cfg: BotConfig) {
 export async function runTick(): Promise<{ status: string; detail?: string }> {
   const cfg = await getConfig()
   if (cfg.status !== "running") return { status: "skipped", detail: "Bot is stopped" }
-
   // Sync with MEXC to remove ghost orders
   await syncWithMexc(cfg)
 
-
+  try {
     const [openPositions, activeGrid] = await Promise.all([
       getOpenPositions(),
       db.select().from(gridOrders).where(eq(gridOrders.status, "pending")),
@@ -386,7 +385,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     const gridCfgs = await getGridConfigs()
 
     for (const gc of gridCfgs) {
-    
+      try {
         const [candles, ticker] = await Promise.all([
           exchange.fetchKlines(gc.symbol, gc.timeframe, 200),
           tickerCache.get(gc.symbol) || exchange.fetchTicker(gc.symbol).then((t: any) => { tickerCache.set(gc.symbol, t); return t; })
@@ -431,7 +430,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     for (const key of marketKeys) {
       const [symbol, timeframe] = key.split("|")
       const marketCfg = { ...cfg, symbol, timeframe }
-    
+      try {
         const isSelected = symbol === cfg.symbol && timeframe === cfg.timeframe
         const candleLimit = isSelected ? Math.max(200, cfg.lorentzianLookback + 40) : 200
         const [candles, ticker] = await Promise.all([
@@ -530,7 +529,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       if (!shouldRun && cfg.aiAnalysisSchedule === "daily") shouldRun = now.getTime() - lastAnalysis!.getTime() > 86400000
       if (!shouldRun && cfg.aiAnalysisSchedule === "weekly") shouldRun = now.getTime() - lastAnalysis!.getTime() > 604800000
       if (shouldRun) {
-      
+        try {
           const result = await analyzeTradesForMarket(cfg.symbol, cfg.timeframe)
           if (result?.recommendations.length) {
             await log("info", `AI Advisor: ${result.recommendations.length} recommendations`)
@@ -576,7 +575,7 @@ export async function initRealtimeEngine(symbol: string, timeframe: string) {
   const manager = new MexcWebSocketManager(symbol, timeframe, async (kline) => {
     if (kline.isClosed) {
       console.log(`[WS] ${symbol} candle closed. Triggering instant tick...`)
-    
+      try {
         await runTick()
       } catch (err) {
         console.error(`[WS] Error during ${symbol} WS-triggered tick:`, err)

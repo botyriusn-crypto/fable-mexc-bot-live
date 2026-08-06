@@ -56,7 +56,7 @@ export class MexcWebSocketManager {
       // Proactively send ping every 10s to prevent MEXC 30s heartbeat timeout
       this.heartbeatInterval = setInterval(() => {
         if (this.ws?.readyState === WebSocket.OPEN) {
-          this.ws.send(JSON.stringify({ method: "ping" })) // MEXC contract expects a plain string "ping"
+          this.ws.send("ping") // MEXC contract expects a plain string "ping"
         }
       }, 10000)
     })
@@ -65,7 +65,10 @@ export class MexcWebSocketManager {
       const msg = data.toString()
       
       // MEXC contract sends a plain string "pong" back
-      if (msg === "pong") return
+      if (msg === "ping") {
+          this.ws?.send("pong")
+          return
+        }
 
       try {
         const parsed = JSON.parse(msg)
