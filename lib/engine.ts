@@ -266,7 +266,8 @@ export async function runWebhookSignal(
 
   try {
     const exchange = getExchangeClient(cfg.exchange as Exchange)
-    const [candles, ticker] = await Promise.all([
+    await new Promise(r => setTimeout(r, 200)); // 200ms delay to prevent MEXC rate limits
+        const [candles, ticker] = await Promise.all([
       exchange.fetchKlines(cfg.symbol, cfg.timeframe, cfg.lorentzianWebhooks ? Math.max(200, cfg.lorentzianLookback + 40) : 200),
       exchange.fetchTicker(cfg.symbol),
     ])
@@ -386,6 +387,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
 
     for (const gc of gridCfgs) {
       try {
+        await new Promise(r => setTimeout(r, 200)); // 200ms delay to prevent MEXC rate limits
         const [candles, ticker] = await Promise.all([
           exchange.fetchKlines(gc.symbol, gc.timeframe, 200),
           tickerCache.get(gc.symbol) || exchange.fetchTicker(gc.symbol).then((t: any) => { tickerCache.set(gc.symbol, t); return t; })
@@ -433,6 +435,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       try {
         const isSelected = symbol === cfg.symbol && timeframe === cfg.timeframe
         const candleLimit = isSelected ? Math.max(200, cfg.lorentzianLookback + 40) : 200
+        await new Promise(r => setTimeout(r, 200)); // 200ms delay to prevent MEXC rate limits
         const [candles, ticker] = await Promise.all([
           exchange.fetchKlines(symbol, timeframe, candleLimit),
           exchange.fetchTicker(symbol),
