@@ -436,10 +436,13 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         const isSelected = symbol === cfg.symbol && timeframe === cfg.timeframe
         const candleLimit = isSelected ? Math.max(200, cfg.lorentzianLookback + 40) : 200
         await new Promise(r => setTimeout(r, 200)); // 200ms delay to prevent MEXC rate limits
-        const [candles, ticker] = await Promise.all([
-          exchange.fetchKlines(symbol, timeframe, candleLimit),
-          exchange.fetchTicker(symbol),
-        ])
+        const candles = await exchange.fetchKlines(symbol, timeframe, candleLimit)
+        let ticker = { lastPrice: candles[candles.length - 1].close }
+        try {
+          ticker = await exchange.fetchTicker(symbol)
+        } catch (err) {
+          console.error('Ticker fetch failed for', symbol, '- using candle close instead')
+        }
         if (candles.length < 60) {
           await log("error", `${symbol} ${timeframe}: insufficient candle data (${candles.length})`)
           continue
