@@ -120,8 +120,10 @@ interface GridState {
   realizedPnl: number
   budgetPct: number
   leverage: number
+  gridLeverage?: number
   atrMult?: number
   makerMode?: boolean
+  direction: string
 }
 
 const fmt = (v: number | null | undefined, d = 4) =>
@@ -148,7 +150,6 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
       })
       if (res.ok) {
         setEditing(false)
-        // Force immediate refresh of the dashboard data
         setTimeout(() => onRefresh(), 300)
       }
     } catch (err) {
@@ -166,7 +167,6 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ symbol: grid.symbol, timeframe: grid.timeframe, enabled: newEnabled }),
       })
-      // If disabling, cancel all pending buys (keep sells)
       if (!newEnabled) {
         await fetch("/api/bot/grid-config", {
           method: "PATCH",
@@ -183,6 +183,7 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
   const [makerBusy, setMakerBusy] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [directionBusy, setDirectionBusy] = useState(false)
+  
   const handleToggleDirection = async () => {
     setDirectionBusy(true)
     try {
@@ -200,6 +201,7 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
       setDirectionBusy(false)
     }
   }
+
   const handleClearLadder = async () => {
     if (!window.confirm(`Clear all pending orders for ${grid.symbol}? This will cancel all open buy/sell orders.`)) return
     setClearing(true)
@@ -214,6 +216,7 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
       setClearing(false)
     }
   }
+
   const handleToggleMaker = async () => {
     setMakerBusy(true)
     try {
@@ -254,11 +257,8 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
     if (!expanded) {
       setLoadingOrders(true)
       try {
-        // Fetch all pending grid orders from the API
         const res = await fetch("/api/bot/state")
         const data = await res.json()
-        // The state API returns all pending orders in grid.orders
-        // Filter for this specific pair
         const allOrders = data.grid?.allOrders || data.grid?.orders || []
         const pairOrders = allOrders.filter((o: any) => 
           o.symbol === grid.symbol && o.timeframe === grid.timeframe
@@ -335,7 +335,7 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
           ) : (
             <>
               <span className="font-mono text-muted-foreground">{grid.effectiveLevels}/{grid.levels}lv</span>
-              <span className="font-mono text-muted-foreground">ATR {(grid as any).atrMult?.toFixed(1) || "0.5"}x</span>
+              <span className="font-mono text-muted-foreground">ATR {grid.atrMult?.toFixed(1) || "0.5"}x</span>
               <span className="font-mono text-muted-foreground">{grid.gridLeverage || grid.leverage || 2}x</span>
               <span className="font-mono text-muted-foreground">{grid.budgetPct}%</span>
               <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => setEditing(true)}>Edit</Button>
@@ -391,37 +391,71 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
 export function MultiGridCard() {
   const { data: state, mutate: refresh } = useBotState()
   const { mutate } = useSWRConfig()
-
-  if (!state) return null
-
-  const grids: GridState[] = state.gridConfigs || []
+  
   const [scanning, setScanning] = useState(false)
-  const handleScanMarket = async () => {
-    setScanning(true)
-    try {
-      const res = await fetch("/api/bot/scan-coins")
-      const json = await res.json()
-      if (!json.success) throw new Error(json.error || "Scan failed")
-      
-      const picks = json.picks.map((p: any, i: number) => 
-        `${i + 1}. ${p.symbol} | Vol: $${(p.volumeUsdt/1000000).toFixed(1)}M | ATR: ${p.atrPct}% | ADX: ${p.adx}\n   Reason: ${p.reason}`
-      ).join("\n\n")
-      
-      window.alert(`Top 5 Grid Candidates:\n\n${picks}`)
-    } catch (err) {
-      console.error("Market scan failed:", err)
-      window.alert("Failed to scan market. Check logs.")
-    } finally {
-      setScanning(false)
-    }
-  }
-  const totalRealized = grids.reduce((s, g) => s + g.realizedPnl, 0)
-  const totalUnrealized = grids.reduce((s, g) => s + g.unrealizedPnl, 0)
-  const totalOrders = grids.reduce((s, g) => s + g.buyCount + g.sellCount, 0)
+  const [aiPicks, setAiPicks] = useState<any[]>([])
+  const [applyingSym, setApplyingSym] = useState<string | null>(null)
 
   const handleRefresh = async () => {
     await mutate("/api/bot/state")
   }
+
+  const handleScanMarket = async () => {
+    setScanning(true)
+    setAiPicks([])
+    try {
+      const res = await fetch("/api/bot/ai-advisor")
+      const json = await res.json()
+      if (!json.success) throw new Error(json.error || "AI scan failed")
+      setAiPicks(json.recommendations || [])
+    } catch (err) {
+      console.error("AI scan failed:", err)
+      window.alert("Failed to run AI advisor. Check Fly logs.")
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  const handleApplyAIPick = async (pick: any) => {
+    setApplyingSym(pick.symbol)
+    try {
+      const addRes = await fetch("/api/bot/grid-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: pick.symbol, timeframe: "Min15" })
+      })
+      if (!addRes.ok) throw new Error("Failed to add pair")
+
+      await fetch("/api/bot/grid-config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: pick.symbol,
+          timeframe: "Min15",
+          levels: pick.levels,
+          rangeAtrMult: pick.atrMult,
+          leverage: pick.leverage,
+          budgetPct: pick.budgetPct,
+          makerMode: true,
+          direction: "auto"
+        })
+      })
+
+      await handleRefresh()
+      setAiPicks(aiPicks.filter(p => p.symbol !== pick.symbol))
+    } catch (err) {
+      window.alert("Failed to apply settings. Check if pair already exists.")
+    } finally {
+      setApplyingSym(null)
+    }
+  }
+
+  if (!state) return null
+
+  const grids: GridState[] = state.gridConfigs || []
+  const totalRealized = grids.reduce((s, g) => s + g.realizedPnl, 0)
+  const totalUnrealized = grids.reduce((s, g) => s + g.unrealizedPnl, 0)
+  const totalOrders = grids.reduce((s, g) => s + g.buyCount + g.sellCount, 0)
 
   return (
     <Card>
@@ -437,16 +471,44 @@ export function MultiGridCard() {
           <Button
             variant="outline"
             size="sm"
-            className="h-7 border-success/50 bg-success/15 text-success hover:bg-success/25 hover:text-success"
+            className="h-7 border-chart-3/50 bg-chart-3/15 text-chart-3 hover:bg-chart-3/25"
             onClick={handleScanMarket}
             disabled={scanning}
-            title="Scan MEXC for the best grid trading coins right now"
+            title="AI scans MEXC and configures the optimal grid settings"
           >
-            {scanning ? "Scanning..." : "Scan Market"}
+            {scanning ? "🤖 AI Analyzing..." : "🤖 AI Advisor"}
           </Button>
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
+        {aiPicks.length > 0 && (
+          <div className="flex flex-col gap-2 p-2 border border-chart-3/30 rounded-md bg-chart-3/5">
+            <span className="text-xs font-bold text-chart-3">AI Recommendations:</span>
+            {aiPicks.map((pick) => (
+              <div key={pick.symbol} className="flex flex-col gap-1 p-2 bg-background/50 rounded border border-border">
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-sm">{pick.symbol}</span>
+                  <Button
+                    size="sm"
+                    variant="default"
+                    className="h-6 px-2 py-0 bg-success text-success-foreground hover:bg-success/80"
+                    disabled={applyingSym === pick.symbol}
+                    onClick={() => handleApplyAIPick(pick)}
+                  >
+                    {applyingSym === pick.symbol ? "Building..." : "Apply & Build"}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">{pick.reason}</p>
+                <div className="flex gap-2 text-xs text-muted-foreground mt-1">
+                  <span>Lvls: {pick.levels}</span>
+                  <span>ATR: {pick.atrMult}x</span>
+                  <span>Lev: {pick.leverage}x</span>
+                  <span>Budg: {pick.budgetPct}%</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         {grids.length === 0 ? (
           <p className="text-xs text-muted-foreground">No grid configs. Run the SQL migration.</p>
         ) : (
