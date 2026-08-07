@@ -434,47 +434,16 @@ export function MultiGridCard() {
           <span className={totalRealized >= 0 ? "text-success" : "text-danger"}>Real: {totalRealized >= 0 ? "+" : ""}{fmt(totalRealized, 2)}</span>
           <span className={totalUnrealized >= 0 ? "text-success" : "text-danger"}>Unreal: {totalUnrealized >= 0 ? "+" : ""}{fmt(totalUnrealized, 2)}</span>
           <AddPairControl existingSymbols={grids.map((g) => g.symbol)} onAdded={handleRefresh} />
-          <div className="flex flex-col gap-2 w-full">
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 border-success/50 bg-success/15 text-success hover:bg-success/25 hover:text-success"
-                onClick={handleScanMarket}
-                disabled={scanning}
-                title="AI scans MEXC and configures the optimal grid settings"
-              >
-                {scanning ? "🤖 AI Analyzing..." : "🤖 AI Advisor"}
-              </Button>
-            </div>
-            {aiPicks.length > 0 && (
-              <div className="flex flex-col gap-2 mt-2 p-2 border border-chart-3/30 rounded-md bg-chart-3/5">
-                {aiPicks.map((pick) => (
-                  <div key={pick.symbol} className="flex flex-col gap-1 p-2 bg-background/50 rounded border border-border">
-                    <div className="flex justify-between items-center">
-                      <span className="font-bold text-sm">{pick.symbol}</span>
-                      <Button
-                        size="sm"
-                        variant="default"
-                        className="h-6 px-2 py-0 bg-success text-success-foreground hover:bg-success/80"
-                        disabled={applyingSym === pick.symbol}
-                        onClick={() => handleApplyAIPick(pick)}
-                      >
-                        {applyingSym === pick.symbol ? "Building..." : "Apply & Build"}
-                      </Button>
-                    </div>
-                    <p className="text-xs text-muted-foreground">{pick.reason}</p>
-                    <div className="flex gap-2 text-xs text-muted-foreground mt-1">
-                      <span>Lvls: {pick.levels}</span>
-                      <span>ATR: {pick.atrMult}x</span>
-                      <span>Lev: {pick.leverage}x</span>
-                      <span>Budg: {pick.budgetPct}%</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 border-success/50 bg-success/15 text-success hover:bg-success/25 hover:text-success"
+            onClick={handleScanMarket}
+            disabled={scanning}
+            title="Scan MEXC for the best grid trading coins right now"
+          >
+            {scanning ? "Scanning..." : "Scan Market"}
+          </Button>
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
