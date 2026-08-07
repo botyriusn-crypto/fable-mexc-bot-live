@@ -19,6 +19,7 @@ export class MexcWebSocketManager {
   private interval: string
   private onKline: (kline: KlineUpdate) => void
   private isReconnecting = false
+  private reconnectDelay = 3000
   private heartbeatInterval: NodeJS.Timeout | null = null
   private lastKlineTime: number | null = null
 
@@ -34,6 +35,7 @@ export class MexcWebSocketManager {
     this.ws = new WebSocket(this.url)
 
     this.ws.on("open", () => {
+      this.reconnectDelay = 3000 // Reset backoff on success
       log("info", `[WS] Connected. Subscribing to ${this.symbol.toUpperCase()} ${this.interval} klines...`)
       const subMsg = {
         method: "sub.kline",
