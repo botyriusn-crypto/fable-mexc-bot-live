@@ -230,60 +230,6 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
     }
   }
 
-  const [scanning, setScanning] = useState(false)
-  const [aiPicks, setAiPicks] = useState<any[]>([])
-  const [applyingSym, setApplyingSym] = useState<string | null>(null)
-
-  const handleScanMarket = async () => {
-    setScanning(true)
-    setAiPicks([])
-    try {
-      const res = await fetch("/api/bot/ai-advisor")
-      const json = await res.json()
-      if (!json.success) throw new Error(json.error || "AI scan failed")
-      setAiPicks(json.recommendations || [])
-    } catch (err) {
-      console.error("AI scan failed:", err)
-      window.alert("Failed to run AI advisor. Check Fly logs.")
-    } finally {
-      setScanning(false)
-    }
-  }
-
-  const handleApplyAIPick = async (pick: any) => {
-    setApplyingSym(pick.symbol)
-    try {
-      const addRes = await fetch("/api/bot/grid-config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol: pick.symbol, timeframe: "Min15" })
-      })
-      if (!addRes.ok) throw new Error("Failed to add pair")
-
-      await fetch("/api/bot/grid-config", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          symbol: pick.symbol,
-          timeframe: "Min15",
-          levels: pick.levels,
-          rangeAtrMult: pick.atrMult,
-          leverage: pick.leverage,
-          budgetPct: pick.budgetPct,
-          makerMode: true,
-          direction: "auto"
-        })
-      })
-
-      onRefresh()
-      setAiPicks(aiPicks.filter(p => p.symbol !== pick.symbol))
-    } catch (err) {
-      window.alert("Failed to apply settings. Check if pair already exists.")
-    } finally {
-      setApplyingSym(null)
-    }
-  }
-
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const handleDelete = async () => {
@@ -488,45 +434,6 @@ export function MultiGridCard() {
           <span className={totalRealized >= 0 ? "text-success" : "text-danger"}>Real: {totalRealized >= 0 ? "+" : ""}{fmt(totalRealized, 2)}</span>
           <span className={totalUnrealized >= 0 ? "text-success" : "text-danger"}>Unreal: {totalUnrealized >= 0 ? "+" : ""}{fmt(totalUnrealized, 2)}</span>
           <AddPairControl existingSymbols={grids.map((g) => g.symbol)} onAdded={handleRefresh} />
-          <div className="flex flex-col gap-2 mt-2">
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 border-chart-3/50 bg-chart-3/15 text-chart-3 hover:bg-chart-3/25"
-              onClick={handleScanMarket}
-              disabled={scanning}
-            >
-              {scanning ? "AI Analyzing..." : "AI Advisor"}
-            </Button>
-            {aiPicks.length > 0 && (
-              <div className="flex flex-col gap-2 p-2 border border-chart-3/30 rounded-md bg-chart-3/5 mt-2">
-                {aiPicks.map((pick) => (
-                  <div key={pick.symbol} className="flex flex-col gap-1 p-2 bg-background/50 rounded border border-border">
-                    <div className="flex justify-between items-center">
-                      <span className="font-bold text-sm">{pick.symbol}</span>
-                      <Button
-                        size="sm"
-                        variant="default"
-                        className="h-6 px-2 py-0 bg-success text-success-foreground hover:bg-success/80"
-                        disabled={applyingSym === pick.symbol}
-                        onClick={() => handleApplyAIPick(pick)}
-                      >
-                        {applyingSym === pick.symbol ? "Building..." : "Apply & Build"}
-                      </Button>
-                    </div>
-                    <p className="text-xs text-muted-foreground">{pick.reason}</p>
-                    <div className="flex gap-2 text-xs text-muted-foreground mt-1">
-                      <span>Lvls: {pick.levels}</span>
-                      <span>ATR: {pick.atrMult}x</span>
-                      <span>Lev: {pick.leverage}x</span>
-                      <span>Budg: {pick.budgetPct}%</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
           <Button
             variant="outline"
             size="sm"
