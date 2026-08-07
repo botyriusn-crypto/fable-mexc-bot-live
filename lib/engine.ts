@@ -398,7 +398,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         marks.set(gc.symbol, snap.price)
         // Regime-aware auto-tuning: wider ATR in trending, tighter in ranging
         const regime = detectRegime(snap, { ...cfg, symbol: gc.symbol, timeframe: gc.timeframe })
-        if (gc.direction === "auto") {
+        if (gc.direction.startsWith("auto")) {
           // 1. Auto-Tune ATR Spacing
           if (regime === "trend" && gc.rangeAtrMult < 2.0) {
             await db.update(gridConfigs).set({ rangeAtrMult: Math.min(gc.rangeAtrMult * 1.3, 3.0) }).where(eq(gridConfigs.id, gc.id))
@@ -417,11 +417,13 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
           }
           const emaFast = getEma(closes, 50)
           const emaSlow = getEma(closes, 200)
-          if (emaFast > emaSlow) {
-            (gc as any)._autoSide = "long"
-          } else {
-            (gc as any)._autoSide = "short"
+          const newDir = emaFast > emaSlow ? "auto-long" : "auto-short"
+          
+          if (gc.direction !== newDir) {
+            await db.update(gridConfigs).set({ direction: newDir }).where(eq(gridConfigs.id, gc.id))
+            gc.direction = newDir
           }
+          (gc as any)._autoSide = newDir === "auto-long" ? "long" : "short"
         }
         await runGridTick(cfg, gc, snap, regime, exchange)
       } catch (err) {

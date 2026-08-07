@@ -186,7 +186,8 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
   const handleToggleDirection = async () => {
     setDirectionBusy(true)
     try {
-      const nextDir = grid.direction === "long" ? "short" : grid.direction === "short" ? "auto" : "long"
+      const currentMode = grid.direction.startsWith("auto") ? "auto" : grid.direction
+      const nextDir = currentMode === "long" ? "short" : currentMode === "short" ? "auto" : "long"
       await fetch("/api/bot/grid-config", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -295,14 +296,20 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
           <Badge
             variant="outline"
             className={`shrink-0 cursor-pointer ${
-              grid.direction === "short" ? "border-danger/40 bg-danger/15 text-danger" 
+              grid.direction === "short" || grid.direction === "auto-short" ? "border-danger/40 bg-danger/15 text-danger" 
+              : grid.direction === "auto-long" ? "border-success/40 bg-success/15 text-success"
               : grid.direction === "auto" ? "border-chart-3/40 bg-chart-3/15 text-chart-3"
               : "border-success/40 bg-success/15 text-success"
             }`}
             onClick={handleToggleDirection}
             title="Toggle direction (long/short/auto)"
           >
-            {directionBusy ? "…" : grid.direction === "short" ? "SHORT" : grid.direction === "auto" ? "AUTO" : "LONG"}
+            {directionBusy ? "…" : 
+              grid.direction === "short" ? "SHORT" 
+              : grid.direction === "auto-short" ? "AUTO (SHORT)" 
+              : grid.direction === "auto-long" ? "AUTO (LONG)" 
+              : grid.direction === "auto" ? "AUTO" 
+              : "LONG"}
           </Badge>
         </div>
         <div className="flex items-center gap-2">
