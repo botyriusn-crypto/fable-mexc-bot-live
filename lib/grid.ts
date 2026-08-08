@@ -132,76 +132,40 @@ export async function getActiveOrders(symbol?: string, timeframe?: string): Prom
 
 const GRID_STOP_LOSS_PCT = 0.05 // 5% adverse move triggers stop-loss
 
-// Universal grid stop-loss: protects held inventory from liquidation
 async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, exchange?: ExchangeClient): Promise<boolean> {
   const active = await getActiveOrders(gc.symbol, gc.timeframe)
   
-  // Long inventory: pending sells with a buyPrice (meaning we are holding a long position)
-  const longHeld = active.filter(o => o.side === "sell" && o.buyPrice != null && o.status === "pending")
-  for (const o of longHeld) {
-    const buyPrice = o.buyPrice as number
-    const adverseMove = (buyPrice - price) / buyPrice
-    if (adverseMove >= GRID_STOP_LOSS_PCT) {
-      await log("info", `Grid ${gc.symbol}: STOP-LOSS triggered. Price ${price.toFixed(4)} is ${(adverseMove * 100).toFixed(1)}% below entry ${buyPrice.toFixed(4)}`)
-      
-      // Close position at market
-      if (cfg.mode === "live" && exchange) {
-        try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 4, volume: o.quantity, leverage: o.leverage }) } catch (err) { await log("error", `Stop-loss market close failed: ${err}`) }
-      }
-      
-      // Record the trade
-      const sizeUsdt = (buyPrice * o.quantity) / o.leverage
-      const grossPnl = (price - buyPrice) * o.quantity
-      const fees = (buyPrice + price) * o.quantity * TAKER_FEE
-      const netPnl = grossPnl - fees
-      await db.insert(trades).values({ symbol: o.symbol, side: "long", entryPrice: buyPrice, exitPrice: price, sizeUsdt, leverage: o.leverage, pnl: netPnl, fees, exitReason: "stop-loss", strategy: "grid", live: cfg.mode === "live" })
+  // Check Long inventory (pending sells with a buyPrice)
+  for (const o of active.filter(x => x.side === "sell" && x.buyPrice != null && x.status === "pending")) {
+    const adverse = (o.buyPrice! - price) / o.buyPrice!
+    if (adverse >= GRID_STOP_LOSS_PCT) {
+      if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 4, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
+      const grossPnl = (price - o.buyPrice!) * o.quantity
+      const fees = (o.buyPrice! + price) * o.quantity * TAKER_FEE
       await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
-      
-      // Cancel all other pending orders for this pair
       const toCancel = active.filter(x => x.id !== o.id && x.status === "pending").map(x => x.id)
       if (toCancel.length > 0) await db.update(gridOrders).set({ status: "cancelled" }).where(inArray(gridOrders.id, toCancel))
       await db.update(gridOrders).set({ status: "filled" }).where(eq(gridOrders.id, o.id))
-      
-      await log("trade", `Grid ${o.symbol} STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${netPnl.toFixed(2)} USDT`)
+      await log("trade", `Grid ${o.symbol} STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${(grossPnl - fees).toFixed(2)} USDT`)
       return true
     }
   }
 
-  // Short inventory: pending buys with a buyPrice (meaning we are holding a short position)
-  // In short grid, 'sell' is the open, 'buy' is the close. The entry price is stored in buyPrice of the sell order? 
-  // Actually, let's check the short logic. In handleShortGridTick, sells are placed first. When filled, a buy is placed.
-  // So held short inventory is a filled sell with a pending buy.
-  const shortHeld = active.filter(o => o.side === "buy" && o.buyPrice != null && o.status === "pending")
-  for (const o of shortHeld) {
-    // o.buyPrice stores the entry price of the short
-    const entryPrice = o.buyPrice as number
-    const adverseMove = (price - entryPrice) / entryPrice
-    if (adverseMove >= GRID_STOP_LOSS_PCT) {
-      await log("info", `Grid ${gc.symbol}: SHORT STOP-LOSS triggered. Price ${price.toFixed(4)} is ${(adverseMove * 100).toFixed(1)}% above entry ${entryPrice.toFixed(4)}`)
-      
-      // Close short position at market (buy to close)
-      if (cfg.mode === "live" && exchange) {
-        try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (err) { await log("error", `Stop-loss market close failed: ${err}`) }
-      }
-      
-      // Record the trade
-      const sizeUsdt = (entryPrice * o.quantity) / o.leverage
-      const grossPnl = (entryPrice - price) * o.quantity
-      const fees = (entryPrice + price) * o.quantity * TAKER_FEE
-      const netPnl = grossPnl - fees
-      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice: price, sizeUsdt, leverage: o.leverage, pnl: netPnl, fees, exitReason: "stop-loss", strategy: "grid", live: cfg.mode === "live" })
+  // Check Short inventory (pending buys with a buyPrice)
+  for (const o of active.filter(x => x.side === "buy" && x.buyPrice != null && x.status === "pending")) {
+    const adverse = (price - o.buyPrice!) / o.buyPrice!
+    if (adverse >= GRID_STOP_LOSS_PCT) {
+      if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
+      const grossPnl = (o.buyPrice! - price) * o.quantity
+      const fees = (o.buyPrice! + price) * o.quantity * TAKER_FEE
       await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
-      
-      // Cancel all other pending orders
       const toCancel = active.filter(x => x.id !== o.id && x.status === "pending").map(x => x.id)
       if (toCancel.length > 0) await db.update(gridOrders).set({ status: "cancelled" }).where(inArray(gridOrders.id, toCancel))
       await db.update(gridOrders).set({ status: "filled" }).where(eq(gridOrders.id, o.id))
-      
-      await log("trade", `Grid ${o.symbol} SHORT STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${netPnl.toFixed(2)} USDT`)
+      await log("trade", `Grid ${o.symbol} SHORT STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${(grossPnl - fees).toFixed(2)} USDT`)
       return true
     }
   }
-
   return false
 }
 
@@ -699,10 +663,7 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
   }
 
   const active = await getActiveOrders(gc.symbol, gc.timeframe)
-  
-  // Universal Stop-Loss Check (protects both long and short non-maker grids)
   if (await checkGridStopLoss(cfg, gc, snap.price, exchange)) return
-
   if (gc.direction === "short" || (gc as any)._autoSide === "short") { return handleShortGridTick(cfg, gc, snap, exchange) }
 
   // Detect volatility surge for adaptive spacing
