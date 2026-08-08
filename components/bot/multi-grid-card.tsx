@@ -261,7 +261,7 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
         const data = await res.json()
         const allOrders = data.grid?.allOrders || data.grid?.orders || []
         const pairOrders = allOrders.filter((o: any) => 
-          o.symbol === grid.symbol && o.timeframe === grid.timeframe
+          o.symbol === grid.symbol && o.timeframe === grid.timeframe && o.status === "pending"
         )
         setOrders(pairOrders.map((o: any) => ({ 
           side: o.side, 
