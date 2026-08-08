@@ -12,9 +12,18 @@ export async function register() {
       }
       console.log(`[Startup] Real-time WebSocket engines initialized for ${configs.length} grid pairs.`)
       
-      // Reconcile DB with actual MEXC exchange state
+      // Reconcile DB with actual MEXC exchange state on boot
       const { syncExchangeState } = await import("./lib/grid")
       await syncExchangeState()
+      
+      // Schedule recurring reconciliation every 15 minutes
+      setInterval(async () => {
+        try {
+          await syncExchangeState()
+        } catch (e) {
+          console.error("[Reconcile] Scheduled sync failed:", e)
+        }
+      }, 15 * 60 * 1000)
     } catch (err) {
       console.error("[Startup] Failed to initialize WebSockets:", err)
       // Fallback to BTC/SOL if DB isn't ready yet
