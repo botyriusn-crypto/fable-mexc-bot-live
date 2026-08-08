@@ -530,10 +530,11 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   if (gridConfigRow.length > 0 && gridConfigRow[0].paused !== paused) {
     await db.update(gridConfigs).set({ paused }).where(eq(gridConfigs.id, gridConfigRow[0].id))
     if (paused) {
-      const restingBuys = active.filter((o) => o.side === "buy" && o.mexcOrderId)
+      const restingBuys = active.filter((o) => o.side === "buy")
       if (restingBuys.length > 0) {
         try {
-          await cancelOrders(restingBuys.map((o) => o.mexcOrderId!) as string[])
+          const liveIds = restingBuys.filter(o => o.mexcOrderId).map((o) => o.mexcOrderId!) as string[]
+          if (liveIds.length > 0) await cancelOrders(liveIds)
           await db.update(gridOrders)
             .set({ status: "cancelled", exchangeStatus: "cancelled" })
             .where(inArray(gridOrders.id, restingBuys.map((o) => o.id)))
@@ -572,7 +573,8 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
         if (minDrift > MAKER_RECENTER_DRIFT_PCT) {
           await log("info", `Grid ${gc.symbol} (maker): price drifted ${(minDrift * 100).toFixed(1)}% from resting buys. Recentering at ${livePrice.toFixed(6)}.`)
           try {
-            await cancelOrders(restingBuys.map((o) => o.mexcOrderId!) as string[])
+            const liveIds = restingBuys.filter(o => o.mexcOrderId).map((o) => o.mexcOrderId!) as string[]
+            if (liveIds.length > 0) await cancelOrders(liveIds)
             await db.update(gridOrders)
               .set({ status: "cancelled", exchangeStatus: "cancelled" })
               .where(inArray(gridOrders.id, restingBuys.map((o) => o.id)))
