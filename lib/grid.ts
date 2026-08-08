@@ -135,19 +135,48 @@ export async function getActiveOrders(symbol?: string, timeframe?: string): Prom
 
 const GRID_STOP_LOSS_PCT = 0.05 // 5% adverse move triggers stop-loss
 
+// Safety margin against liquidation, mirroring lib/exits.ts's approach for
+// the trend engine: isolated-margin futures liquidate at roughly 1/leverage
+// away from entry. A flat percentage stop that ignores leverage can end up
+// set BEYOND where the exchange already force-liquidates at high leverage —
+// meaning the bot's own stop never fires; forced liquidation does instead,
+// at a worse price plus a penalty, with zero warning.
+const GRID_LIQUIDATION_SAFETY_FACTOR = 0.75
+
+function effectiveGridStopPct(leverage: number): number {
+  const liquidationDistApprox = 1 / leverage
+  return Math.min(GRID_STOP_LOSS_PCT, liquidationDistApprox * GRID_LIQUIDATION_SAFETY_FACTOR)
+}
+
+// Cancels other pending orders for this pair on the REAL exchange (not just
+// the database) before marking them cancelled — otherwise any real resting
+// order gets orphaned on MEXC while our records claim it's gone.
+async function cancelOtherPendingOrders(active: GridOrder[], keepId: number): Promise<void> {
+  const others = active.filter(x => x.id !== keepId && x.status === "pending")
+  if (others.length === 0) return
+  const realIds = others.filter(o => o.mexcOrderId).map(o => o.mexcOrderId!) as string[]
+  if (realIds.length > 0) {
+    try {
+      await cancelOrders(realIds)
+    } catch (err) {
+      await log("error", `Grid stop-loss: failed cancelling ${realIds.length} real resting order(s) on exchange: ${dbErr(err)}`)
+    }
+  }
+  await db.update(gridOrders).set({ status: "cancelled" }).where(inArray(gridOrders.id, others.map(x => x.id)))
+}
+
 async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, exchange?: ExchangeClient): Promise<boolean> {
   const active = await getActiveOrders(gc.symbol, gc.timeframe)
   
   // Check Long inventory
   for (const o of active.filter(x => x.side === "sell" && x.buyPrice != null && x.status === "pending")) {
     const adverse = (o.buyPrice! - price) / o.buyPrice!
-    if (adverse >= GRID_STOP_LOSS_PCT) {
+    if (adverse >= effectiveGridStopPct(o.leverage)) {
       if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 4, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
       const grossPnl = (price - o.buyPrice!) * o.quantity
       const fees = (o.buyPrice! + price) * o.quantity * TAKER_FEE
       await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
-      const toCancel = active.filter(x => x.id !== o.id && x.status === "pending").map(x => x.id)
-      if (toCancel.length > 0) await db.update(gridOrders).set({ status: "cancelled" }).where(inArray(gridOrders.id, toCancel))
+      await cancelOtherPendingOrders(active, o.id)
       await db.update(gridOrders).set({ status: "filled" }).where(eq(gridOrders.id, o.id))
       await log("trade", `Grid ${o.symbol} STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${(grossPnl - fees).toFixed(2)} USDT`)
       return true
@@ -157,13 +186,12 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
   // Check Short inventory
   for (const o of active.filter(x => x.side === "buy" && x.buyPrice != null && x.status === "pending")) {
     const adverse = (price - o.buyPrice!) / o.buyPrice!
-    if (adverse >= GRID_STOP_LOSS_PCT) {
+    if (adverse >= effectiveGridStopPct(o.leverage)) {
       if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
       const grossPnl = (o.buyPrice! - price) * o.quantity
       const fees = (o.buyPrice! + price) * o.quantity * TAKER_FEE
       await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
-      const toCancel = active.filter(x => x.id !== o.id && x.status === "pending").map(x => x.id)
-      if (toCancel.length > 0) await db.update(gridOrders).set({ status: "cancelled" }).where(inArray(gridOrders.id, toCancel))
+      await cancelOtherPendingOrders(active, o.id)
       await db.update(gridOrders).set({ status: "filled" }).where(eq(gridOrders.id, o.id))
       await log("trade", `Grid ${o.symbol} SHORT STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${(grossPnl - fees).toFixed(2)} USDT`)
       return true
