@@ -87,7 +87,17 @@ Schema: [{"symbol": "", "reason": "", "levels": 0, "atrMult": 0.0, "leverage": 0
       } catch {}
     }
 
-    const recommendations = JSON.parse(content)
+    const rawRecs = JSON.parse(content)
+    
+    // Hard-coded safety clamps to prevent LLM hallucinations from risking capital
+    const recommendations = rawRecs.map((r: any) => ({
+      symbol: String(r.symbol).toUpperCase(),
+      reason: String(r.reason || 'No reason provided'),
+      levels: Math.min(Math.max(Number(r.levels) || 5, 4), 10),
+      atrMult: Math.min(Math.max(Number(r.atrMult) || 1.0, 0.5), 2.5),
+      leverage: Math.min(Math.max(Number(r.leverage) || 3, 2), 5),
+      budgetPct: Math.min(Math.max(Number(r.budgetPct) || 10, 5), 25)
+    }))
     return NextResponse.json({ success: true, recommendations })
 
   } catch (err: any) {
