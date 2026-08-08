@@ -368,10 +368,7 @@ async function settleGridSell(
     })
     .returning({ id: trades.id })
 
-  await db
-    .update(gridOrders)
-    .set({ status: "filled", filledAt: sql`NOW()` })
-    .where(eq(gridOrders.id, order.id))
+  // Order already marked as filled during atomic claim above
 
   // The buy fee was deducted when the rung filled. Add only gross PnL minus
   // the sell fee here, otherwise the buy fee is charged twice.
@@ -407,6 +404,14 @@ async function settleGridSell(
 // Maker settle: the resting post-only sell already executed on the exchange,
 // so we do NOT place any order here — we only record the trade and books.
 async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConfig): Promise<void> {
+  // ATOMIC CLAIM: Prevent duplicate settlement
+  const claimed = await db.update(gridOrders)
+    .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
+    .where(and(eq(gridOrders.id, order.id), eq(gridOrders.status, "pending")))
+    .returning({ id: gridOrders.id })
+  
+  if (claimed.length === 0) return // Already claimed by another process
+
   const buyPrice = order.buyPrice ?? order.price
   const sizeUsdt = (buyPrice * order.quantity) / order.leverage
   const grossPnl = (exitPrice - buyPrice) * order.quantity
@@ -432,10 +437,7 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
     })
     .returning({ id: trades.id })
 
-  await db
-    .update(gridOrders)
-    .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
-    .where(eq(gridOrders.id, order.id))
+  // Order already marked as filled during atomic claim
 
   await db
     .update(botConfig)
