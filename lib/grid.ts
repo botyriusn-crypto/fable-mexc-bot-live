@@ -1033,22 +1033,35 @@ export async function syncExchangeState() {
     const configs = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
     console.log(`[Reconcile] Syncing state for ${configs.length} enabled pairs...`)
     
-    const exchange = getExchangeClient("mexc" as Exchange)
-    
     for (const c of configs) {
       try {
-        const openOrders = await exchange.fetchOpenOrders(c.symbol)
-        const mexcIds = new Set(openOrders.map((o: any) => o.id))
-        
         const dbOrders = await db.select().from(gridOrders).where(
           and(eq(gridOrders.symbol, c.symbol), eq(gridOrders.status, "pending"))
         )
         
         for (const dbOrder of dbOrders) {
-          if (dbOrder.mexcOrderId && !mexcIds.has(dbOrder.mexcOrderId)) {
-            // LOUD LOG: Alert that a mismatch was found and corrected
-            await log("error", `[Reconcile] DRIFT DETECTED: ${c.symbol} DB Order ${dbOrder.mexcOrderId} missing on MEXC. Auto-corrected to 'cancelled'.`)
-            await db.update(gridOrders).set({ status: "cancelled", exchangeStatus: "cancelled" }).where(eq(gridOrders.id, dbOrder.id))
+          if (dbOrder.mexcOrderId) {
+            try {
+              const st: any = await fetchOrderStatus(dbOrder.mexcOrderId as string)
+              if (st) {
+                const state = Number(st.state)
+                // MEXC States: 1=Unfilled, 2=PartiallyFilled, 3=Filled, 4=Cancelled
+                if (state === 3 || state === 4) {
+                  const newStatus = state === 3 ? "filled" : "cancelled"
+                  // LOUD LOG: Alert that a mismatch was found and corrected
+                  await log("error", `[Reconcile] DRIFT DETECTED: ${c.symbol} DB Order ${dbOrder.mexcOrderId} is ${newStatus} on MEXC but pending in DB. Auto-correcting.`)
+                  await db.update(gridOrders).set({ 
+                    status: newStatus, 
+                    exchangeStatus: newStatus, 
+                    filledAt: state === 3 ? sql`NOW()` : null 
+                  }).where(eq(gridOrders.id, dbOrder.id))
+                }
+              }
+            } catch (e) {
+              // Silently skip individual order status failures to keep the loop moving
+            }
+            // 100ms delay to avoid rate limits during sync
+            await new Promise(r => setTimeout(r, 100))
           }
         }
       } catch (e) {
