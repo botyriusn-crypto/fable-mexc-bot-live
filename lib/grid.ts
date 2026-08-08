@@ -7,6 +7,7 @@ import type { Regime } from "./strategy"
 import { loadModel, trainOnTrade } from "./ml"
 import { getExchangeClient, type ExchangeClient } from "./exchange"
 import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderStatus, cancelOrders } from "./mexc/private"
+import { marketScales } from "./mexc/public"
 import { fetchTicker } from "./mexc/public"
 
 // Grid trading engine: a ladder of buy levels below price with paired sell
@@ -54,19 +55,12 @@ function isMakerSymbol(gc: { makerMode?: boolean }): boolean {
 }
 
 function roundForMexc(symbol: string, price: number, quantity: number): { price: number, quantity: number } {
-  const specs: Record<string, {ps: number, qs: number}> = {
-    "BTC_USDT": {ps: 1, qs: 0},
-    "ETH_USDT": {ps: 2, qs: 0},
-    "BANK_USDT": {ps: 5, qs: 4},
-    "ADA_USDT": {ps: 5, qs: 4},
-    "RIVER_USDT": {ps: 4, qs: 2},
-  }
-  const s = specs[symbol] || {ps: price < 1 ? 5 : 2, qs: 0}
-  let qty = Math.floor(quantity * Math.pow(10, s.qs)) / Math.pow(10, s.qs)
-  if (qty < Math.pow(10, -s.qs)) qty = Math.pow(10, -s.qs)
-  // Quantity rounding now handled by lib/mexc/precision.ts in placeMarketOrder
+  // Use live MEXC contract scales, fallback to safe defaults if not yet fetched
+  const scale = marketScales[symbol] || { price: 2, amount: 0 }
+  let qty = Math.floor(quantity * Math.pow(10, scale.amount)) / Math.pow(10, scale.amount)
+  if (qty < Math.pow(10, -scale.amount)) qty = Math.pow(10, -scale.amount)
   return {
-    price: Math.round(price * Math.pow(10, s.ps)) / Math.pow(10, s.ps),
+    price: parseFloat(price.toFixed(scale.price)),
     quantity: qty
   }
 }

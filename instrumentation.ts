@@ -6,6 +6,10 @@ export async function register() {
     const { eq } = await import("drizzle-orm")
     
     try {
+      // Fetch markets to populate precision scales cache
+      const { fetchMarkets } = await import("./lib/mexc/public")
+      await fetchMarkets()
+      
       const configs = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
       for (const c of configs) {
         initRealtimeEngine(c.symbol, c.timeframe)

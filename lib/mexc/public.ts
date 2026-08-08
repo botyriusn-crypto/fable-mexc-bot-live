@@ -2,6 +2,9 @@
 const BASE_URL = "https://api.mexc.com/api/v1/contract"
 
 export interface Candle { time: number; open: number; high: number; low: number; close: number; volume: number }
+
+// Global cache for MEXC contract precision scales
+export const marketScales: Record<string, { price: number, amount: number }> = {}
 export interface Ticker { symbol: string; lastPrice: number; fairPrice: number; fundingRate: number; riseFallRate: number; volume24: number }
 
 export async function fetchKlines(symbol: string, interval: string, limit = 200): Promise<Candle[]> {
@@ -60,10 +63,19 @@ export async function fetchMarkets() {
   if (!res.ok) throw new Error(`MEXC markets fetch failed: ${res.status}`)
   const json = await res.json()
   if (!json.success) throw new Error("MEXC markets response unsuccessful")
-  return json.data.filter((m: any) => m.state == null || m.state === 0).map((m: any) => ({
-    symbol: m.symbol, displayName: m.displayName ?? m.symbol.replace("_", "/"),
-    priceScale: m.priceScale ?? 4, amountScale: m.amountScale ?? 0, maxLeverage: m.maxLeverage ?? 20,
-  }))
+  
+  const markets = json.data.filter((m: any) => m.state == null || m.state === 0).map((m: any) => {
+    // Populate global cache for precision scaling
+    marketScales[m.symbol] = { 
+      price: m.priceScale ?? 4, 
+      amount: m.amountScale ?? 0 
+    }
+    return {
+      symbol: m.symbol, displayName: m.displayName ?? m.symbol.replace("_", "/"),
+      priceScale: m.priceScale ?? 4, amountScale: m.amountScale ?? 0, maxLeverage: m.maxLeverage ?? 20,
+    }
+  })
+  return markets
 }
 
 export function intervalToSeconds(interval: string): number {
