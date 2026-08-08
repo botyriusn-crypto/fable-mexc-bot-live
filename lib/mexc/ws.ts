@@ -65,7 +65,6 @@ export class MexcWebSocketManager {
         if (parsed.channel && parsed.channel.startsWith("push.kline") && parsed.data) {
           const k = parsed.data
           livePrices[(k.symbol || this.symbol).toUpperCase()] = parseFloat(k.close)
-          const k = parsed.data
           const currentStartTime = k.t
           if (this.lastKlineTime !== null && currentStartTime > this.lastKlineTime) {
             const kline: KlineUpdate = {
