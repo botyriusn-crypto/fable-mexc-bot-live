@@ -23,7 +23,7 @@ import { loadModel, trainOnTrade, gateEntry } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs } from "./grid"
 import { computeInitialStops, evaluateExit } from "./exits"
-import { MexcWebSocketManager, livePrices } from "./mexc/ws"
+import { MexcWebSocketManager, livePrices, livePriceTimestamps } from "./mexc/ws"
 
 // Chandelier Exit calculation: Trails from highest high/lowest low
 function calcChandelierExit(isLong: boolean, extremePrice: number, atr: number, mult: number): number {
@@ -442,6 +442,15 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         // Use live WebSocket price if available, otherwise fall back to candle close
         const livePrice = livePrices[symbol] || candles[candles.length - 1].close
         const ticker = { lastPrice: livePrice }
+        
+        // WebSocket Staleness Check
+        const lastUpdate = livePriceTimestamps[symbol] || 0
+        if (Date.now() - lastUpdate > 30000 && livePrices[symbol]) {
+          console.error(`[Engine] Stale WebSocket price for ${symbol} (last update >30s ago). Forcing reconnect.`)
+          const manager = globalThis.__wsManagers?.[symbol]
+          if (manager) manager.disconnect() // Triggers automatic reconnect
+          continue // Skip this tick to avoid trading on frozen price
+        }
         if (candles.length < 60) {
           await log("error", `${symbol} ${timeframe}: insufficient candle data (${candles.length})`)
           continue
