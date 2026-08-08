@@ -37,7 +37,7 @@ function AddPairControl({ existingSymbols, onAdded }: { existingSymbols: string[
   const filtered = useMemo(() => {
     if (!data?.markets) return []
     const q = query.trim().toUpperCase()
-    const pool = data.markets.filter((m) => !existingSymbols.includes(m.symbol))
+    const pool = data.markets.filter((m) => !existingSymbols.includes(m.symbol)) // Prevents adding duplicates
     const matched = q ? pool.filter((m) => m.symbol.includes(q) || m.displayName.toUpperCase().includes(q)) : pool
     return matched.slice(0, 50)
   }, [data?.markets, query, existingSymbols])

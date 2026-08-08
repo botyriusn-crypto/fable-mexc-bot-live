@@ -364,7 +364,11 @@ async function syncWithMexc(cfg: BotConfig) {
   }
 }
 
+let isTicking = false
+
 export async function runTick(): Promise<{ status: string; detail?: string }> {
+  if (isTicking) return { status: "skipped", detail: "Tick already in progress" }
+  isTicking = true
   const cfg = await getConfig()
   if (cfg.status !== "running") return { status: "skipped", detail: "Bot is stopped" }
   // Sync with MEXC to remove ghost orders
@@ -574,6 +578,8 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     const message = err instanceof Error ? err.message : String(err)
     await log("error", `Tick failed: ${message}`)
     return { status: "error", detail: message }
+  } finally {
+    isTicking = false
   }
 }
 
