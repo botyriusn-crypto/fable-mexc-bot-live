@@ -205,7 +205,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   const configuredHalf = snap.atr * gc.rangeAtrMult
   const breakeven = center * 2 * TAKER_FEE
   const feeBasedMin = breakeven * gc.feeMarginMult
-  const pctBasedMin = center * 0.003
+  const pctBasedMin = center * 0.005 // 0.5% floor — prevents zero-movement TP at high price magnitudes
   const minSpacing = Math.max(feeBasedMin, pctBasedMin)
   // GEOMETRIC SPACING: Widens gap between orders as price moves away from center.
   // Protects budget from deploying too fast during flash crashes/pumps.
@@ -330,11 +330,26 @@ async function settleGridSell(
   reason: "tp" | "manual",
   exchange?: ExchangeClient
 ): Promise<boolean> {
+  // ATOMIC CLAIM: only one concurrent caller can ever win this update (only
+  // succeeds if the row is still "pending"). Without this, overlapping
+  // triggers (duplicate WS events, overlapping ticks, or old/new instances
+  // briefly running side by side during a deploy) can all process the same
+  // fill, producing duplicate trade records and, in live mode, duplicate
+  // real market orders for a single position.
+  const claimed = await db.update(gridOrders)
+    .set({ status: "filled", filledAt: sql`NOW()` })
+    .where(and(eq(gridOrders.id, order.id), eq(gridOrders.status, "pending")))
+    .returning({ id: gridOrders.id })
+  if (claimed.length === 0) return false // another process already claimed this fill
+
   if (cfg.mode === "live") {
     try {
       if (exchange) { const r = roundForMexc(order.symbol, order.price, order.quantity); await exchange.placeMarketOrder({ symbol: order.symbol, side: 4, volume: r.quantity, leverage: order.leverage }) }
     } catch (err) {
       await log("error", `LIVE grid sell failed: ${err instanceof Error ? err.message : String(err)}`)
+      // Real sell failed on the exchange. Revert the claim so a later,
+      // legitimate retry can still process this fill.
+      await db.update(gridOrders).set({ status: "pending" }).where(eq(gridOrders.id, order.id))
       // Real sell failed on the exchange (e.g. position already closed
       // manually, or a transient API error). The caller must NOT re-arm a
       // fresh buy in this case — that was silently happening before and
