@@ -1046,7 +1046,8 @@ export async function syncExchangeState() {
         
         for (const dbOrder of dbOrders) {
           if (dbOrder.mexcOrderId && !mexcIds.has(dbOrder.mexcOrderId)) {
-            console.log(`[Reconcile] ${c.symbol}: DB Order ${dbOrder.mexcOrderId} missing on MEXC. Marking cancelled.`)
+            // LOUD LOG: Alert that a mismatch was found and corrected
+            await log("error", `[Reconcile] DRIFT DETECTED: ${c.symbol} DB Order ${dbOrder.mexcOrderId} missing on MEXC. Auto-corrected to 'cancelled'.`)
             await db.update(gridOrders).set({ status: "cancelled", exchangeStatus: "cancelled" }).where(eq(gridOrders.id, dbOrder.id))
           }
         }
