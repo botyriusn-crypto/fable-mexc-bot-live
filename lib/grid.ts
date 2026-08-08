@@ -226,6 +226,17 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   }
   const budget = (effectiveBalance * gc.budgetPct) / 100
   const notionalPerLevel = (budget / totalLevels) * gc.leverage
+  
+  // Liquidation Safety Check: Ensure leverage isn't so high that MEXC liquidates 
+  // the position before our 5% GRID_STOP_LOSS_PCT can trigger.
+  // MEXC liquidates at roughly 100% / leverage adverse move.
+  const liqDistancePct = 1.0 / gc.leverage
+  if (liqDistancePct <= GRID_STOP_LOSS_PCT * 1.5) {
+    await log("error", `Grid ${gc.symbol}: Refusing to build grid. Leverage ${gc.leverage}x is too high. Liquidation distance (${(liqDistancePct*100).toFixed(1)}%) is too close to stop-loss (${(GRID_STOP_LOSS_PCT*100).toFixed(1)}%). Reduce leverage to <= ${Math.floor(1.0 / (GRID_STOP_LOSS_PCT * 1.5))}x.`)
+    await db.update(gridConfigs).set({ paused: true }).where(eq(gridConfigs.id, gc.id))
+    return
+  }
+
   const isShort = gc.direction === "short" || (gc as any)._autoSide === "short"
   const orders: any[] = []
   for (let i = 1; i <= totalLevels; i++) {
