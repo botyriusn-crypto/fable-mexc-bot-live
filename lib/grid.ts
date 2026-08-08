@@ -690,7 +690,7 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
       : `Grid ${gc.symbol} resumed: ranging conditions restored`)
   }
 
-  // Auto-recenter: if price has drifted far from all orders, rebuild ladder
+  // Auto-recenter: if price has drifted far, OR if Bollinger Bands have squeezed tighter, rebuild ladder
   const allPrices = active.map(o => o.price)
   if (allPrices.length > 0) {
     const minOrderPrice = Math.min(...allPrices)
@@ -699,8 +699,14 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
       Math.abs(price - minOrderPrice) / price * 100,
       Math.abs(price - maxOrderPrice) / price * 100
     )
-    // If price is >15% away from the nearest order, tear down and rebuild
-    if (priceDrift > 15) {
+    
+    // Dynamic Bollinger Adjustment: If BB width is 40% narrower than our current spacing, rebuild tighter
+    const currentBbWidth = snap.bbUpper - snap.bbLower
+    const currentSpacing = active.find(o => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
+    const needsTighten = currentSpacing > (currentBbWidth / 4) * 1.4 && currentBbWidth > 0
+
+    // If price is >15% away, OR the grid is too wide for the current volatility
+    if (priceDrift > 15 || needsTighten) {
       await log("info", `Grid ${gc.symbol}: price drifted ${priceDrift.toFixed(1)}% from orders. Recentering ladder at ${price.toFixed(4)}.`)
       // Cancel ALL pending orders — if price crashed >40%, sells are hopeless
       const cancelAll = priceDrift > 40
