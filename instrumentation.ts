@@ -1,12 +1,21 @@
 export async function register() {
-  // Only run on the server, not during build
   if (process.env.NEXT_RUNTIME === "nodejs") {
     const { initRealtimeEngine } = await import("./lib/engine")
+    const { db } = await import("./lib/db")
+    const { gridConfigs } = await import("./lib/db/schema")
+    const { eq } = await import("drizzle-orm")
     
-    // Initialize the WebSocket engine for BTC and SOL on startup
-    initRealtimeEngine("BTC_USDT", "Min5")
-    initRealtimeEngine("SOL_USDT", "Min5")
-    
-    console.log("[Startup] Real-time WebSocket engine initialized automatically.")
+    try {
+      const configs = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
+      for (const c of configs) {
+        initRealtimeEngine(c.symbol, c.timeframe)
+      }
+      console.log(`[Startup] Real-time WebSocket engines initialized for ${configs.length} grid pairs.`)
+    } catch (err) {
+      console.error("[Startup] Failed to initialize WebSockets:", err)
+      // Fallback to BTC/SOL if DB isn't ready yet
+      initRealtimeEngine("BTC_USDT", "Min5")
+      initRealtimeEngine("SOL_USDT", "Min5")
+    }
   }
 }

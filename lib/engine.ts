@@ -23,7 +23,7 @@ import { loadModel, trainOnTrade, gateEntry } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs } from "./grid"
 import { computeInitialStops, evaluateExit } from "./exits"
-import { MexcWebSocketManager } from "./mexc/ws"
+import { MexcWebSocketManager, livePrices } from "./mexc/ws"
 
 // Chandelier Exit calculation: Trails from highest high/lowest low
 function calcChandelierExit(isLong: boolean, extremePrice: number, atr: number, mult: number): number {
@@ -439,12 +439,9 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         const candleLimit = isSelected ? Math.max(200, cfg.lorentzianLookback + 40) : 200
         await new Promise(r => setTimeout(r, 200)); // 200ms delay to prevent MEXC rate limits
         const candles = await exchange.fetchKlines(symbol, timeframe, candleLimit)
-        let ticker = { lastPrice: candles[candles.length - 1].close }
-        try {
-          ticker = await exchange.fetchTicker(symbol)
-        } catch (err) {
-          console.error('Ticker fetch failed for', symbol, '- using candle close instead')
-        }
+        // Use live WebSocket price if available, otherwise fall back to candle close
+        const livePrice = livePrices[symbol] || candles[candles.length - 1].close
+        const ticker = { lastPrice: livePrice }
         if (candles.length < 60) {
           await log("error", `${symbol} ${timeframe}: insufficient candle data (${candles.length})`)
           continue

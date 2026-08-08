@@ -1,6 +1,8 @@
 import WebSocket from "ws"
 import { log } from "../grid"
 
+export const livePrices: Record<string, number> = {}
+
 export interface KlineUpdate {
   symbol: string
   open: number
@@ -61,6 +63,8 @@ export class MexcWebSocketManager {
       try {
         const parsed = JSON.parse(msg)
         if (parsed.channel && parsed.channel.startsWith("push.kline") && parsed.data) {
+          const k = parsed.data
+          livePrices[(k.symbol || this.symbol).toUpperCase()] = parseFloat(k.close)
           const k = parsed.data
           const currentStartTime = k.t
           if (this.lastKlineTime !== null && currentStartTime > this.lastKlineTime) {
