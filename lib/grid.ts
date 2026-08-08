@@ -130,12 +130,14 @@ export async function getActiveOrders(symbol?: string, timeframe?: string): Prom
 // Build the ladder: buy levels below current price across the lower half of
 // the range. Sells are placed dynamically one spacing above each filled buy.
 
+
+
 const GRID_STOP_LOSS_PCT = 0.05 // 5% adverse move triggers stop-loss
 
 async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, exchange?: ExchangeClient): Promise<boolean> {
   const active = await getActiveOrders(gc.symbol, gc.timeframe)
   
-  // Check Long inventory (pending sells with a buyPrice)
+  // Check Long inventory
   for (const o of active.filter(x => x.side === "sell" && x.buyPrice != null && x.status === "pending")) {
     const adverse = (o.buyPrice! - price) / o.buyPrice!
     if (adverse >= GRID_STOP_LOSS_PCT) {
@@ -151,7 +153,7 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
     }
   }
 
-  // Check Short inventory (pending buys with a buyPrice)
+  // Check Short inventory
   for (const o of active.filter(x => x.side === "buy" && x.buyPrice != null && x.status === "pending")) {
     const adverse = (price - o.buyPrice!) / o.buyPrice!
     if (adverse >= GRID_STOP_LOSS_PCT) {
@@ -700,9 +702,8 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
   let spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
   const paused = gc.autoPause && regime === "trend"
   
-  // During trends, place one order in the direction of the move
-  }
-  
+  // Phantom trend order removed
+
   // Update paused state in grid_configs
   const gridConfigRow = await db.select().from(gridConfigs).where(
     and(eq(gridConfigs.symbol, gc.symbol), eq(gridConfigs.timeframe, gc.timeframe))
