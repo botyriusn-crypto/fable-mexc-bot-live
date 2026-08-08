@@ -420,8 +420,11 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
           const newDir = emaFast > emaSlow ? "auto-long" : "auto-short"
           
           if (gc.direction !== newDir) {
-            await db.update(gridConfigs).set({ direction: newDir }).where(eq(gridConfigs.id, gc.id))
-            gc.direction = newDir
+            try {
+              await db.update(gridConfigs).set({ direction: newDir }).where(eq(gridConfigs.id, gc.id))
+              gc.direction = newDir
+              await log("info", `Grid ${gc.symbol}: Auto-direction updated to ${newDir}`)
+            } catch (e) {}
           }
           (gc as any)._autoSide = newDir === "auto-long" ? "long" : "short"
         }
