@@ -11,6 +11,10 @@ export async function register() {
         initRealtimeEngine(c.symbol, c.timeframe)
       }
       console.log(`[Startup] Real-time WebSocket engines initialized for ${configs.length} grid pairs.`)
+      
+      // Reconcile DB with actual MEXC exchange state
+      const { syncExchangeState } = await import("./lib/grid")
+      await syncExchangeState()
     } catch (err) {
       console.error("[Startup] Failed to initialize WebSockets:", err)
       // Fallback to BTC/SOL if DB isn't ready yet

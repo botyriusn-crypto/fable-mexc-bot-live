@@ -110,6 +110,7 @@ export async function getGridConfigs(): Promise<GridConfig[]> {
   }))
 }
 
+
 export async function log(level: "info" | "trade" | "error", message: string, details?: unknown) {
   await db.insert(botLogs).values({
     level,
@@ -973,4 +974,36 @@ export async function gridUnrealizedPnl(currentPrice: number, symbol?: string, t
     ? await db.select().from(gridOrders).where(and(...conditions))
     : await db.select().from(gridOrders)
   return holding.reduce((acc, o) => acc + (currentPrice - (o.buyPrice ?? o.price)) * o.quantity, 0)
+}
+
+export async function syncExchangeState() {
+  try {
+    const configs = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
+    console.log(`[Reconcile] Syncing state for ${configs.length} enabled pairs...`)
+    
+    const exchange = getExchangeClient("mexc" as Exchange)
+    
+    for (const c of configs) {
+      try {
+        const openOrders = await exchange.fetchOpenOrders(c.symbol)
+        const mexcIds = new Set(openOrders.map((o: any) => o.id))
+        
+        const dbOrders = await db.select().from(gridOrders).where(
+          and(eq(gridOrders.symbol, c.symbol), eq(gridOrders.status, "pending"))
+        )
+        
+        for (const dbOrder of dbOrders) {
+          if (dbOrder.mexcOrderId && !mexcIds.has(dbOrder.mexcOrderId)) {
+            console.log(`[Reconcile] ${c.symbol}: DB Order ${dbOrder.mexcOrderId} missing on MEXC. Marking cancelled.`)
+            await db.update(gridOrders).set({ status: "cancelled", exchangeStatus: "cancelled" }).where(eq(gridOrders.id, dbOrder.id))
+          }
+        }
+      } catch (e) {
+        console.error(`[Reconcile] Failed for ${c.symbol}:`, e)
+      }
+    }
+    console.log("[Reconcile] State sync complete.")
+  } catch (e) {
+    console.error("[Reconcile] Failed to sync exchange state:", e)
+  }
 }
