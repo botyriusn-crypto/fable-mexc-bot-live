@@ -114,14 +114,15 @@ export async function log(level: "info" | "trade" | "error", message: string, de
 }
 
 export async function getActiveOrders(symbol?: string, timeframe?: string): Promise<GridOrder[]> {
-  const conditions = [eq(gridOrders.status, "pending")]
-  if (symbol) conditions.push(eq(gridOrders.symbol, symbol))
-  if (timeframe) conditions.push(eq(gridOrders.timeframe, timeframe))
-  return conditions.length > 0
-    ? db.select().from(gridOrders).where(and(...conditions))
-    : db.select().from(gridOrders)
+export async function getActiveOrders(symbol?: string, timeframe?: string): Promise<GridOrder[]> {
+  if (symbol && timeframe) {
+    return db.select().from(gridOrders).where(and(eq(gridOrders.status, "pending"), eq(gridOrders.symbol, symbol), eq(gridOrders.timeframe, timeframe)))
+  } else if (symbol) {
+    return db.select().from(gridOrders).where(and(eq(gridOrders.status, "pending"), eq(gridOrders.symbol, symbol)))
+  } else {
+    return db.select().from(gridOrders).where(eq(gridOrders.status, "pending"))
+  }
 }
-
 // Build the ladder: buy levels below current price across the lower half of
 // the range. Sells are placed dynamically one spacing above each filled buy.
 
@@ -1018,15 +1019,17 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
   if (pendingSells.length === 0) {
     await setupGrid(cfg, gc, snap, undefined, exchange)
   }
-}
 export async function gridUnrealizedPnl(currentPrice: number, symbol?: string, timeframe?: string): Promise<number> {
-  const conditions = [eq(gridOrders.status, "pending"), eq(gridOrders.side, "sell")]
-  if (symbol) conditions.push(eq(gridOrders.symbol, symbol))
-  if (timeframe) conditions.push(eq(gridOrders.timeframe, timeframe))
-  const holding = conditions.length > 0
-    ? await db.select().from(gridOrders).where(and(...conditions))
-    : await db.select().from(gridOrders)
+  let holding: GridOrder[]
+  if (symbol && timeframe) {
+    holding = await db.select().from(gridOrders).where(and(eq(gridOrders.status, "pending"), eq(gridOrders.side, "sell"), eq(gridOrders.symbol, symbol), eq(gridOrders.timeframe, timeframe)))
+  } else if (symbol) {
+    holding = await db.select().from(gridOrders).where(and(eq(gridOrders.status, "pending"), eq(gridOrders.side, "sell"), eq(gridOrders.symbol, symbol)))
+  } else {
+    holding = await db.select().from(gridOrders).where(and(eq(gridOrders.status, "pending"), eq(gridOrders.side, "sell")))
+  }
   return holding.reduce((acc, o) => acc + (currentPrice - (o.buyPrice ?? o.price)) * o.quantity, 0)
+}
 }
 
 export async function syncExchangeState() {
