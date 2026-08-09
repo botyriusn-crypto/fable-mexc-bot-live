@@ -114,7 +114,6 @@ export async function log(level: "info" | "trade" | "error", message: string, de
 }
 
 export async function getActiveOrders(symbol?: string, timeframe?: string): Promise<GridOrder[]> {
-export async function getActiveOrders(symbol?: string, timeframe?: string): Promise<GridOrder[]> {
   if (symbol && timeframe) {
     return db.select().from(gridOrders).where(and(eq(gridOrders.status, "pending"), eq(gridOrders.symbol, symbol), eq(gridOrders.timeframe, timeframe)))
   } else if (symbol) {
@@ -123,6 +122,7 @@ export async function getActiveOrders(symbol?: string, timeframe?: string): Prom
     return db.select().from(gridOrders).where(eq(gridOrders.status, "pending"))
   }
 }
+
 // Build the ladder: buy levels below current price across the lower half of
 // the range. Sells are placed dynamically one spacing above each filled buy.
 
@@ -1019,6 +1019,7 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
   if (pendingSells.length === 0) {
     await setupGrid(cfg, gc, snap, undefined, exchange)
   }
+}
 export async function gridUnrealizedPnl(currentPrice: number, symbol?: string, timeframe?: string): Promise<number> {
   let holding: GridOrder[]
   if (symbol && timeframe) {
@@ -1029,7 +1030,6 @@ export async function gridUnrealizedPnl(currentPrice: number, symbol?: string, t
     holding = await db.select().from(gridOrders).where(and(eq(gridOrders.status, "pending"), eq(gridOrders.side, "sell")))
   }
   return holding.reduce((acc, o) => acc + (currentPrice - (o.buyPrice ?? o.price)) * o.quantity, 0)
-}
 }
 
 export async function syncExchangeState() {
