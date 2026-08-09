@@ -170,8 +170,9 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
       const grossPnl = (price - o.buyPrice!) * o.quantity
       const fees = (o.buyPrice! + price) * o.quantity * TAKER_FEE
       await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
+      const claimedLongStop = await db.update(gridOrders).set({ status: "filled" }).where(and(eq(gridOrders.id, o.id), eq(gridOrders.status, "pending"))).returning({ id: gridOrders.id })
+      if (claimedLongStop.length === 0) return false
       await cancelOtherPendingOrders(active, o.id)
-      await db.update(gridOrders).set({ status: "filled" }).where(eq(gridOrders.id, o.id))
       await log("trade", `Grid ${o.symbol} STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${(grossPnl - fees).toFixed(2)} USDT`)
       return true
     }

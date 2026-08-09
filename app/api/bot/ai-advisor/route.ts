@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server"
 import { ema, atr, adx } from "@/lib/indicators"
+import { db } from "@/lib/db"
+import { botLogs } from "@/lib/db/schema"
+import { livePrices } from "@/lib/mexc/ws"
 import type { Candle } from "@/lib/mexc/public"
 
 export const dynamic = "force-dynamic"
@@ -41,11 +44,16 @@ export async function GET() {
         const atrArr = atr(candles, 14)
         const adxArr = adx(candles, 14)
         
+        // LAYER 3: Adverse Selection Detection (Momentum Verification)
+        const momentum3h = closes.length >= 4 ? ((closes[closes.length - 1] - closes[closes.length - 4]) / closes[closes.length - 4]) * 100 : 0
+        if (momentum3h < -2.0) continue // Hard filter: skip assets in active short-term decline
+        
         marketData.push({
           symbol: t.symbol,
           volumeUsdt: Math.round(t.amount24),
           atrPct: parseFloat(((atrArr[atrArr.length - 1] / lastClose) * 100).toFixed(2)),
-          adx: parseFloat(adxArr[adxArr.length - 1].toFixed(1))
+          adx: parseFloat(adxArr[adxArr.length - 1].toFixed(1)),
+          momentum3h: parseFloat(momentum3h.toFixed(2))
         })
       } catch (err) { continue }
     }
@@ -56,7 +64,8 @@ Analyze the provided market data array and select the top 3 assets best suited f
 Rules:
 1. ADX must be between 15 and 30 (ranging/choppy market).
 2. ATR% must be above 1.2% (to beat trading fees).
-3. Based on volatility, recommend levels (5-8), atrMult (1.0-2.0), leverage (3-5), and budgetPct (10-20).
+3. momentum3h must be greater than -1.0% (do not recommend assets that are actively dumping).
+4. Based on volatility, recommend levels (5-8), atrMult (1.0-2.0), leverage (3-5), and budgetPct (10-20).
 You MUST respond with ONLY a valid JSON array. No markdown, no explanation.
 Schema: [{"symbol": "", "reason": "", "levels": 0, "atrMult": 0.0, "leverage": 0, "budgetPct": 0}]`
 
@@ -98,6 +107,19 @@ Schema: [{"symbol": "", "reason": "", "levels": 0, "atrMult": 0.0, "leverage": 0
       leverage: Math.min(Math.max(Number(r.leverage) || 3, 2), 5),
       budgetPct: Math.min(Math.max(Number(r.budgetPct) || 10, 5), 25)
     }))
+    
+    // Phase 2: Log picks to DB for 30-min feedback loop
+    for (const rec of recommendations) {
+      const entryPrice = livePrices[rec.symbol]
+      if (entryPrice) {
+        await db.insert(botLogs).values({
+          level: "ai_pick",
+          message: `AI Pick: ${rec.symbol}`,
+          details: { symbol: rec.symbol, entryPrice, settings: rec }
+        })
+      }
+    }
+    
     return NextResponse.json({ success: true, recommendations })
 
   } catch (err: any) {

@@ -28,6 +28,16 @@ export async function register() {
           console.error("[Reconcile] Scheduled sync failed:", e)
         }
       }, 15 * 60 * 1000)
+      
+      // Schedule AI Feedback evaluation every 30 minutes
+      const { evaluateAiPicks } = await import("./lib/ai-feedback")
+      setInterval(async () => {
+        try {
+          await evaluateAiPicks()
+        } catch (e) {
+          console.error("[AI Feedback] Scheduled evaluation failed:", e)
+        }
+      }, 30 * 60 * 1000)
     } catch (err) {
       console.error("[Startup] Failed to initialize WebSockets:", err)
       // Fallback to BTC/SOL if DB isn't ready yet
