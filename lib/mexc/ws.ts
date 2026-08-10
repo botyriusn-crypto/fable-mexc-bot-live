@@ -49,15 +49,26 @@ export class MexcWebSocketManager {
       if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
       this.heartbeatInterval = setInterval(() => {
         if (this.ws?.readyState === WebSocket.OPEN) {
+          console.log(`[WS] ${this.symbol} sending client-side text ping`)
           this.ws.send("ping") 
         }
-      }, 15000) 
+      }, 10000) // Send every 10s to be safe
+    })
+
+    // Listen for protocol-level pings from the server (Node's ws library auto-replies to these)
+    this.ws.on("ping", () => {
+      console.log(`[WS] ${this.symbol} received protocol-level ping from server`)
     })
 
     this.ws.on("message", (data: WebSocket.RawData) => {
       const msg = data.toString()
-      if (msg === "ping") { this.ws?.send("pong"); return }
-      if (msg === "pong") return
+      if (msg === "ping" || msg === "PING") { this.ws?.send("pong"); return }
+      if (msg === "pong" || msg === "PONG") return
+
+      // Log any non-JSON messages to see exactly what the server is sending us
+      if (!msg.startsWith("{")) {
+        console.log(`[WS] ${this.symbol} non-JSON message received: "${msg}"`)
+      }
 
       try {
         const parsed = JSON.parse(msg)
