@@ -65,3 +65,76 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const takeProfit = direction === "long" ? entry + risk * 3 : entry - risk * 3
   return { direction, reason, confidence: Math.min(confidence, 0.95), stopLoss, takeProfit }
 }
+
+// ── Exchange-wide rotation sweep (observe-only) ─────────────────────────
+// Phase 1: cheap ticker pre-filter across ALL MEXC futures.
+// Phase 2: deep 15m kline scan on the shortlist only.
+import { log as sweepLog } from "./grid"
+
+const SWEEP_MIN_INTERVAL_MS = 5 * 60 * 1000
+let sweepRunning = false
+let lastSweepTs = 0
+
+export function maybeScanExchange(): void {
+  const now = Date.now()
+  if (sweepRunning || now - lastSweepTs < SWEEP_MIN_INTERVAL_MS) return
+  lastSweepTs = now
+  sweepRunning = true
+  scanExchangeSniper()
+    .catch((err) => console.error(`[Sniper] exchange sweep failed: ${err instanceof Error ? err.message : String(err)}`))
+    .finally(() => { sweepRunning = false })
+}
+
+export async function scanExchangeSniper(): Promise<number> {
+  const res = await fetch("https://contract.mexc.com/api/v1/contract/ticker", { cache: "no-store" })
+  const json = (await res.json()) as any
+  if (!json.success || !Array.isArray(json.data)) return 0
+  const candidates = (json.data as any[])
+    .filter((t) => t.symbol.endsWith("_USDT") && !t.symbol.includes("STOCK") && !t.symbol.includes("3L") && !t.symbol.includes("3S"))
+    .filter((t) => (t.amount24 ?? 0) > 20000000)
+    .filter((t) => Math.abs(t.riseFallRate ?? 0) > 0.02 || Math.abs(t.fundingRate ?? 0) > 0.0004)
+    .map((t) => ({
+      symbol: t.symbol as string,
+      funding: Number(t.fundingRate ?? 0),
+      score:
+        Math.abs(Number(t.riseFallRate ?? 0)) * Math.log10(Math.max(10, Number(t.amount24 ?? 10) / 1e6)) +
+        Math.abs(Number(t.fundingRate ?? 0)) * 50,
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 12)
+  let found = 0
+  for (const c of candidates) {
+    try {
+      const end = Math.floor(Date.now() / 1000)
+      const start = end - 2 * 24 * 3600
+      const kres = await fetch(
+        `https://contract.mexc.com/api/v1/contract/kline/${c.symbol}?interval=Min15&start=${start}&end=${end}`,
+        { cache: "no-store" }
+      )
+      const kj = (await kres.json()) as any
+      if (!kj.success || !kj.data?.time?.length) continue
+      const { time, open, high, low, close, vol } = kj.data
+      const candles: Candle[] = []
+      for (let i = 0; i < time.length; i++) {
+        candles.push({ time: time[i], open: open[i], high: high[i], low: low[i], close: close[i], volume: vol[i] ?? 0 })
+      }
+      const sig = detectSniper(candles, null as any, c.funding)
+      if (sig.direction) {
+        found++
+        const cool = ((globalThis as any).__sniperLast ?? {})[c.symbol] ?? 0
+        if (Date.now() - cool > 6 * 3600 * 1000) {
+          ;(globalThis as any).__sniperLast = { ...((globalThis as any).__sniperLast ?? {}), [c.symbol]: Date.now() }
+          await sweepLog(
+            "info",
+            `🎯 SNIPER CANDIDATE ${c.symbol}: ${sig.direction.toUpperCase()} | ${sig.reason} | conf ${(sig.confidence * 100).toFixed(0)}% | SL ${sig.stopLoss.toFixed(6)} | TP ${sig.takeProfit.toFixed(6)}`
+          )
+        }
+      }
+      await new Promise((r) => setTimeout(r, 80))
+    } catch {
+      continue
+    }
+  }
+  console.log(`[Sniper] exchange sweep: ${candidates.length} names deep-scanned, ${found} candidate(s)`)
+  return found
+}

@@ -21,7 +21,7 @@ import { classifyLorentzian, combineConfirmation } from "./lorentzian"
 import { computeSnapshot, getFeatures, type FeatureVector, type IndicatorSnapshot } from "./indicators"
 import { loadModel, trainOnTrade, gateEntry } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
-import { detectSniper, SNIPER_LIVE } from "./sniper"
+import { detectSniper, SNIPER_LIVE, maybeScanExchange } from "./sniper"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs } from "./grid"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager, livePrices, livePriceTimestamps } from "./mexc/ws"
@@ -484,7 +484,8 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         }
 
         if (isSelected) await resolveClassifierOutcomes(symbol, timeframe, candles)
-        // ── Sniper Engine v1: event-driven dislocation scanner (observe-only) ──
+        maybeScanExchange() // full-MEXC rotation sweep (background, every 5m)
+// ── Sniper Engine v1: event-driven dislocation scanner (observe-only) ──
 if (isSelected) {
 try {
 const realTicker = await exchange.fetchTicker(symbol)
