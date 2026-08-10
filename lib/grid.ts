@@ -534,7 +534,9 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
     .returning({ id: trades.id })
 
   await db.update(gridOrders).set({ status: "filled", exchangeStatus: "cancelled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, order.id))
-  await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - sellFee}` }).where(eq(botConfig.id, 1))
+  if (cfg.mode === "paper") {
+    await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - sellFee}` }).where(eq(botConfig.id, 1))
+  }
 
   if (trade && order.entryFeatures) {
     try {
@@ -577,7 +579,9 @@ exitReason: reason, strategy: "grid", live: cfg.mode === "live",
 })
 .returning({ id: trades.id })
 await db.update(gridOrders).set({ status: "filled", exchangeStatus: "cancelled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, order.id))
-await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (exitPrice * order.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
+if (cfg.mode === "paper") {
+  await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (exitPrice * order.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
+}
 if (trade && order.entryFeatures) {
 try {
 const model = await loadModel()
@@ -1031,7 +1035,9 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
         const fees = (sellPrice + exitPrice) * o.quantity * TAKER_FEE
         const netPnl = grossPnl - fees
         await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
+        if (cfg.mode === "paper") {
+          await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
+        }
         await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice, sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
         await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
         const newSellPrice = exitPrice + (snap.atr * gc.rangeAtrMult)
@@ -1054,7 +1060,9 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
       const fees = (sellPrice + o.price) * o.quantity * TAKER_FEE
       const netPnl = grossPnl - fees
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
+      if (cfg.mode === "paper") {
+        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
+      }
       await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice: o.price, sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
       await log("trade", `Short ${o.symbol} closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
       const newSellPrice = o.price + (snap.atr * gc.rangeAtrMult)
