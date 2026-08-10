@@ -80,12 +80,13 @@ export class MexcWebSocketManager {
       } catch (err) {}
     })
 
-    this.ws.on("error", (err: Error) => log("error", `[WS] Error: ${err.message}`))
+    this.ws.on("error", (err: Error) => { console.error(`[WS] Error: ${err.message}`); log("error", `[WS] Error: ${err.message}`); })
 
     this.ws.on("close", () => {
       if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
       if (!this.isReconnecting) {
         this.isReconnecting = true
+        console.log(`[WS] Disconnected. Reconnecting in 3s...`);
         log("info", `[WS] Disconnected. Reconnecting in 3s...`)
         setTimeout(() => { this.isReconnecting = false; this.connect() }, 3000)
       }
