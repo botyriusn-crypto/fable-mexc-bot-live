@@ -170,7 +170,9 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
       if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 4, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
       const grossPnl = (price - o.buyPrice!) * o.quantity
       const fees = (o.buyPrice! + price) * o.quantity * TAKER_FEE
-      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
+      if (cfg.mode === "paper") {
+        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
+      }
       const claimedLongStop = await db.update(gridOrders).set({ status: "filled" }).where(and(eq(gridOrders.id, o.id), eq(gridOrders.status, "pending"))).returning({ id: gridOrders.id })
       if (claimedLongStop.length === 0) return false
       await cancelOtherPendingOrders(active, o.id)
@@ -186,7 +188,9 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
       if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
       const grossPnl = (o.buyPrice! - price) * o.quantity
       const fees = (o.buyPrice! + price) * o.quantity * TAKER_FEE
-      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
+      if (cfg.mode === "paper") {
+        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
+      }
       await cancelOtherPendingOrders(active, o.id)
       await db.update(gridOrders).set({ status: "filled" }).where(eq(gridOrders.id, o.id))
       await log("trade", `Grid ${o.symbol} SHORT STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${(grossPnl - fees).toFixed(2)} USDT`)
@@ -395,10 +399,12 @@ async function settleGridSell(
 
   // The buy fee was deducted when the rung filled. Add only gross PnL minus
   // the sell fee here, otherwise the buy fee is charged twice.
-  await db
-    .update(botConfig)
-    .set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - sellFee}` })
-    .where(eq(botConfig.id, 1))
+  if (cfg.mode === "paper") {
+    await db
+      .update(botConfig)
+      .set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - sellFee}` })
+      .where(eq(botConfig.id, 1))
+  }
 
   if (trade && order.entryFeatures) {
     try {
@@ -462,10 +468,12 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
 
   // Order already marked as filled during atomic claim
 
-  await db
-    .update(botConfig)
-    .set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - sellFee}` })
-    .where(eq(botConfig.id, 1))
+  if (cfg.mode === "paper") {
+    await db
+      .update(botConfig)
+      .set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - sellFee}` })
+      .where(eq(botConfig.id, 1))
+  }
 
   if (trade && order.entryFeatures) {
     try {
@@ -949,7 +957,9 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
       const fees = (sellPrice + exitPrice) * o.quantity * TAKER_FEE
       const netPnl = grossPnl - fees
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
+      if (cfg.mode === "paper") {
+        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
+      }
       await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice, sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
       await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(6)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
       try {

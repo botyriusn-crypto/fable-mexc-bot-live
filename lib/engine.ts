@@ -223,10 +223,12 @@ export async function closePosition(
     .set({ status: "closed", closedAt: sql`NOW()` })
     .where(eq(positions.id, position.id))
 
-  await db
-    .update(botConfig)
-    .set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` })
-    .where(eq(botConfig.id, 1))
+  if (cfg.mode === "paper") {
+    await db
+      .update(botConfig)
+      .set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` })
+      .where(eq(botConfig.id, 1))
+  }
 
   await log(
     "trade",
