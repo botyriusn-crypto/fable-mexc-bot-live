@@ -17,6 +17,7 @@ export const FEATURE_KEYS: (keyof FeatureVector)[] = [
   "volSurge",
   "sideLong",
 ]
+const MODEL_GEN = 2
 
 export interface MlState {
   weights: Record<string, number>

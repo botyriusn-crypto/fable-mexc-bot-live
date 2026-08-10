@@ -29,7 +29,7 @@ export function MlCard({ state }: { state: BotState }) {
     )
   }
 
-  const weights = Object.entries(model.weights ?? {})
+  const weights = Object.entries(model.weights ?? {}).filter(([k]) => !k.startsWith("__"))
   const maxAbs = Math.max(0.05, ...weights.map(([, v]) => Math.abs(v)))
   const learning = model.sampleCount < 30
 

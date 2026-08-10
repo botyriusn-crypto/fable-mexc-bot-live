@@ -21,6 +21,7 @@ import { classifyLorentzian, combineConfirmation } from "./lorentzian"
 import { computeSnapshot, getFeatures, type FeatureVector, type IndicatorSnapshot } from "./indicators"
 import { loadModel, trainOnTrade, gateEntry } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
+import { detectSniper, SNIPER_LIVE } from "./sniper"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs } from "./grid"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager, livePrices, livePriceTimestamps } from "./mexc/ws"
@@ -481,7 +482,27 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         }
 
         if (isSelected) await resolveClassifierOutcomes(symbol, timeframe, candles)
-        if (isSelected && !marketPosition) {
+        // ── Sniper Engine v1: event-driven dislocation scanner (observe-only) ──
+if (isSelected) {
+try {
+const realTicker = await exchange.fetchTicker(symbol)
+const sn = detectSniper(candles, snap, (realTicker as any)?.fundingRate ?? 0)
+if (sn.direction) {
+const nowTs = Date.now()
+const lastLog = ((globalThis as any).__sniperLast ?? {})[symbol] ?? 0
+if (nowTs - lastLog > 6 * 3600 * 1000) {
+;(globalThis as any).__sniperLast = { ...((globalThis as any).__sniperLast ?? {}), [symbol]: nowTs }
+await log("info", `🎯 SNIPER CANDIDATE ${symbol}: ${sn.direction.toUpperCase()} | ${sn.reason} | conf ${(sn.confidence * 100).toFixed(0)}% | SL ${sn.stopLoss.toFixed(6)} | TP ${sn.takeProfit.toFixed(6)}`)
+if (SNIPER_LIVE && (sn.direction === "long" ? marketCfg.allowLong : marketCfg.allowShort)) {
+await openPosition(marketCfg, sn.direction, snap, sn.confidence, { ...snap.features, sideLong: sn.direction === "long" ? 1 : -1 }, "sniper", { stopLoss: sn.stopLoss, takeProfit: sn.takeProfit })
+}
+}
+}
+} catch (err) {
+await log("error", `Sniper scan failed: ${err instanceof Error ? err.message : String(err)}`)
+}
+}
+if (isSelected && !marketPosition) {
           const signal = evaluateEntry(snap, candles, marketCfg, model)
           if (signal.baseTriggered && signal.candidateDirection && signal.features) {
             const lorentzian = classifyLorentzian(candles, lorentzianOptions(marketCfg))
