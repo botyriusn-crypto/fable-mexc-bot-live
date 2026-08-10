@@ -209,7 +209,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   const bbBaseSpacing = bbWidth / 4
   const baseSpacing = Math.max(bbBaseSpacing, minSpacing)
   const geomRatio = 1.15 // Each level is 15% further than the last
-  const totalLevels = Math.max(1, Math.floor(gc.levels / 2))
+  const totalLevels = Math.max(1, Math.min(12, Math.floor(gc.levels / 2))) // Cap at 12 levels per side
   const effectiveLevels = gc.levels
   // Approximate half-range for DB logging
   let distAccum = 0
