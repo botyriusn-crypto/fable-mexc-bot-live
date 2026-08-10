@@ -158,7 +158,7 @@ export async function GET() {
         gridLeverage: gc.leverage,
         spacing: gc.spacing,
         buyCount: buys.length,
-        sellCount: sells.length,
+        sellCount: (typeof sells !== "undefined" ? sells.length : (typeof active !== "undefined" ? active : typeof orders !== "undefined" ? orders : []).filter((o: any) => o.side === "sell").length),
         unrealizedPnl: unrealized,
         realizedPnl: realized,
         budgetPct: gc.budgetPct,
