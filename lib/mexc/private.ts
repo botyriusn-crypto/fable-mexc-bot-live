@@ -96,17 +96,28 @@ export async function placeMarketOrder(opts: {
   })
 }
 
-export async function getAccountAssets(): Promise<unknown> {
-  const result: any = await privateRequest("GET", "/account/assets")
-  if (result && typeof result === "object" && "data" in result) {
-    return result.data
+export async function getAccountAssets(): Promise<any> {
+  try {
+    const result: any = await privateRequest("GET", "/account/assets")
+    if (result && typeof result === "object" && "data" in result) {
+      return result.data
+    }
+    return result || []
+  } catch (err) {
+    // Fallback for Paper Mode
+    return []
   }
-  return result
 }
 
-export async function getOpenPositions(symbol?: string): Promise<unknown> {
-  const path = symbol ? `/position/open?symbol=${symbol}` : "/position/open"
-  return privateRequest("GET", path)
+export async function getOpenPositions(symbol?: string): Promise<any> {
+  try {
+    const path = symbol ? `/position/open?symbol=${symbol}` : "/position/open"
+    const res: any = await privateRequest("GET", path)
+    return res?.data || []
+  } catch (err) {
+    // 404 is completely normal in Paper Mode or if no real positions exist
+    return []
+  }
 }
 
 export async function fetchOrderStatus(orderId: string): Promise<any | null> {
