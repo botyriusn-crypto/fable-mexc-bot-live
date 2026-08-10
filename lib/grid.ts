@@ -585,7 +585,8 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   if (gc.direction === "short" || (gc as any)._autoSide === "short") { return handleShortGridTickMaker(cfg, gc, snap, regime) }
   let active = await getActiveOrders(gc.symbol, gc.timeframe)
   const volatility = detectVolatilitySurge(gc.symbol, snap)
-  const paused = gc.autoPause && regime === "trend"
+  const gridAdxThreshold = 32 // Grids handle mild trends better than single positions
+const paused = gc.autoPause && snap.adx >= gridAdxThreshold
 
   const gridConfigRow = await db.select().from(gridConfigs).where(
     and(eq(gridConfigs.symbol, gc.symbol), eq(gridConfigs.timeframe, gc.timeframe))
@@ -797,7 +798,8 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
     if (sellPrices.length > 0) price = Math.max(...sellPrices) + 0.0001
   }
   let spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
-  const paused = gc.autoPause && regime === "trend"
+  const gridAdxThreshold = 32 // Grids handle mild trends better than single positions
+const paused = gc.autoPause && snap.adx >= gridAdxThreshold
   
   // Phantom trend order removed
 
