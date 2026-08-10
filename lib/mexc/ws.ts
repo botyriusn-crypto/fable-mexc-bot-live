@@ -49,29 +49,31 @@ export class MexcWebSocketManager {
       if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
       this.heartbeatInterval = setInterval(() => {
         if (this.ws?.readyState === WebSocket.OPEN) {
-          console.log(`[WS] ${this.symbol} sending client-side text ping`)
-          this.ws.send("ping") 
+          // Shotgun keep-alive: send BOTH documented MEXC ping formats
+          this.ws.send("ping")
+          this.ws.send(JSON.stringify({ method: "ping" }))
         }
-      }, 10000) // Send every 10s to be safe
-    })
-
-    // Listen for protocol-level pings from the server (Node's ws library auto-replies to these)
-    this.ws.on("ping", () => {
-      console.log(`[WS] ${this.symbol} received protocol-level ping from server`)
+      }, 15000)
     })
 
     this.ws.on("message", (data: WebSocket.RawData) => {
       const msg = data.toString()
-      if (msg === "ping" || msg === "PING") { this.ws?.send("pong"); return }
-      if (msg === "pong" || msg === "PONG") return
 
-      // Log any non-JSON messages to see exactly what the server is sending us
-      if (!msg.startsWith("{")) {
-        console.log(`[WS] ${this.symbol} non-JSON message received: "${msg}"`)
-      }
+      // Text keep-alive
+      if (msg === "ping") { this.ws?.send("pong"); return }
+      if (msg === "pong") return
 
       try {
         const parsed = JSON.parse(msg)
+
+        // JSON keep-alive (documented MEXC spot/contract format)
+        if (parsed.method === "ping" || parsed.channel === "ping") {
+          this.ws?.send(JSON.stringify({ method: "pong" }))
+          this.ws?.send("pong")
+          return
+        }
+        if (parsed.method === "pong" || parsed.channel === "pong") return
+
         if (parsed.channel && parsed.channel.startsWith("push.kline") && parsed.data) {
           const k = parsed.data
           const sym = (k.symbol || this.symbol).toUpperCase()
@@ -98,12 +100,14 @@ export class MexcWebSocketManager {
     })
 
     this.ws.on("close", (code: number, reason: Buffer) => {
-      console.log(`[WS] CLOSED: code=${code} reason=${reason?.toString() || 'none'}`)
-      log("info", `[WS] CLOSED: code=${code} reason=${reason?.toString() || 'none'}`)
+      console.log(`[WS] CLOSED: code=${code} reason=${reason?.toString() || "none"}`)
+      // Only surface non-routine closes in the UI Activity Log
+      if (code !== 1005 && code !== 1006) {
+        log("info", `[WS] CLOSED: code=${code} reason=${reason?.toString() || "none"}`)
+      }
       if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
       if (!this.isReconnecting) {
         this.isReconnecting = true
-        log("info", `[WS] Reconnecting in 3s...`)
         setTimeout(() => { this.isReconnecting = false; this.connect() }, 3000)
       }
     })
