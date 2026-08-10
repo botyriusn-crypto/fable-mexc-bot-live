@@ -100,24 +100,52 @@ export async function GET() {
 
     // Legacy single-grid for selected market (keeps existing GridCard working)
     const selectedGridOrders = activeGridOrders.filter(o => o.symbol === cfg.symbol && o.timeframe === cfg.timeframe)
-    const gridHolding = selectedGridOrders.filter(o => o.side === "sell")
-    const gridUnrealized = gridHolding.reduce((t, o) => {
+    const selectedDir = gridConfigRows.find(gc => gc.symbol === cfg.symbol && gc.timeframe === cfg.timeframe)?.direction || "long"
+    let gridUnrealized = 0
+    for (const o of selectedGridOrders) {
       const mark = markBySymbol.get(o.symbol)
-      return t + (o.buyPrice ? (o.price - o.buyPrice) * o.quantity : 0)
-    }, 0)
-    const totalGridUnrealized = activeGridOrders.filter(o => o.side === "sell").reduce((t, o) => {
-      const mark = markBySymbol.get(o.symbol)
-      return t + (o.buyPrice ? (o.price - o.buyPrice) * o.quantity : 0)
-    }, 0)
+      if (!mark || !o.buyPrice) continue
+      if (selectedDir === "long" && o.side === "sell") {
+        gridUnrealized += (mark - o.buyPrice) * o.quantity
+      } else if (selectedDir === "short" && o.side === "buy") {
+        gridUnrealized += (o.buyPrice - mark) * o.quantity
+      }
+    }
+    const gridHolding = selectedGridOrders.filter(o => (selectedDir === "long" && o.side === "sell" && o.buyPrice) || (selectedDir === "short" && o.side === "buy" && o.buyPrice))
+    let totalGridUnrealized = 0
+    for (const gc of gridConfigRows) {
+      const mark = markBySymbol.get(gc.symbol)
+      if (!mark) continue
+      const orders = activeGridOrders.filter(o => o.symbol === gc.symbol && o.timeframe === gc.timeframe)
+      const dir = gc.direction || "long"
+      for (const o of orders) {
+        // Open longs are pending SELL orders with a recorded buyPrice (entry)
+        if (dir === "long" && o.side === "sell" && o.buyPrice) {
+          totalGridUnrealized += (mark - o.buyPrice) * o.quantity
+        }
+        // Open shorts are pending BUY orders with a recorded buyPrice (entry)
+        else if (dir === "short" && o.side === "buy" && o.buyPrice) {
+          totalGridUnrealized += (o.buyPrice - mark) * o.quantity
+        }
+      }
+    }
     const gridRealized = recentTrades.filter(t => t.strategy === "grid" && t.symbol === cfg.symbol).reduce((t, trade) => t + trade.pnl, 0)
 
     // Multi-pair grid configs with live state
     const gridConfigsState = await Promise.all(gridConfigRows.map(async (gc) => {
       const orders = activeGridOrders.filter(o => o.symbol === gc.symbol && o.timeframe === gc.timeframe)
       const buys = orders.filter(o => o.side === "buy")
-      const sells = orders.filter(o => o.side === "sell")
       const mark = markBySymbol.get(gc.symbol) ?? null
-      const unrealized = sells.reduce((t, o) => t + (o.buyPrice ? (o.price - o.buyPrice) * o.quantity : 0), 0)
+      let unrealized = 0
+      const dir = gc.direction || "long"
+      for (const o of orders) {
+        if (!mark || !o.buyPrice) continue
+        if (dir === "long" && o.side === "sell") {
+          unrealized += (mark - o.buyPrice) * o.quantity
+        } else if (dir === "short" && o.side === "buy") {
+          unrealized += (o.buyPrice - mark) * o.quantity
+        }
+      }
       const realized = recentTrades.filter(t => t.strategy === "grid" && t.symbol === gc.symbol && (cfg.mode === "live" ? (t.live === true) : (t.live !== true))).reduce((t, trade) => t + trade.pnl, 0)
       return {
         symbol: gc.symbol,
