@@ -58,8 +58,10 @@ export async function fetchTicker(symbol: string): Promise<Ticker> {
   throw new Error("MEXC ticker failed after 3 retries")
 }
 
+let _marketsCache: { data: any; ts: number } | null = null
 export async function fetchMarkets() {
-  const res = await fetch(`${BASE_URL}/detail`, { next: { revalidate: 300 } })
+  if (_marketsCache && Date.now() - _marketsCache.ts < 5 * 60 * 1000) return _marketsCache.data
+  const res = await fetch(`${BASE_URL}/detail`, { cache: "no-store" })
   if (!res.ok) throw new Error(`MEXC markets fetch failed: ${res.status}`)
   const json = await res.json()
   if (!json.success) throw new Error("MEXC markets response unsuccessful")
@@ -75,6 +77,7 @@ export async function fetchMarkets() {
       priceScale: m.priceScale ?? 4, amountScale: m.amountScale ?? 0, maxLeverage: m.maxLeverage ?? 20,
     }
   })
+  _marketsCache = { data: markets, ts: Date.now() }
   return markets
 }
 
