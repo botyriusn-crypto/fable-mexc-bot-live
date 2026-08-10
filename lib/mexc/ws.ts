@@ -38,7 +38,7 @@ export class MexcWebSocketManager {
     this.ws = new WebSocket(this.url)
 
     this.ws.on("open", () => {
-      this.reconnectDelay = 3000 // Reset backoff on success
+      this.reconnectDelay = 3000
       log("info", `[WS] Connected. Subscribing to ${this.symbol.toUpperCase()} ${this.interval} klines...`)
       const subMsg = {
         method: "sub.kline",
@@ -49,15 +49,13 @@ export class MexcWebSocketManager {
       if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
       this.heartbeatInterval = setInterval(() => {
         if (this.ws?.readyState === WebSocket.OPEN) {
-          this.ws.send("ping") // MEXC Contract API requires CLIENT to send "ping" every 20s
+          this.ws.send("ping") 
         }
-      }, 20000) // Send every 20s to keep alive
+      }, 15000) 
     })
 
     this.ws.on("message", (data: WebSocket.RawData) => {
       const msg = data.toString()
-      
-      // Handle plain text ping/pong
       if (msg === "ping") { this.ws?.send("pong"); return }
       if (msg === "pong") return
 
@@ -83,14 +81,18 @@ export class MexcWebSocketManager {
       } catch (err) {}
     })
 
-    this.ws.on("error", (err: Error) => { console.error(`[WS] Error: ${err.message}`); log("error", `[WS] Error: ${err.message}`); })
+    this.ws.on("error", (err: Error) => {
+      console.error(`[WS] Error: ${err.message}`)
+      log("error", `[WS] Error: ${err.message}`)
+    })
 
-    this.ws.on("close", () => {
+    this.ws.on("close", (code: number, reason: Buffer) => {
+      console.log(`[WS] CLOSED: code=${code} reason=${reason?.toString() || 'none'}`)
+      log("info", `[WS] CLOSED: code=${code} reason=${reason?.toString() || 'none'}`)
       if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
       if (!this.isReconnecting) {
         this.isReconnecting = true
-        console.log(`[WS] Disconnected. Reconnecting in 3s...`);
-        log("info", `[WS] Disconnected. Reconnecting in 3s...`)
+        log("info", `[WS] Reconnecting in 3s...`)
         setTimeout(() => { this.isReconnecting = false; this.connect() }, 3000)
       }
     })
