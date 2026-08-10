@@ -47,8 +47,11 @@ export class MexcWebSocketManager {
       this.ws?.send(JSON.stringify(subMsg))
 
       if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
-      // MEXC server sends "ping" every ~20s. We ONLY need to reply "pong".
-      // Sending "ping" from the client causes MEXC to drop the connection.
+      this.heartbeatInterval = setInterval(() => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send("ping") // MEXC Contract API requires CLIENT to send "ping" every 20s
+        }
+      }, 20000) // Send every 20s to keep alive
     })
 
     this.ws.on("message", (data: WebSocket.RawData) => {
