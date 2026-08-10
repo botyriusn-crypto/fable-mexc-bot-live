@@ -5,13 +5,24 @@ import { eq, sql } from "drizzle-orm"
 import { getConfig, closePosition } from "@/lib/engine"
 import { teardownGrid } from "@/lib/grid"
 import { fetchTicker } from "@/lib/mexc/public"
+import { verifyApiKey } from "@/lib/auth"
+import type { NextRequest } from "next/server"
 
 export const dynamic = "force-dynamic"
 
 // Actions: start | stop | close_position | reset_paper | set_mode
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
+  // Verify API key authentication
+  const authError = verifyApiKey(request)
+  if (authError) return authError
+  
   try {
     const body = (await request.json()) as { action: string; mode?: string; positionId?: number }
+
+    // Validate action is a string
+    if (typeof body.action !== 'string') {
+      return NextResponse.json({ error: "Invalid action format" }, { status: 400 })
+    }
 
     switch (body.action) {
       case "start": {
@@ -25,6 +36,10 @@ export async function POST(request: Request) {
         return NextResponse.json({ ok: true })
       }
       case "close_position": {
+        // Validate positionId is a number if provided
+        if (body.positionId !== undefined && typeof body.positionId !== 'number') {
+          return NextResponse.json({ error: "Invalid positionId format" }, { status: 400 })
+        }
         const cfg = await getConfig()
         const open = await db.select().from(positions).where(eq(positions.status, "open"))
         const target = body.positionId ? open.find((position) => position.id === body.positionId) : open[0]

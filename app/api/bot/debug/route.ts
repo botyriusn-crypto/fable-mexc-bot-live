@@ -2,10 +2,14 @@ import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { botConfig, trades, gridOrders } from "@/lib/db/schema"
 import { eq, desc, sql } from "drizzle-orm"
+import { verifyApiKey } from "@/lib/auth"
+import type { NextRequest } from "next/server"
 
 export const dynamic = "force-dynamic"
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const authError = verifyApiKey(request)
+  if (authError) return authError
   const config = await db.select().from(botConfig).where(eq(botConfig.id, 1)).limit(1)
   const allTrades = await db.select({ 
     pnl: trades.pnl, 

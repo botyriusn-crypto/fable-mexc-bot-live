@@ -3,10 +3,16 @@ import { db } from "@/lib/db"
 import { gridOrders } from "@/lib/db/schema"
 import { eq, and } from "drizzle-orm"
 import { cancelOrders } from "@/lib/mexc/private"
+import { verifyApiKey } from "@/lib/auth"
+import type { NextRequest } from "next/server"
 
 export const dynamic = "force-dynamic"
 
-export async function DELETE(request: Request) {
+export async function DELETE(request: NextRequest) {
+  // Verify API key authentication
+  const authError = verifyApiKey(request)
+  if (authError) return authError
+  
   try {
     const { searchParams } = new URL(request.url)
     const symbol = searchParams.get("symbol")

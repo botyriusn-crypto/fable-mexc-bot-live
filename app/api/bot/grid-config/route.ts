@@ -4,6 +4,8 @@ import { gridConfigs, gridOrders } from "@/lib/db/schema"
 import { eq, and, inArray } from "drizzle-orm"
 import { cancelOrders } from "@/lib/mexc/private"
 import { log } from "@/lib/grid"
+import { verifyApiKey } from "@/lib/auth"
+import type { NextRequest } from "next/server"
 
 export const dynamic = "force-dynamic"
 
@@ -30,7 +32,11 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
+  // Verify API key authentication
+  const authError = verifyApiKey(request)
+  if (authError) return authError
+  
   try {
     const body = await request.json()
     const { symbol, timeframe } = body
@@ -63,7 +69,11 @@ export async function POST(request: Request) {
   }
 }
 
-export async function DELETE(request: Request) {
+export async function DELETE(request: NextRequest) {
+  // Verify API key authentication
+  const authError = verifyApiKey(request)
+  if (authError) return authError
+  
   try {
     const { searchParams } = new URL(request.url)
     const symbol = searchParams.get("symbol")
@@ -88,7 +98,11 @@ export async function DELETE(request: Request) {
   }
 }
 
-export async function PATCH(request: Request) {
+export async function PATCH(request: NextRequest) {
+  // Verify API key authentication
+  const authError = verifyApiKey(request)
+  if (authError) return authError
+  
   try {
     const body = await request.json()
     const { symbol, timeframe, ...updates } = body

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { botConfig, botLogs } from "@/lib/db/schema"
 import { eq, sql } from "drizzle-orm"
+import { verifyApiKey } from "@/lib/auth"
+import type { NextRequest } from "next/server"
 
 export const dynamic = "force-dynamic"
 
@@ -51,7 +53,11 @@ const BOOL_FIELDS = [
   "aiAdvisorEnabled",
 ] as const
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
+  // Verify API key authentication
+  const authError = verifyApiKey(request)
+  if (authError) return authError
+  
   try {
     const body = (await request.json()) as Record<string, unknown>
     const updates: Record<string, unknown> = {}

@@ -3,11 +3,15 @@ import { getExchangeClient } from "@/lib/exchange"
 import { db } from "@/lib/db"
 import { botConfig, trades, gridOrders } from "@/lib/db/schema"
 import { eq, sql } from "drizzle-orm"
+import { verifyApiKey } from "@/lib/auth"
+import type { NextRequest } from "next/server"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const authError = verifyApiKey(request)
+  if (authError) return authError
   try {
     const exchange = getExchangeClient("mexc")
     // 1. Ask MEXC for actual account balance
@@ -27,6 +31,7 @@ export async function GET() {
       bot_recent_trades: recentTrades
     })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    console.error('[Diagnose] Error:', err)
+    return NextResponse.json({ error: 'Diagnosis failed' }, { status: 500 })
   }
 }
