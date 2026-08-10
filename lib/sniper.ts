@@ -1,6 +1,22 @@
 // Sniper Engine v1: event-driven dislocation detector.
 // Fires ONLY on statistically extreme setups. Asymmetric R:R, hard invalidation.
 import type { Candle } from "./mexc/public"
+import { fetchTicker } from "./mexc/public"
+import { db } from "./db"
+import { classifierDecisions } from "./db/schema"
+import { and, eq, isNull } from "drizzle-orm"
+import { fetchTicker } from "./mexc/public"
+import { db } from "./db"
+import { classifierDecisions } from "./db/schema"
+import { and, eq, isNull } from "drizzle-orm"
+import { fetchTicker } from "./mexc/public"
+import { db } from "./db"
+import { classifierDecisions } from "./db/schema"
+import { and, eq, isNull } from "drizzle-orm"
+import { fetchTicker } from "./mexc/public"
+import { db } from "./db"
+import { classifierDecisions } from "./db/schema"
+import { and, eq, isNull } from "drizzle-orm"
 import type { IndicatorSnapshot } from "./indicators"
 
 export const SNIPER_LIVE = false // Stage 2: flip to true after observe baseline proves hit-rate
@@ -85,7 +101,223 @@ export function maybeScanExchange(): void {
     .finally(() => { sweepRunning = false })
 }
 
+export async function recordSniperCandidate(symbol: string, timeframe: string, candleTime: number, entry: number, sig: SniperSignal): Promise<void> {
+  await db.insert(classifierDecisions).values({
+    symbol, timeframe, candleTime,
+    candidateDirection: sig.direction ?? "long",
+    strategy: "sniper",
+    regime: "dislocation",
+    entryPrice: entry,
+    confirmationMode: "observe",
+    logisticAllowed: false,
+    logisticConfidence: sig.confidence,
+    lorentzianDirection: sig.direction ?? "long",
+    lorentzianVote: 1,
+    lorentzianConfidence: sig.confidence,
+    lorentzianAllowed: true,
+    lorentzianFilters: { stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, reason: sig.reason },
+    finalAllowed: false,
+    reason: sig.reason,
+  })
+}
+
+export async function resolveSniperDecisions(): Promise<number> {
+  const rows = await db.select().from(classifierDecisions)
+    .where(and(eq(classifierDecisions.strategy, "sniper"), isNull(classifierDecisions.resolvedAt)))
+  let resolved = 0
+  for (const r of rows) {
+    const f = (r.lorentzianFilters ?? {}) as any
+    const sl = f.stopLoss as number
+    const tp = f.takeProfit as number
+    if (!sl || !tp) continue
+    let price = 0
+    try { price = (await fetchTicker(r.symbol)).lastPrice } catch { continue }
+    const dir = r.candidateDirection as "long" | "short"
+    const ageMin = (Date.now() - new Date(r.createdAt as any).getTime()) / 60000
+    let outcome: "tp" | "sl" | "exp" | null = null
+    if (dir === "long") { if (price >= tp) outcome = "tp"; else if (price <= sl) outcome = "sl" }
+    else { if (price <= tp) outcome = "tp"; else if (price >= sl) outcome = "sl" }
+    if (!outcome && ageMin > 180) outcome = "exp" // 12 x Min15 bars time-stop
+    if (!outcome) continue
+    const retPct = dir === "long" ? ((price - r.entryPrice) / r.entryPrice) * 100 : ((r.entryPrice - price) / r.entryPrice) * 100
+    const win = outcome === "tp" ? true : outcome === "sl" ? false : retPct > 0
+    await db.update(classifierDecisions).set({
+      resolvedAt: new Date(),
+      outcomeDirection: dir,
+      outcomeReturn: parseFloat(retPct.toFixed(2)),
+      outcomeCorrectLogistic: win,
+      outcomeCorrectLorentzian: win,
+    }).where(eq(classifierDecisions.id, r.id))
+    resolved++
+    console.log(`[Sniper] RESOLVED ${r.symbol} ${dir}: ${outcome} (${retPct.toFixed(2)}%)`)
+  }
+  return resolved
+}
+
+export async function recordSniperCandidate(symbol: string, timeframe: string, candleTime: number, entry: number, sig: SniperSignal): Promise<void> {
+  await db.insert(classifierDecisions).values({
+    symbol, timeframe, candleTime,
+    candidateDirection: sig.direction ?? "long",
+    strategy: "sniper",
+    regime: "dislocation",
+    entryPrice: entry,
+    confirmationMode: "observe",
+    logisticAllowed: false,
+    logisticConfidence: sig.confidence,
+    lorentzianDirection: sig.direction ?? "long",
+    lorentzianVote: 1,
+    lorentzianConfidence: sig.confidence,
+    lorentzianAllowed: true,
+    lorentzianFilters: { stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, reason: sig.reason },
+    finalAllowed: false,
+    reason: sig.reason,
+  })
+}
+
+export async function resolveSniperDecisions(): Promise<number> {
+  const rows = await db.select().from(classifierDecisions)
+    .where(and(eq(classifierDecisions.strategy, "sniper"), isNull(classifierDecisions.resolvedAt)))
+  let resolved = 0
+  for (const r of rows) {
+    const f = (r.lorentzianFilters ?? {}) as any
+    const sl = f.stopLoss as number
+    const tp = f.takeProfit as number
+    if (!sl || !tp) continue
+    let price = 0
+    try { price = (await fetchTicker(r.symbol)).lastPrice } catch { continue }
+    const dir = r.candidateDirection as "long" | "short"
+    const ageMin = (Date.now() - new Date(r.createdAt as any).getTime()) / 60000
+    let outcome: "tp" | "sl" | "exp" | null = null
+    if (dir === "long") { if (price >= tp) outcome = "tp"; else if (price <= sl) outcome = "sl" }
+    else { if (price <= tp) outcome = "tp"; else if (price >= sl) outcome = "sl" }
+    if (!outcome && ageMin > 180) outcome = "exp" // 12 x Min15 bars time-stop
+    if (!outcome) continue
+    const retPct = dir === "long" ? ((price - r.entryPrice) / r.entryPrice) * 100 : ((r.entryPrice - price) / r.entryPrice) * 100
+    const win = outcome === "tp" ? true : outcome === "sl" ? false : retPct > 0
+    await db.update(classifierDecisions).set({
+      resolvedAt: new Date(),
+      outcomeDirection: dir,
+      outcomeReturn: parseFloat(retPct.toFixed(2)),
+      outcomeCorrectLogistic: win,
+      outcomeCorrectLorentzian: win,
+    }).where(eq(classifierDecisions.id, r.id))
+    resolved++
+    console.log(`[Sniper] RESOLVED ${r.symbol} ${dir}: ${outcome} (${retPct.toFixed(2)}%)`)
+  }
+  return resolved
+}
+
+export async function recordSniperCandidate(symbol: string, timeframe: string, candleTime: number, entry: number, sig: SniperSignal): Promise<void> {
+  await db.insert(classifierDecisions).values({
+    symbol, timeframe, candleTime,
+    candidateDirection: sig.direction ?? "long",
+    strategy: "sniper",
+    regime: "dislocation",
+    entryPrice: entry,
+    confirmationMode: "observe",
+    logisticAllowed: false,
+    logisticConfidence: sig.confidence,
+    lorentzianDirection: sig.direction ?? "long",
+    lorentzianVote: 1,
+    lorentzianConfidence: sig.confidence,
+    lorentzianAllowed: true,
+    lorentzianFilters: { stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, reason: sig.reason },
+    finalAllowed: false,
+    reason: sig.reason,
+  })
+}
+
+export async function resolveSniperDecisions(): Promise<number> {
+  const rows = await db.select().from(classifierDecisions)
+    .where(and(eq(classifierDecisions.strategy, "sniper"), isNull(classifierDecisions.resolvedAt)))
+  let resolved = 0
+  for (const r of rows) {
+    const f = (r.lorentzianFilters ?? {}) as any
+    const sl = f.stopLoss as number
+    const tp = f.takeProfit as number
+    if (!sl || !tp) continue
+    let price = 0
+    try { price = (await fetchTicker(r.symbol)).lastPrice } catch { continue }
+    const dir = r.candidateDirection as "long" | "short"
+    const ageMin = (Date.now() - new Date(r.createdAt as any).getTime()) / 60000
+    let outcome: "tp" | "sl" | "exp" | null = null
+    if (dir === "long") { if (price >= tp) outcome = "tp"; else if (price <= sl) outcome = "sl" }
+    else { if (price <= tp) outcome = "tp"; else if (price >= sl) outcome = "sl" }
+    if (!outcome && ageMin > 180) outcome = "exp" // 12 x Min15 bars time-stop
+    if (!outcome) continue
+    const retPct = dir === "long" ? ((price - r.entryPrice) / r.entryPrice) * 100 : ((r.entryPrice - price) / r.entryPrice) * 100
+    const win = outcome === "tp" ? true : outcome === "sl" ? false : retPct > 0
+    await db.update(classifierDecisions).set({
+      resolvedAt: new Date(),
+      outcomeDirection: dir,
+      outcomeReturn: parseFloat(retPct.toFixed(2)),
+      outcomeCorrectLogistic: win,
+      outcomeCorrectLorentzian: win,
+    }).where(eq(classifierDecisions.id, r.id))
+    resolved++
+    console.log(`[Sniper] RESOLVED ${r.symbol} ${dir}: ${outcome} (${retPct.toFixed(2)}%)`)
+  }
+  return resolved
+}
+
+export async function recordSniperCandidate(symbol: string, timeframe: string, candleTime: number, entry: number, sig: SniperSignal): Promise<void> {
+  await db.insert(classifierDecisions).values({
+    symbol, timeframe, candleTime,
+    candidateDirection: sig.direction ?? "long",
+    strategy: "sniper",
+    regime: "dislocation",
+    entryPrice: entry,
+    confirmationMode: "observe",
+    logisticAllowed: false,
+    logisticConfidence: sig.confidence,
+    lorentzianDirection: sig.direction ?? "long",
+    lorentzianVote: 1,
+    lorentzianConfidence: sig.confidence,
+    lorentzianAllowed: true,
+    lorentzianFilters: { stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, reason: sig.reason },
+    finalAllowed: false,
+    reason: sig.reason,
+  })
+}
+
+export async function resolveSniperDecisions(): Promise<number> {
+  const rows = await db.select().from(classifierDecisions)
+    .where(and(eq(classifierDecisions.strategy, "sniper"), isNull(classifierDecisions.resolvedAt)))
+  let resolved = 0
+  for (const r of rows) {
+    const f = (r.lorentzianFilters ?? {}) as any
+    const sl = f.stopLoss as number
+    const tp = f.takeProfit as number
+    if (!sl || !tp) continue
+    let price = 0
+    try { price = (await fetchTicker(r.symbol)).lastPrice } catch { continue }
+    const dir = r.candidateDirection as "long" | "short"
+    const ageMin = (Date.now() - new Date(r.createdAt as any).getTime()) / 60000
+    let outcome: "tp" | "sl" | "exp" | null = null
+    if (dir === "long") { if (price >= tp) outcome = "tp"; else if (price <= sl) outcome = "sl" }
+    else { if (price <= tp) outcome = "tp"; else if (price >= sl) outcome = "sl" }
+    if (!outcome && ageMin > 180) outcome = "exp" // 12 x Min15 bars time-stop
+    if (!outcome) continue
+    const retPct = dir === "long" ? ((price - r.entryPrice) / r.entryPrice) * 100 : ((r.entryPrice - price) / r.entryPrice) * 100
+    const win = outcome === "tp" ? true : outcome === "sl" ? false : retPct > 0
+    await db.update(classifierDecisions).set({
+      resolvedAt: new Date(),
+      outcomeDirection: dir,
+      outcomeReturn: parseFloat(retPct.toFixed(2)),
+      outcomeCorrectLogistic: win,
+      outcomeCorrectLorentzian: win,
+    }).where(eq(classifierDecisions.id, r.id))
+    resolved++
+    console.log(`[Sniper] RESOLVED ${r.symbol} ${dir}: ${outcome} (${retPct.toFixed(2)}%)`)
+  }
+  return resolved
+}
+
 export async function scanExchangeSniper(): Promise<number> {
+  await resolveSniperDecisions().catch(() => {})
+  await resolveSniperDecisions().catch(() => {})
+  await resolveSniperDecisions().catch(() => {})
+  await resolveSniperDecisions().catch(() => {})
   const res = await fetch("https://contract.mexc.com/api/v1/contract/ticker", { cache: "no-store" })
   const json = (await res.json()) as any
   if (!json.success || !Array.isArray(json.data)) return 0

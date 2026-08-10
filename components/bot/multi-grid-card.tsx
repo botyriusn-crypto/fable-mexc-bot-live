@@ -402,6 +402,11 @@ export function MultiGridCard() {
 
   // 3-state toggle: Idle -> Fetch & Show -> Collapse -> Fetch Fresh
   const handleScanMarket = async () => {
+    // Toggle: 2nd click closes the panel, next click fetches fresh
+    if (aiPicks.length > 0 && !scanning) {
+      setAiPicks([]);
+      return;
+    }
     // State 2: If picks are currently visible, collapse the panel
     if (aiPicks.length > 0 && !scanning) {
       setAiPicks([])
@@ -484,7 +489,7 @@ export function MultiGridCard() {
             disabled={scanning}
             title="AI scans MEXC and configures the optimal grid settings"
           >
-            {scanning ? "🤖 AI Analyzing..." : aiPicks.length > 0 ? "✕ Close AI Picks" : "🤖 AI Advisor"}
+            {scanning ? "🤖 AI Analyzing..." : aiPicks.length > 0 ? "✕ Close AI Picks" : scanning ? "🤖 AI Analyzing..." : aiPicks.length > 0 ? "✕ Close AI Picks" : "🤖 AI Advisor"}
           </Button>
         </div>
       </CardHeader>
