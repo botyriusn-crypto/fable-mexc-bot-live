@@ -12,6 +12,7 @@ export async function fetchKlines(symbol: string, interval: string, limit = 200)
   const seconds = intervalToSeconds(interval)
   const start = end - seconds * limit
   const res = await fetch(`${BASE_URL}/kline/${symbol}?interval=${interval}&start=${start}&end=${end}`, { cache: "no-store" })
+  if (!res) throw new Error("Null response from MEXC kline")
   if (!res.ok) throw new Error(`MEXC kline fetch failed: ${res.status}`)
   const json = await res.json()
   if (!json.success || !json.data) throw new Error("MEXC kline response unsuccessful")
@@ -28,6 +29,7 @@ export async function fetchTicker(symbol: string): Promise<Ticker> {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await fetch(`${BASE_URL}/ticker?symbol=${symbol}`, { cache: "no-store", headers })
+      if (!res) throw new Error("Null response from MEXC ticker")
       if (res.status === 429) {
         // Rate limited, wait 500ms and retry
         await new Promise(r => setTimeout(r, 500))

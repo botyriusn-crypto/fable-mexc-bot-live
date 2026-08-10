@@ -112,11 +112,11 @@ export async function getOpenPositions(symbol?: string): Promise<unknown> {
 export async function fetchOrderStatus(orderId: string): Promise<any | null> {
   try {
     const res: any = await privateRequest("GET", `/order/get/${orderId}`)
-    return res?.data ?? null
+    return res?.data ?? { state: -1, status: "unknown", isError: true }
   } catch (err) {
     console.log(`fetchOrderStatus(${orderId}) failed:`, String(err))
-    return null
-  }
+    return { state: -1, status: "unknown", isError: true }
+}
 }
 
 export async function fetchOpenOrders(symbol: string): Promise<any[]> {
