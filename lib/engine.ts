@@ -490,8 +490,15 @@ if (isSelected) {
 try {
 const realTicker = await exchange.fetchTicker(symbol)
 const sn = detectSniper(candles, snap, (realTicker as any)?.fundingRate ?? 0)
-if (sn.direction) {
+// Sniper Heartbeat: Prove it's alive even when market is quiet
 const nowTs = Date.now()
+const lastHeartbeat = ((globalThis as any).__sniperHeartbeat ?? {})[symbol] ?? 0
+if (nowTs - lastHeartbeat > 6 * 3600 * 1000) {
+  ;(globalThis as any).__sniperHeartbeat = { ...((globalThis as any).__sniperHeartbeat ?? {}), [symbol]: nowTs }
+  await log("info", `👁️ SNIPER HEARTBEAT ${symbol}: Scanning... market is normal, no extreme dislocations. Standing by.`)
+}
+
+if (sn.direction) {
 const lastLog = ((globalThis as any).__sniperLast ?? {})[symbol] ?? 0
 if (nowTs - lastLog > 6 * 3600 * 1000) {
 ;(globalThis as any).__sniperLast = { ...((globalThis as any).__sniperLast ?? {}), [symbol]: nowTs }
