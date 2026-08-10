@@ -60,9 +60,7 @@ export const botConfig = pgTable("bot_config", {
   gridEffectiveLevels: integer("grid_effective_levels"),
   exchange: text("exchange").notNull().default("mexc"),
   aiAdvisorEnabled: boolean("ai_advisor_enabled").notNull().default(false),
-  aiAnalysisSchedule: text("ai_analysis_schedule").notNull().default("manual"),
-  aiAdvisorEnabled: boolean("ai_advisor_enabled").notNull().default(false),
-  aiAnalysisSchedule: text("ai_analysis_schedule").notNull().default("manual"), // 'mexc' | 'gate' | 'bybit'
+  aiAnalysisSchedule: text("ai_analysis_schedule").notNull().default("manual"), // 'manual' | 'hourly' | 'daily'
   mode: text("mode").notNull().default("paper"),
   status: text("status").notNull().default("stopped"),
   paperBalance: doublePrecision("paper_balance").notNull().default(10000),

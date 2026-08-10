@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
 import { ema, atr, adx } from "@/lib/indicators"
 import type { Candle } from "@/lib/mexc/public"
+import { verifyApiKey } from "@/lib/auth"
+import type { NextRequest } from "next/server"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60 // Allow up to 60s for scanning
@@ -14,7 +16,9 @@ interface ScanResult {
   reason: string
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const authError = verifyApiKey(request)
+  if (authError) return authError
   try {
     // 1. Fetch all MEXC contract tickers to find high-volume, non-extreme movers
     const tickerRes = await fetch("https://contract.mexc.com/api/v1/contract/ticker")
@@ -115,6 +119,7 @@ export async function GET() {
     return NextResponse.json({ success: true, picks: topPicks })
     
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err?.message || "Scan failed" }, { status: 500 })
+    console.error('[Scan Coins] Error:', err)
+    return NextResponse.json({ success: false, error: 'Coin scan failed' }, { status: 500 })
   }
 }

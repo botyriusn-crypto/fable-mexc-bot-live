@@ -8,8 +8,10 @@ if (dbUrl.includes("sslmode=require") && !dbUrl.includes("uselibpqcompat")) {
   dbUrl += (dbUrl.includes("?") ? "&" : "?") + "uselibpqcompat=true"
 }
 
-// Debug: Log sanitized connection string (hides password)
-console.log('[DB] Connecting to:', dbUrl.replace(/:[^:@]+@/, ':****@'))
+// Production: Skip logging connection string entirely
+if (process.env.NODE_ENV !== 'production') {
+  console.log('[DB] Connecting with SSL:', dbUrl.includes('sslmode=require'))
+}
 
 // Configure pool for Neon with proper settings
 export const pool = new Pool({

@@ -1,15 +1,14 @@
 import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
-import {
-  botConfig, gridConfigs, positions, trades, equitySnapshots,
-  botLogs, mlModel, gridOrders, classifierDecisions,
-} from "@/lib/db/schema"
+import { botConfig, gridConfigs, positions, trades, equitySnapshots, botLogs, mlModel, gridOrders, classifierDecisions } from "@/lib/db/schema"
 import { eq, desc } from "drizzle-orm"
 import { fetchTicker, fetchKlines } from "@/lib/mexc/public"
 import { getAccountAssets } from "@/lib/mexc/private"
 import { ema, computeSnapshot } from "@/lib/indicators"
 import { detectRegime, type Regime } from "@/lib/strategy"
 import { getGridConfigs, gridUnrealizedPnl } from "@/lib/grid"
+import { verifyApiKey } from "@/lib/auth"
+import type { NextRequest } from "next/server"
 
 interface MexcAsset {
   currency: string; availableBalance: number; equity: number;
@@ -30,7 +29,11 @@ async function fetchLiveAccount() {
 
 export const dynamic = "force-dynamic"
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  // Verify API key authentication for state endpoint
+  const authError = verifyApiKey(request)
+  if (authError) return authError
+  
   try {
     const [cfgRows, openPosRows, recentTrades, equity, logs, modelRows, activeGridOrders, decisions, gridConfigRows, lifetimeTradesRaw] = await Promise.all([
       db.select().from(botConfig).where(eq(botConfig.id, 1)),
@@ -204,7 +207,11 @@ export async function GET() {
 }
 
 // Grid config toggle endpoint
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
+  // Verify API key authentication
+  const authError = verifyApiKey(request)
+  if (authError) return authError
+  
   try {
     const body = await request.json()
     if (body.action === "toggle-grid" && body.symbol) {

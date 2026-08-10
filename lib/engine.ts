@@ -105,7 +105,8 @@ async function openPosition(
   snap: IndicatorSnapshot,
   confidence: number,
   features: FeatureVector,
-  strategy: "trend" | "range" | "webhook" = "trend",
+  strategy: "trend" | "range" | "webhook" | "sniper" = "trend",
+  customStops?: { stopLoss: number; takeProfit: number },
 ): Promise<void> {
   const price = snap.price
   const quantity = (cfg.positionSizeUsdt * cfg.leverage) / price
@@ -115,10 +116,15 @@ async function openPosition(
   let stopLoss: number
   let takeProfit: number
   let rangeTarget: number | null = null
-  if (strategy === "range") {
+  if (customStops) {
+    // Sniper or other custom strategy: use provided stops
+    stopLoss = customStops.stopLoss
+    takeProfit = customStops.takeProfit
+  } else if (strategy === "range") {
     rangeTarget = snap.bbMiddle
     takeProfit = snap.bbMiddle
-    stopLoss = direction === "long" ? price - snap.atr * 1.0 : price + snap.atr * 1.0
+    // Range strategy needs wider stops to avoid wick-outs at boundaries
+    stopLoss = direction === "long" ? price - snap.atr * 1.5 : price + snap.atr * 1.5
   } else {
     const stops = computeInitialStops(direction, price, snap.atr, cfg)
     stopLoss = stops.stopLoss

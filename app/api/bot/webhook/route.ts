@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { runWebhookSignal } from "@/lib/engine"
+import crypto from "crypto"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
@@ -33,9 +34,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
   }
 
-  // Constant-time-ish comparison to avoid trivial timing attacks
+  // Constant-time comparison using Node.js crypto module
   const provided = String(body.password ?? "")
-  if (provided.length !== secret.length || !timingSafeEqual(provided, secret)) {
+  // Handle length mismatch safely by comparing with a dummy value first
+  if (provided.length !== secret.length) {
+    // Use a dummy string of same length to avoid timing leak on length check
+    crypto.timingSafeEqual(Buffer.from(provided.padEnd(secret.length, '\0')), Buffer.from(secret))
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+  if (!crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(secret))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
@@ -49,12 +56,4 @@ export async function POST(request: Request) {
 
   const result = await runWebhookSignal(action)
   return NextResponse.json(result)
-}
-
-function timingSafeEqual(a: string, b: string): boolean {
-  let diff = 0
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
-  }
-  return diff === 0
 }

@@ -3,15 +3,21 @@ import { db } from "@/lib/db"
 import { mlModel } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { FEATURE_KEYS } from "@/lib/ml"
+import { verifyApiKey } from "@/lib/auth"
+import type { NextRequest } from "next/server"
 
 export const dynamic = "force-dynamic"
-export async function GET() {
+export async function GET(request: NextRequest) {
+  // Verify API key authentication
+  const authError = verifyApiKey(request)
+  if (authError) return authError
+  
   try {
     const freshWeights: Record<string, any> = {
       ...Object.fromEntries(FEATURE_KEYS.map((k) => [k, 0])),
       __gen: 99
     }
-    
+
     // ONLY update weights and bias to avoid schema mismatch errors
     await db.update(mlModel)
       .set({
@@ -19,7 +25,7 @@ export async function GET() {
         bias: 0
       })
       .where(eq(mlModel.id, 1))
-      
+
     return NextResponse.json({ success: true, message: "ML Model manually reset to neutral state." })
   } catch (err: any) {
     console.error("Reset ML Error:", err)

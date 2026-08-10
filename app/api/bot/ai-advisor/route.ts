@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
 import { ema, atr, adx, bollinger } from "@/lib/indicators"
 import { db } from "@/lib/db"
+import { verifyApiKey } from "@/lib/auth"
+import type { NextRequest } from "next/server"
 import { botLogs } from "@/lib/db/schema"
 import { livePrices } from "@/lib/mexc/ws"
 import type { Candle } from "@/lib/mexc/public"
@@ -26,7 +28,9 @@ function calcChop(candles: Candle[], period: number = 14): number {
   return 100 * Math.log10(sumAtr / range) / Math.log10(period)
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const authError = verifyApiKey(request)
+  if (authError) return authError
   try {
     // 1. Fetch top MEXC pairs by volume
     const tickerRes = await fetch("https://contract.mexc.com/api/v1/contract/ticker", { cache: "no-store" })

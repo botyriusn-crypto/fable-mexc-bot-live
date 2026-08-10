@@ -3,6 +3,8 @@ import { db } from "@/lib/db"
 import { botConfig } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { fetchMarkets } from "@/lib/mexc/public"
+import { verifyApiKey } from "@/lib/auth"
+import type { NextRequest } from "next/server"
 
 export const dynamic = "force-dynamic"
 
@@ -23,7 +25,11 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
+  // Verify API key authentication
+  const authError = verifyApiKey(request)
+  if (authError) return authError
+  
   try {
     const body = await request.json()
     const { symbol, timeframe, leverage } = body
