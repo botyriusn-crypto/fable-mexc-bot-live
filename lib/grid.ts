@@ -207,7 +207,8 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   // Protects budget from deploying too fast during flash crashes/pumps.
   const bbWidth = snap.bbUpper - snap.bbLower
   const bbBaseSpacing = bbWidth / 4
-  const baseSpacing = Math.max(bbBaseSpacing, minSpacing)
+  const maxSpacing = center * 0.02 // 2% cap — grids farther than this never fill (dead capital)
+const baseSpacing = Math.min(Math.max(bbBaseSpacing, minSpacing), maxSpacing)
   const geomRatio = 1.15 // Each level is 15% further than the last
   const totalLevels = Math.max(1, Math.min(12, Math.floor(gc.levels / 2))) // Cap at 12 levels per side
   const effectiveLevels = gc.levels
