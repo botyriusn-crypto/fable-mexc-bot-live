@@ -163,7 +163,7 @@ async function openPosition(
 
   await db
     .update(botConfig)
-    .set({ paperBalance: sql`${botConfig.paperBalance} - ${openFee}` })
+    .set({ paperBalance: sql`${botConfig.paperBalance}` /* MARGIN DEDUCTION REMOVED FOR PAPER TRADING */ })
     .where(eq(botConfig.id, 1))
 
   await log(

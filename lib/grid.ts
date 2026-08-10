@@ -668,7 +668,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
         .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
         .where(eq(gridOrders.id, o.id))
       const buyFee = fillPrice * o.quantity * TAKER_FEE
-      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} - ${buyFee}` }).where(eq(botConfig.id, 1))
+      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance}` /* MARGIN DEDUCTION REMOVED FOR PAPER TRADING */ }).where(eq(botConfig.id, 1))
 
       const sellPrice = fillPrice + (snap.atr * gc.rangeAtrMult)
       try {
@@ -879,7 +879,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
 
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
       const buyFee = o.price * o.quantity * TAKER_FEE
-      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} - ${buyFee}` }).where(eq(botConfig.id, 1))
+      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance}` /* MARGIN DEDUCTION REMOVED FOR PAPER TRADING */ }).where(eq(botConfig.id, 1))
 
       // Check the DATABASE for existing sells to prevent duplicates
       const existingSells = await db.select().from(gridOrders).where(
