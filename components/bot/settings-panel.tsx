@@ -148,7 +148,7 @@ export function SettingsPanel({ state }: { state: BotState }) {
   }
 
   const renderFields = (fields: FieldDef[]) => (
-    <div className="grid grid-cols-2 gap-3">
+    <div className="grid grid-cols-1 gap-3 min-[480px]:grid-cols-2">
       {fields.map((f) => (
         <div key={f.key} className="flex flex-col gap-1">
           <Label htmlFor={f.key} className="text-xs text-muted-foreground">

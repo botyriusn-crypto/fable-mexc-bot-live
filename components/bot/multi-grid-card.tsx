@@ -278,8 +278,8 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
 
   return (
     <div className="flex flex-col gap-2 rounded-md border bg-muted/30 p-3 text-xs">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 min-w-0">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
           <Badge variant={grid.enabled ? "default" : "outline"} className="shrink-0 cursor-pointer" onClick={toggleExpand}>
             {grid.symbol}
           </Badge>
@@ -312,7 +312,7 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
               : "LONG"}
           </Badge>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {editing ? (
             <>
               <input type="number" value={levels} onChange={e => setLevels(Number(e.target.value))} className="w-12 rounded border bg-background px-1 py-0.5 font-mono text-xs" min={1} max={20} title="Levels" />
@@ -355,7 +355,7 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
         </div>
       </div>
       {deleteError && <div className="text-danger text-[10px]">{deleteError}</div>}
-      <div className="flex items-center gap-4 font-mono text-muted-foreground" onClick={toggleExpand} style={{cursor: "pointer"}}>
+      <div className="flex flex-wrap items-center gap-3 font-mono text-muted-foreground" onClick={toggleExpand} style={{cursor: "pointer"}}>
         <span>{grid.buyCount}B/{grid.sellCount}S</span>
         <span className={grid.unrealizedPnl >= 0 ? "text-success" : "text-danger"}>
           Unreal: {grid.unrealizedPnl >= 0 ? "+" : ""}{fmt(grid.unrealizedPnl, 2)}
@@ -467,12 +467,12 @@ export function MultiGridCard() {
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center justify-between gap-3 pb-2">
+      <CardHeader className="flex-row flex-wrap items-center justify-between gap-3 pb-2">
         <div className="flex flex-col gap-1">
           <CardTitle className="text-sm font-medium">Grid Bots</CardTitle>
           <span className="text-xs text-muted-foreground">{grids.length} pairs · {totalOrders} orders active</span>
         </div>
-        <div className="flex items-center gap-3 text-xs font-mono">
+        <div className="flex flex-wrap items-center justify-end gap-2 text-xs font-mono">
           <span className={totalRealized >= 0 ? "text-success" : "text-danger"}>Real: {totalRealized >= 0 ? "+" : ""}{fmt(totalRealized, 2)}</span>
           <span className={totalUnrealized >= 0 ? "text-success" : "text-danger"}>Unreal: {totalUnrealized >= 0 ? "+" : ""}{fmt(totalUnrealized, 2)}</span>
           <AddPairControl existingSymbols={grids.map((g) => g.symbol)} onAdded={handleRefresh} />

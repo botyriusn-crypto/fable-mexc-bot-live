@@ -32,6 +32,7 @@ export function TradesTable({ state }: { state: BotState }) {
             No closed trades yet
           </div>
         ) : (
+          <div className="overflow-x-auto">
           <Table>
             <TableHeader>
               <TableRow>
@@ -79,6 +80,7 @@ export function TradesTable({ state }: { state: BotState }) {
               ))}
             </TableBody>
           </Table>
+          </div>
         )}
       </CardContent>
     </Card>
