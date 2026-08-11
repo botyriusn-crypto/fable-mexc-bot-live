@@ -214,7 +214,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   const bbBaseSpacing = bbWidth / 4
   const maxSpacing = center * 0.02 // 2% cap — grids farther than this never fill (dead capital)
 const baseSpacing = Math.min(Math.max(bbBaseSpacing, minSpacing), maxSpacing)
-  const geomRatio = 1.15 // Each level is 15% further than the last
+  const geomRatio = gc.direction === "neutral" ? 1.0 : 1.15 // COMBO-DENSE: uniform arithmetic spacing like Bitsgap
   const totalLevels = Math.max(1, Math.min(12, Math.floor(gc.levels / 2))) // Cap at 12 levels per side
   const effectiveLevels = gc.levels
   // Approximate half-range for DB logging
@@ -250,7 +250,7 @@ const isShort = !isNeutral && (gc.direction === "short" || (gc as any)._autoSide
 const orders: any[] = []
   for (let i = 1; i <= totalLevels; i++) {
     // Calculate cumulative distance for geometric spacing
-    const dist = baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
+    const dist = geomRatio === 1 ? baseSpacing * i : baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
     const orderPrice = isShort ? center + dist : center - dist
     if (orderPrice <= 0) continue
     orders.push({
@@ -267,7 +267,7 @@ const orders: any[] = []
 }
 if (isNeutral) {
 for (let i = 1; i <= totalLevels; i++) {
-const dist = baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
+const dist = geomRatio === 1 ? baseSpacing * i : baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
 const orderPrice = center + dist
 if (orderPrice <= 0) continue
 orders.push({
