@@ -7,7 +7,8 @@ export interface Candle { time: number; open: number; high: number; low: number;
 export const marketScales: Record<string, { price: number, amount: number }> = {}
 export interface Ticker { symbol: string; lastPrice: number; fairPrice: number; fundingRate: number; riseFallRate: number; volume24: number }
 
-export async function fetchKlines(symbol: string, interval: string, limit = 200): Promise<Candle[]> {
+const __klineCache = new Map<string, { t: number; d: any }>()
+async function __fetchKlinesRaw(symbol: string, interval: string, limit = 200): Promise<Candle[]>  {
   const end = Math.floor(Date.now() / 1000)
   const seconds = intervalToSeconds(interval)
   const start = end - seconds * limit
@@ -19,8 +20,23 @@ export async function fetchKlines(symbol: string, interval: string, limit = 200)
   const { time, open, high, low, close, vol } = json.data
   return time.map((_: number, i: number) => ({ time: time[i], open: open[i], high: high[i], low: low[i], close: close[i], volume: vol[i] }))
 }
+export async function fetchKlines(symbol: string, interval: string, limit = 200) {
+const key = String(symbol + "|" + interval + "|" + limit)
+const now = Date.now()
+const c = __klineCache.get(key)
+if (c && now - c.t < 15000) return c.d
+try {
+const d = await __fetchKlinesRaw(symbol, interval, limit)
+__klineCache.set(key, { t: Date.now(), d })
+return d
+} catch (e) {
+if (c) return c.d
+throw e
+}
+}
 
-export async function fetchTicker(symbol: string): Promise<Ticker> {
+const __tickerCache = new Map<string, { t: number; d: any }>()
+async function __fetchTickerRaw(symbol: string): Promise<Ticker>  {
   const headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json"
@@ -58,6 +74,22 @@ export async function fetchTicker(symbol: string): Promise<Ticker> {
     }
   }
   throw new Error("MEXC ticker failed after 3 retries")
+}
+export async function fetchTicker(symbol: string) {
+const now = Date.now()
+const c = __tickerCache.get(symbol)
+if (c && now - c.t < 10000) return c.d
+for (let attempt = 0; attempt < 2; attempt++) {
+try {
+const d = await __fetchTickerRaw(symbol)
+__tickerCache.set(symbol, { t: Date.now(), d })
+return d
+} catch (e) {
+if (attempt === 0) await new Promise(r => setTimeout(r, 400))
+}
+}
+if (c) return c.d
+throw new Error("MEXC ticker unavailable")
 }
 
 let _marketsCache: { data: any; ts: number } | null = null
