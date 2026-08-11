@@ -183,6 +183,23 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
   const [makerBusy, setMakerBusy] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [directionBusy, setDirectionBusy] = useState(false)
+const [comboBusy, setComboBusy] = useState(false)
+const isCombo = grid.direction === "neutral"
+const handleToggleCombo = async () => {
+setComboBusy(true)
+try {
+await fetch("/api/bot/grid-config", {
+method: "PATCH",
+headers: { "Content-Type": "application/json" },
+body: JSON.stringify({ symbol: grid.symbol, timeframe: grid.timeframe, direction: isCombo ? "auto" : "neutral" }),
+})
+onRefresh()
+} catch (err) {
+console.error("Failed to toggle combo:", err)
+} finally {
+setComboBusy(false)
+}
+}
   
   const handleToggleDirection = async () => {
     setDirectionBusy(true)
@@ -282,7 +299,11 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
         <div className="flex flex-wrap items-center gap-2 min-w-0">
           <Badge variant={grid.enabled ? "default" : "outline"} className="shrink-0 cursor-pointer" onClick={toggleExpand}>
             {grid.symbol}
-          </Badge>
+</Badge>
+<label className="flex shrink-0 cursor-pointer items-center gap-1" title="COMBO: neutral two-sided grid (buys + sells placed instantly)">
+<input type="checkbox" checked={isCombo} disabled={comboBusy} onChange={handleToggleCombo} className="size-3.5 accent-chart-3" />
+<span className={`font-mono text-[10px] ${isCombo ? "text-chart-3" : "text-muted-foreground/60"}`}>COMBO</span>
+</label>
           <span className="text-muted-foreground shrink-0">{grid.timeframe}</span>
           {grid.paused && <Badge variant="outline" className="border-chart-3/40 text-chart-3 shrink-0">PAUSED</Badge>}
           <Badge
@@ -299,7 +320,8 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
               grid.direction === "short" || grid.direction === "auto-short" ? "border-danger/40 bg-danger/15 text-danger" 
               : grid.direction === "auto-long" ? "border-success/40 bg-success/15 text-success"
               : grid.direction === "auto" ? "border-chart-3/40 bg-chart-3/15 text-chart-3"
-              : "border-success/40 bg-success/15 text-success"
+: grid.direction === "neutral" ? "border-chart-3/40 bg-chart-3/15 text-chart-3"
+: "border-success/40 bg-success/15 text-success"
             }`}
             onClick={handleToggleDirection}
             title="Toggle direction (long/short/auto)"
@@ -309,7 +331,7 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
               : grid.direction === "auto-short" ? "AUTO (SHORT)" 
               : grid.direction === "auto-long" ? "AUTO (LONG)" 
               : grid.direction === "auto" ? "AUTO" 
-              : "LONG"}
+              : grid.direction === "neutral" ? "NEUTRAL" : "LONG"}
           </Badge>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">

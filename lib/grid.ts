@@ -8,6 +8,7 @@ import { loadModel, trainOnTrade } from "./ml"
 import { getExchangeClient, type ExchangeClient } from "./exchange"
 import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderStatus, cancelOrders } from "./mexc/private"
 import { marketScales } from "./mexc/public"
+import type { Candle } from "./mexc/public"
 import { fetchTicker } from "./mexc/public"
 
 // Grid trading engine: a ladder of buy levels below price with paired sell
@@ -244,8 +245,9 @@ const baseSpacing = Math.min(Math.max(bbBaseSpacing, minSpacing), maxSpacing)
     return
   }
 
-  const isShort = gc.direction === "short" || (gc as any)._autoSide === "short"
-  const orders: any[] = []
+  const isNeutral = gc.direction === "neutral"
+const isShort = !isNeutral && (gc.direction === "short" || (gc as any)._autoSide === "short")
+const orders: any[] = []
   for (let i = 1; i <= totalLevels; i++) {
     // Calculate cumulative distance for geometric spacing
     const dist = baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
@@ -261,9 +263,27 @@ const baseSpacing = Math.min(Math.max(bbBaseSpacing, minSpacing), maxSpacing)
       price: orderPrice,
       quantity: notionalPerLevel / orderPrice,
       status: "pending" as const,
-    })
-  }
-  if (volatility && volatility.surge) {
+})
+}
+if (isNeutral) {
+for (let i = 1; i <= totalLevels; i++) {
+const dist = baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
+const orderPrice = center + dist
+if (orderPrice <= 0) continue
+orders.push({
+symbol: gc.symbol,
+timeframe: gc.timeframe,
+leverage: gc.leverage,
+spacing: baseSpacing,
+levelIndex: i,
+side: "sell",
+price: orderPrice,
+quantity: notionalPerLevel / orderPrice,
+status: "pending" as const,
+})
+}
+}
+if (volatility && volatility.surge) {
     await log("info", `Grid ${gc.symbol}: ${volatility.reason}`)
   }
   if (cfg.mode === "live") {
@@ -767,7 +787,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
   }
 }
 
-export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime, exchange?: ExchangeClient): Promise<void> {
+export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime, exchange?: ExchangeClient, candles?: Candle[]): Promise<void> {
   // Maker mode (live + enabled symbol): use the real-order polling path and
   // skip the entire virtual-fill engine below.
   if (cfg.mode === "live" && isMakerSymbol(gc)) {
@@ -806,9 +826,15 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
     }
   } catch (err) { /* use snap.price as fallback */ }
   if (!price || price <= 0) {
-    const sellPrices = active.filter(o => o.side === "sell").map(o => o.price)
-    if (sellPrices.length > 0) price = Math.max(...sellPrices) + 0.0001
-  }
+const sellPrices = active.filter(o => o.side === "sell").map(o => o.price)
+if (sellPrices.length > 0) price = Math.max(...sellPrices) + 0.0001
+}
+let hi = price, lo = price
+if (candles && candles.length > 1) {
+const closed = candles[candles.length - 2]
+hi = Math.max(price, closed.high)
+lo = Math.min(price, closed.low)
+}
   let spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
   const gridAdxThreshold = 32 // Grids handle mild trends better than single positions
 const paused = gc.autoPause && snap.adx >= gridAdxThreshold
@@ -861,9 +887,16 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
   }
 
   // 1) Sell fills: price rose to/above a pending sell level
-  const sells = active.filter((o) => o.side === "sell" && price >= o.price)
-  for (const o of sells) {
-    const sold = await settleGridSell(o, o.price, cfg, "tp", exchange)
+  const sells = active.filter((o) => o.side === "sell" && hi >= o.price)
+for (const o of sells) {
+if (o.buyPrice == null && gc.direction === "neutral") {
+await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
+const closePrice = o.price - spacing
+await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, entryFeatures: { ...snap.features, sideLong: -1 }, status: "pending" })
+await log("trade", `Grid ${o.symbol} COMBO short sell @ ${o.price.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
+continue
+}
+const sold = await settleGridSell(o, o.price, cfg, "tp", exchange)
     // Re-arm the buy at its original level — only if the sell actually
     // succeeded. Re-arming after a failed sell (e.g. the position no longer
     // existed on the exchange) just recreates the same doomed order forever.
@@ -878,9 +911,21 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
 
   // 2) Buy fills: price dropped to/below a pending buy level (skip when paused)
   if (!paused) {
-    const buys = active.filter((o) => o.side === "buy" && price <= o.price)
-    for (const o of buys) {
-      if (cfg.mode === "live") {
+    const buys = active.filter((o) => o.side === "buy" && lo <= o.price)
+for (const o of buys) {
+if (o.buyPrice != null && gc.direction === "neutral") {
+const entry = o.buyPrice
+const grossPnl = (entry - o.price) * o.quantity
+const fees = (entry + o.price) * o.quantity * TAKER_FEE
+const netPnl = grossPnl - fees
+await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
+await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
+await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: (entry * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
+await log("trade", `Grid ${o.symbol} COMBO short closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
+await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: entry, quantity: o.quantity, status: "pending" })
+continue
+}
+if (cfg.mode === "live") {
         try {
           if (exchange) { const r = roundForMexc(o.symbol, o.price, o.quantity); await log("info", `LIVE buy: ${o.symbol} price=${r.price} qty=${r.quantity} lev=${o.leverage}`); await exchange.placeMarketOrder({ symbol: o.symbol, side: 1 as any, volume: r.quantity, leverage: o.leverage }) }
         } catch (err) {
@@ -1081,7 +1126,10 @@ export async function gridUnrealizedPnl(currentPrice: number, symbol?: string, t
   } else {
     holding = await db.select().from(gridOrders).where(and(eq(gridOrders.status, "pending"), eq(gridOrders.side, "sell")))
   }
-  return holding.reduce((acc, o) => acc + (currentPrice - (o.buyPrice ?? o.price)) * o.quantity, 0)
+  const longPnl = holding.reduce((acc, o) => acc + (currentPrice - (o.buyPrice ?? o.price)) * o.quantity, 0)
+const act = await getActiveOrders(symbol, timeframe)
+const shortPnl = act.filter(o => o.side === "buy" && o.buyPrice != null).reduce((acc, o) => acc + ((o.buyPrice ?? 0) - currentPrice) * o.quantity, 0)
+return longPnl + shortPnl
 }
 
 export async function syncExchangeState() {
