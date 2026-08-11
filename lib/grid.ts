@@ -842,10 +842,10 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
     // Dynamic Bollinger Adjustment: If BB width is 40% narrower than our current spacing, rebuild tighter
     const currentBbWidth = snap.bbUpper - snap.bbLower
     const currentSpacing = active.find(o => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
-    const needsTighten = currentSpacing > (currentBbWidth / 4) * 1.4 && currentBbWidth > 0
+    const needsTighten = false // Disabled: BB squeeze causes infinite cancel/rebuild loops in low vol
 
     // If price is >15% away, OR the grid is too wide for the current volatility
-    if (priceDrift > 15 || needsTighten) {
+    if (priceDrift > 5 || needsTighten) {
       await log("info", `Grid ${gc.symbol}: price drifted ${priceDrift.toFixed(1)}% from orders. Recentering ladder at ${price.toFixed(4)}.`)
       // Cancel ALL pending orders — if price crashed >40%, sells are hopeless
       const cancelAll = priceDrift > 40
@@ -922,11 +922,6 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
 
 async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): Promise<void> {
   let active = await getActiveOrders(gc.symbol, gc.timeframe)
-  for (const o of active.filter(o => o.side === "buy" && o.mexcOrderId)) {
-    try { await cancelOrders([o.mexcOrderId]) } catch {}
-    await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
-  }
-  active = await getActiveOrders(gc.symbol, gc.timeframe)
   if (active.length === 0) {
     await setupGrid(cfg, gc, snap, undefined, undefined)
     return
@@ -985,11 +980,6 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
 
 async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, exchange?: ExchangeClient): Promise<void> {
   let active = await getActiveOrders(gc.symbol, gc.timeframe)
-  for (const o of active.filter(o => o.side === "buy")) {
-    if (o.mexcOrderId) { try { await cancelOrders([o.mexcOrderId]) } catch {} }
-    await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
-  }
-  active = await getActiveOrders(gc.symbol, gc.timeframe)
   if (active.length === 0) {
     await setupGrid(cfg, gc, snap, undefined, exchange)
     return
