@@ -670,12 +670,13 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
         if (minDrift > MAKER_RECENTER_DRIFT_PCT) {
           await log("info", `Grid ${gc.symbol} (maker): price drifted ${(minDrift * 100).toFixed(1)}% from resting buys. Recentering at ${livePrice.toFixed(6)}.`)
           try {
-            const liveIds = restingBuys.filter(o => o.mexcOrderId).map((o) => o.mexcOrderId!) as string[]
-            if (liveIds.length > 0) await cancelOrders(liveIds)
-            await db.update(gridOrders)
-              .set({ status: "cancelled", exchangeStatus: "cancelled" })
-              .where(inArray(gridOrders.id, restingBuys.map((o) => o.id)))
-            await setupGrid(cfg, gc, snap, volatility, undefined, true)
+            const toCancel = (gc.direction as string) === "neutral" ? active : restingBuys
+const liveIds = toCancel.filter(o => o.mexcOrderId).map((o) => o.mexcOrderId!) as string[]
+if (liveIds.length > 0) await cancelOrders(liveIds)
+await db.update(gridOrders)
+.set({ status: "cancelled", exchangeStatus: "cancelled" })
+.where(inArray(gridOrders.id, toCancel.map((o) => o.id)))
+await setupGrid(cfg, gc, snap, volatility, undefined, true)
           } catch (err) {
             await log("error", `Grid ${gc.symbol} (maker): recenter failed: ${dbErr(err)}`)
           }
@@ -874,7 +875,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
     if (priceDrift > 5 || needsTighten) {
       await log("info", `Grid ${gc.symbol}: price drifted ${priceDrift.toFixed(1)}% from orders. Recentering ladder at ${price.toFixed(4)}.`)
       // Cancel ALL pending orders — if price crashed >40%, sells are hopeless
-      const cancelAll = priceDrift > 40
+      const cancelAll = priceDrift > 40 || (gc.direction as string) === "neutral" // COMBO-FIX: neutral rebuilds wipe both sides
       for (const o of active) {
         if (o.side === "buy" || cancelAll) {
           await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
