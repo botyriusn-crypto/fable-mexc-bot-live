@@ -727,3 +727,11 @@ export async function initRealtimeEngine(symbol: string, timeframe: string) {
   globalThis.__wsManagers[symbol] = manager
   manager.connect()
 }
+
+
+// ── COMBO fast-path: evaluate paper fills every ~20s ──
+setInterval(() => {
+  if (typeof runTick === 'function') {
+    runTick().catch(err => console.error('[FastTick] Error:', err));
+  }
+}, 20000);
