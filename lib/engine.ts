@@ -376,6 +376,37 @@ async function syncWithMexc(cfg: BotConfig) {
   }
 }
 
+
+// ── Institutional Layer: Macro Regime & Plan Matching ──
+// Checks the broad market (BTC) to determine if we should be in "Risk-On" or "Risk-Off" mode.
+async function checkMacroRegime(exchange: any): Promise<{ riskOff: boolean; reason: string }> {
+  try {
+    const btcCandles = await exchange.fetchKlines("BTC_USDT", "Hour4", 60)
+    if (btcCandles.length < 50) return { riskOff: false, reason: "Insufficient BTC data" }
+    
+    const closes = btcCandles.map((c: any) => c.close)
+    const currentPrice = closes[closes.length - 1]
+    
+    // Calculate 50-period EMA on 4H chart
+    const k = 2 / (50 + 1)
+    let ema50 = closes[0]
+    for (let i = 1; i < closes.length; i++) {
+      ema50 = closes[i] * k + ema50 * (1 - k)
+    }
+    
+    // Calculate short-term momentum (Rate of Change over last 3 candles / 12 hours)
+    const roc = ((currentPrice - closes[closes.length - 4]) / closes[closes.length - 4]) * 100
+    
+    // Risk-Off Condition: Price is below macro trend AND momentum is negative
+    if (currentPrice < ema50 && roc < -1.5) {
+      return { riskOff: true, reason: `BTC below 4H EMA50 & dropping (${roc.toFixed(1)}% ROC)` }
+    }
+    return { riskOff: false, reason: `BTC healthy (Above EMA50, ${roc.toFixed(1)}% ROC)` }
+  } catch (err) {
+    return { riskOff: false, reason: "Macro check failed" }
+  }
+}
+
 let isTicking = false
 
 export async function runTick(): Promise<{ status: string; detail?: string }> {
@@ -399,9 +430,23 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     const marks = new Map<string, number>()
     const tickerCache = new Map<string, any>()
     const exchange = getExchangeClient(cfg.exchange as Exchange)
-    const gridCfgs = await getGridConfigs()
+    // ── Execute Macro Plan Matching ──
+const macroState = await checkMacroRegime(exchange)
+if (macroState.riskOff) {
+  await log("error", `⚠️ MACRO RISK-OFF: ${macroState.reason}. Shifting altcoins to Capital Preservation Plan (Budgets halved, Longs restricted).`)
+} else {
+  // Only log risk-on occasionally to avoid spam (every ~4 hours / 16 ticks)
+  const tickCount = (globalThis as any).__macroTickCount || 0
+  if (tickCount % 16 === 0) await log("info", `✅ MACRO RISK-ON: ${macroState.reason}`)
+  ;(globalThis as any).__macroTickCount = tickCount + 1
+}
+const gridCfgs = await getGridConfigs()
 
     for (const gc of gridCfgs) {
+  // Plan Matching: If Macro is Risk-Off, halve the budget for non-BTC pairs to preserve capital
+  if (macroState.riskOff && gc.symbol !== "BTC_USDT") {
+    gc.budgetPct = gc.budgetPct * 0.5 
+  }
       try {
         await new Promise(r => setTimeout(r, 200)); // 200ms delay to prevent MEXC rate limits
         const [candles, ticker] = await Promise.all([
