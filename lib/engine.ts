@@ -21,6 +21,7 @@ import { classifyLorentzian, combineConfirmation } from "./lorentzian"
 import { computeSnapshot, getFeatures, type FeatureVector, type IndicatorSnapshot } from "./indicators"
 import { loadModel, trainOnTrade, gateEntry } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
+import { computeConsensus, type ConsensusResult } from "./consensus"
 import { detectSniper, SNIPER_LIVE, maybeScanExchange } from "./sniper"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs } from "./grid"
 import { computeInitialStops, evaluateExit } from "./exits"
@@ -459,6 +460,18 @@ const gridCfgs = await getGridConfigs()
         marks.set(gc.symbol, snap.price)
         // Regime-aware auto-tuning: wider ATR in trending, tighter in ranging
         const regime = detectRegime(snap, { ...cfg, symbol: gc.symbol, timeframe: gc.timeframe })
+// ── Bitsgap-style consensus: observability + pause tightening (never an entry trigger) ──
+let cons: ConsensusResult | null = null
+try { cons = computeConsensus(candles) } catch {}
+if (cons) {
+const __cl = ((globalThis as any).__consLog ?? {})
+if (Date.now() - (__cl[gc.symbol] ?? 0) > 6 * 3600 * 1000) {
+__cl[gc.symbol] = Date.now()
+;(globalThis as any).__consLog = __cl
+await log("info", `📊 CONSENSUS ${gc.symbol}: ${cons.bucket.toUpperCase()} | score ${cons.score.toFixed(2)} | ${cons.buy}B/${cons.sell}S/${cons.neutral}N`)
+}
+}
+const effectiveRegime = regime === "neutral" && cons && (cons.bucket === "strong-buy" || cons.bucket === "strong-sell") ? "trend" : regime
         if (gc.direction.startsWith("auto")) {
           // 1. Auto-Tune ATR Spacing
           if (regime === "trend" && gc.rangeAtrMult < 2.0) {
@@ -489,7 +502,7 @@ const gridCfgs = await getGridConfigs()
           }
           (gc as any)._autoSide = newDir === "auto-long" ? "long" : "short"
         }
-        await runGridTick(cfg, gc, snap, regime, exchange)
+        await runGridTick(cfg, gc, snap, effectiveRegime, exchange)
       } catch (err) {
         await log("error", `Grid ${gc.symbol} tick failed: ${err instanceof Error ? err.message : String(err)}`)
       }
