@@ -409,6 +409,9 @@ async function checkMacroRegime(exchange: any): Promise<{ riskOff: boolean; reas
 }
 
 let isTicking = false
+;(globalThis as any).__triggerInstantTick = async () => {
+  if (!isTicking) { await runTick() }
+}
 
 export async function runTick(): Promise<{ status: string; detail?: string }> {
   if (isTicking) return { status: "skipped", detail: "Tick already in progress" }
@@ -729,9 +732,3 @@ export async function initRealtimeEngine(symbol: string, timeframe: string) {
 }
 
 
-// ── COMBO fast-path: evaluate paper fills every ~20s ──
-setInterval(() => {
-  if (typeof runTick === 'function') {
-    runTick().catch(err => console.error('[FastTick] Error:', err));
-  }
-}, 20000);

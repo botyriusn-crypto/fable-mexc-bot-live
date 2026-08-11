@@ -78,6 +78,8 @@ export class MexcWebSocketManager {
           const k = parsed.data
           const sym = (k.symbol || this.symbol).toUpperCase()
           livePrices[sym] = parseFloat(k.close)
+// INSTANT FILL TRIGGER: Wake up the engine immediately on live price move
+if (typeof (globalThis as any).__triggerInstantTick === 'function') { (globalThis as any).__triggerInstantTick() }
           livePriceTimestamps[sym] = Date.now()
           const currentStartTime = k.t
           if (this.lastKlineTime !== null && currentStartTime > this.lastKlineTime) {

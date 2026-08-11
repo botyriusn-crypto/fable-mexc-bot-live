@@ -831,10 +831,10 @@ const sellPrices = active.filter(o => o.side === "sell").map(o => o.price)
 if (sellPrices.length > 0) price = Math.max(...sellPrices) + 0.0001
 }
 let hi = price, lo = price
-if (candles && candles.length > 1) {
-const closed = candles[candles.length - 2]
-hi = Math.max(price, closed.high)
-lo = Math.min(price, closed.low)
+if (candles && candles.length > 0) {
+const cur = candles[candles.length - 1] // forming candle: includes the current spike
+hi = Math.max(price, cur.high)
+lo = Math.min(price, cur.low)
 }
   let spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
   const gridAdxThreshold = 32 // Grids handle mild trends better than single positions
@@ -872,10 +872,19 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
     const needsTighten = false // Disabled: BB squeeze causes infinite cancel/rebuild loops in low vol
 
     // If price is >15% away, OR the grid is too wide for the current volatility
-    if (priceDrift > 5 || needsTighten) {
+    // NEUTRAL DRIFT FIX: Only recenter if price escapes the ladder entirely
+let shouldRecenter = false;
+if ((gc as any).direction === "neutral") {
+  const highestSell = active.filter(o => o.side === "sell").reduce((max, o) => Math.max(max, o.price), 0);
+  const lowestBuy = active.filter(o => o.side === "buy").reduce((min, o) => Math.min(min, o.price), Infinity);
+  shouldRecenter = price > highestSell * 1.02 || price < lowestBuy * 0.98;
+} else {
+  shouldRecenter = priceDrift > 15 || needsTighten;
+}
+if (shouldRecenter) {
       await log("info", `Grid ${gc.symbol}: price drifted ${priceDrift.toFixed(1)}% from orders. Recentering ladder at ${price.toFixed(4)}.`)
       // Cancel ALL pending orders — if price crashed >40%, sells are hopeless
-      const cancelAll = priceDrift > 40 || (gc.direction as string) === "neutral" // COMBO-FIX: neutral rebuilds wipe both sides
+      const cancelAll = shouldRecenter || (gc.direction as string) === "neutral" // COMBO-FIX: neutral rebuilds wipe both sides
       for (const o of active) {
         if (o.side === "buy" || cancelAll) {
           await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
