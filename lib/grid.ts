@@ -213,7 +213,8 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   const bbWidth = snap.bbUpper - snap.bbLower
   const bbBaseSpacing = bbWidth / 4
   const maxSpacing = center * 0.02 // 2% cap — grids farther than this never fill (dead capital)
-const baseSpacing = Math.min(Math.max(bbBaseSpacing, minSpacing), maxSpacing)
+let baseSpacing = Math.min(Math.max(bbBaseSpacing, minSpacing), maxSpacing)
+if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, minSpacing) // COMBO-DENSE
   const geomRatio = gc.direction === "neutral" ? 1.0 : 1.15 // COMBO-DENSE: uniform arithmetic spacing like Bitsgap
   const totalLevels = Math.max(1, Math.min(12, Math.floor(gc.levels / 2))) // Cap at 12 levels per side
   const effectiveLevels = gc.levels
@@ -899,6 +900,13 @@ if (shouldRecenter) {
   // 1) Sell fills: price rose to/above a pending sell level
   const sells = active.filter((o) => o.side === "sell" && hi >= o.price)
 for (const o of sells) {
+if (o.buyPrice == null && (gc as any).direction === "neutral") {
+await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
+const closePrice = o.price - spacing
+await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, entryFeatures: { ...snap.features, sideLong: -1 }, status: "pending" })
+await log("trade", `Grid ${o.symbol} COMBO short sell @ ${o.price.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
+continue
+}
 if (o.buyPrice == null && gc.direction === "neutral") {
 await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
 const closePrice = o.price - spacing
@@ -923,6 +931,18 @@ const sold = await settleGridSell(o, o.price, cfg, "tp", exchange)
   if (!paused) {
     const buys = active.filter((o) => o.side === "buy" && lo <= o.price)
 for (const o of buys) {
+if (o.buyPrice != null && (gc as any).direction === "neutral") {
+const entry = o.buyPrice
+const grossPnl = (entry - o.price) * o.quantity
+const fees = (entry + o.price) * o.quantity * TAKER_FEE
+const netPnl = grossPnl - fees
+await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
+await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
+await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: (entry * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: false })
+await log("trade", `Grid ${o.symbol} COMBO short closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
+await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: entry, quantity: o.quantity, status: "pending" })
+continue
+}
 if (o.buyPrice != null && gc.direction === "neutral") {
 const entry = o.buyPrice
 const grossPnl = (entry - o.price) * o.quantity
