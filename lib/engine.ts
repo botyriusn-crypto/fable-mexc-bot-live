@@ -105,7 +105,8 @@ async function openPosition(
   snap: IndicatorSnapshot,
   confidence: number,
   features: FeatureVector,
-  strategy: "trend" | "range" | "webhook" = "trend",
+  strategy: "trend" | "range" | "webhook" | "sniper" = "trend",
+stops?: { stopLoss: number; takeProfit: number } | null,
 ): Promise<void> {
   const price = snap.price
   const quantity = (cfg.positionSizeUsdt * cfg.leverage) / price
@@ -119,11 +120,14 @@ async function openPosition(
     rangeTarget = snap.bbMiddle
     takeProfit = snap.bbMiddle
     stopLoss = direction === "long" ? price - snap.atr * 1.0 : price + snap.atr * 1.0
-  } else {
-    const stops = computeInitialStops(direction, price, snap.atr, cfg)
+  } else if (stops) {
     stopLoss = stops.stopLoss
     takeProfit = stops.takeProfit
-  }
+} else {
+    const initStops = computeInitialStops(direction, price, snap.atr, cfg)
+    stopLoss = initStops.stopLoss
+    takeProfit = initStops.takeProfit
+}
 
   if (cfg.mode === "live") {
     try {
@@ -238,12 +242,17 @@ export async function closePosition(
   // Learning loop: every closed trade trains the model
   if (position.entryFeatures) {
     try {
-      await trainOnTrade(
-        position.entryFeatures as unknown as Record<string, number>,
-        netPnl > 0 ? 1 : -1,
-        pnlPct,
-        "trend"
-      )
+      const modelForTrain = await loadModel()
+await trainOnTrade(
+modelForTrain,
+position.entryFeatures as unknown as Record<string, number>,
+netPnl > 0,
+pnlPct,
+cfg.mlLearningRate,
+trade.id,
+position.id,
+position.strategy === "grid" ? "grid" : "trend",
+)
       await log("info", `Model updated from trade #${trade.id} (${netPnl > 0 ? "win" : "loss"})`)
     } catch (err) {
       await log("error", `Model training failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -499,6 +508,26 @@ if (nowTs - lastHeartbeat > 6 * 3600 * 1000) {
 }
 
 if (sn.direction) {
+const lastLog = ((globalThis as any).__sniperLast ?? {})[symbol] ?? 0
+if (nowTs - lastLog > 6 * 3600 * 1000) {
+;(globalThis as any).__sniperLast = { ...((globalThis as any).__sniperLast ?? {}), [symbol]: nowTs }
+await log("info", `🎯 SNIPER CANDIDATE ${symbol}: ${sn.direction.toUpperCase()} | ${sn.reason} | conf ${(sn.confidence * 100).toFixed(0)}% | SL ${sn.stopLoss.toFixed(6)} | TP ${sn.takeProfit.toFixed(6)}`)
+if (SNIPER_LIVE && (sn.direction === "long" ? marketCfg.allowLong : marketCfg.allowShort)) {
+await openPosition(marketCfg, sn.direction, snap, sn.confidence, { ...snap.features, sideLong: sn.direction === "long" ? 1 : -1 }, "sniper", { stopLoss: sn.stopLoss, takeProfit: sn.takeProfit })
+}
+}
+}
+} catch (err) {
+await log("error", `Sniper scan failed: ${err instanceof Error ? err.message : String(err)}`)
+}
+}
+// ── Sniper Engine v1: event-driven dislocation scanner (observe-only) ──
+if (isSelected) {
+try {
+const realTicker = await exchange.fetchTicker(symbol)
+const sn = detectSniper(candles, snap, (realTicker as any)?.fundingRate ?? 0)
+if (sn.direction) {
+const nowTs = Date.now()
 const lastLog = ((globalThis as any).__sniperLast ?? {})[symbol] ?? 0
 if (nowTs - lastLog > 6 * 3600 * 1000) {
 ;(globalThis as any).__sniperLast = { ...((globalThis as any).__sniperLast ?? {}), [symbol]: nowTs }
