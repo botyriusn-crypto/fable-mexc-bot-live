@@ -130,27 +130,19 @@ export async function GET() {
     
     // 4. Generate optimal parameters mathematically based on the metrics
     const recommendations = topPicks.map(m => {
-      // Levels: More levels for high chop, fewer for high ATR
-      let levels = 8
-      if (m.chop > 65) levels = 10
-      if (m.atrPct > 2.5) levels = 6
-      
-      // ATR Mult: Tighter for high chop, wider for trending/low chop
-      let atrMult = 1.5
-      if (m.chop > 65) atrMult = 1.2
-      if (m.chop < 55) atrMult = 2.0
-      
-      // Leverage: Conservative for high vol
-      let leverage = 3
-      if (m.atrPct < 1.5) leverage = 5
-      
       return {
         symbol: m.symbol,
-        reason: `OQS: ${m.score} | CHOP: ${m.chop} | BB Touches: ${m.bbTouches} | ATR: ${m.atrPct}% | ADX: ${m.adx}`,
-        levels,
-        atrMult,
-        leverage,
-        budgetPct: 10
+        reason: `DNA: ${m.dnaScore} | Blend: ${m.blendedScore} | Chop: ${m.chopRatio} | Rev: ${m.revRate} | Drift: ${m.driftPct}%`,
+        levels: m.suggestedLevels,
+        atrMult: 1.0, // DNA uses spacing% instead of ATR mult
+        leverage: m.suggestedLeverage,
+        budgetPct: 10,
+        dnaScore: m.dnaScore,
+        blendedScore: m.blendedScore,
+        chopRatio: m.chopRatio,
+        revRate: m.revRate,
+        driftPct: m.driftPct,
+        suggestedSpacingPct: m.suggestedSpacingPct
       }
     })
     
