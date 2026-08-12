@@ -185,6 +185,20 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
   const [directionBusy, setDirectionBusy] = useState(false)
 const [comboBusy, setComboBusy] = useState(false)
 const isCombo = grid.direction === "neutral"
+const [livePrice, setLivePrice] = useState<number | null>(null)
+useEffect(() => {
+let alive = true
+const load = async () => {
+try {
+const r = await fetch("/api/bot/live-prices")
+const j = await r.json()
+if (alive && j && j[grid.symbol] != null) setLivePrice(Number(j[grid.symbol]))
+} catch {}
+}
+load()
+const t = setInterval(load, 5000)
+return () => { alive = false; clearInterval(t) }
+}, [grid.symbol])
 const handleToggleCombo = async () => {
 setComboBusy(true)
 try {
@@ -300,6 +314,7 @@ setComboBusy(false)
           <Badge variant={grid.enabled ? "default" : "outline"} className="shrink-0 cursor-pointer" onClick={toggleExpand}>
             {grid.symbol}
 </Badge>
+{livePrice != null && <span className="shrink-0 font-mono text-[11px] text-chart-3">@{livePrice < 1 ? livePrice.toFixed(6) : livePrice.toFixed(2)}</span>}
 <label className="flex shrink-0 cursor-pointer items-center gap-1" title="COMBO: neutral two-sided grid (buys + sells placed instantly)">
 <input type="checkbox" checked={isCombo} disabled={comboBusy} onChange={handleToggleCombo} className="size-3.5 accent-chart-3" />
 <span className={`font-mono text-[10px] ${isCombo ? "text-chart-3" : "text-muted-foreground/60"}`}>COMBO</span>
@@ -411,6 +426,7 @@ setComboBusy(false)
 }
 
 export function MultiGridCard() {
+const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" && localStorage.getItem("newGridTf")) || "Min15")
   const { data: state, mutate: refresh } = useBotState()
   const { mutate } = useSWRConfig()
   
@@ -513,6 +529,11 @@ export function MultiGridCard() {
           >
             {scanning ? "🤖 AI Analyzing..." : aiPicks.length > 0 ? "✕ Close AI Picks" : scanning ? "🤖 AI Analyzing..." : aiPicks.length > 0 ? "✕ Close AI Picks" : "🤖 AI Advisor"}
           </Button>
+<select value={newTf} onChange={(e) => { setNewTf(e.target.value); localStorage.setItem("newGridTf", e.target.value) }} className="h-7 shrink-0 rounded-md border border-border bg-background px-1 font-mono text-[11px] text-muted-foreground" title="Timeframe for NEW grids">
+<option value="Min15">15m</option>
+<option value="Min60">1h</option>
+<option value="Hour4">4h</option>
+</select>
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
