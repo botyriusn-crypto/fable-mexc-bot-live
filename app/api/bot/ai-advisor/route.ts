@@ -36,9 +36,20 @@ export async function GET() {
     
     const candidates = (tickerJson.data as any[])
       .filter(t => t.symbol.endsWith("_USDT") && !t.symbol.includes("STOCK") && !t.symbol.includes("3L") && !t.symbol.includes("3S"))
-      .filter(t => t.amount24 > 50000000) // > $50M volume
+      .filter(t => t.amount24 > 1000000) // $1M min volume (allows mid-cap alts) // > $50M volume
       .sort((a, b) => b.amount24 - a.amount24)
-      .slice(0, 30) // Deep scan top 30
+      .slice(0, 100)
+
+    // Watchlist Override: Always include currently active grid pairs
+    try {
+      const activePairs = await db.select({ symbol: gridConfigs.symbol }).from(gridConfigs)
+      for (const pair of activePairs) {
+        if (!candidates.find((c: any) => c.symbol === pair.symbol)) {
+          const ticker = (tickerJson.data as any[]).find((t: any) => t.symbol === pair.symbol)
+          if (ticker) candidates.push(ticker)
+        }
+      }
+    } catch(e) { console.error("Watchlist override error:", e) } // Scan top 100 for wider net
 
     const scoredMarkets: any[] = []
 
@@ -67,9 +78,8 @@ export async function GET() {
         const atrPct = (lastAtr / lastClose) * 100
         
         // Hard filters
-        if (atrPct < 0.8) continue // Too dead
-        if (lastAdx > 35) continue // Too trending
-        
+        // Hard filters removed - let DNA score handle it
+                
         // Calculate Choppiness Index
         const chop = calcChop(candles, 14)
         
