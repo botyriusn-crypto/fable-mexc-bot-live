@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { ema, atr, adx, bollinger } from "@/lib/indicators"
+import { comboDna, comboParams } from "@/lib/combo-score"
 import { db } from "@/lib/db"
 import { botLogs } from "@/lib/db/schema"
 import { livePrices } from "@/lib/mexc/ws"
@@ -96,6 +97,10 @@ export async function GET() {
         score += atrPct * 5      // Reward volatility
         score -= (lastAdx - 20) * 1.5 // Penalize trend
         
+        const dna = comboDna(candles, 0.6)
+        const params = comboParams(dna, lastClose)
+        const blendedScore = Math.round((score + dna.score) / 2)
+
         scoredMarkets.push({
           symbol: t.symbol,
           volumeUsdt: Math.round(t.amount24),
@@ -104,7 +109,15 @@ export async function GET() {
           chop: parseFloat(chop.toFixed(1)),
           bbTouches,
           momentum3h: parseFloat(momentum3h.toFixed(2)),
-          score: Math.round(score)
+          score: Math.round(score),
+          dnaScore: dna.score,
+          chopRatio: parseFloat(dna.chop.toFixed(1)),
+          revRate: parseFloat(dna.revRate.toFixed(2)),
+          driftPct: parseFloat(dna.driftPct.toFixed(1)),
+          suggestedLeverage: params.suggestedLeverage,
+          suggestedSpacingPct: parseFloat(params.spacingPct.toFixed(2)),
+          suggestedLevels: params.levels,
+          blendedScore: blendedScore
         })
         
         // Small delay to avoid rate limits
@@ -113,7 +126,7 @@ export async function GET() {
     }
 
     // 3. Sort by OQS and pick top 3
-    const topPicks = scoredMarkets.sort((a, b) => b.score - a.score).slice(0, 3)
+    const topPicks = scoredMarkets.sort((a, b) => b.blendedScore - a.blendedScore).slice(0, 3)
     
     // 4. Generate optimal parameters mathematically based on the metrics
     const recommendations = topPicks.map(m => {
