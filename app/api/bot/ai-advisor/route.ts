@@ -109,7 +109,7 @@ export async function GET() {
         
         const dna = comboDna(candles, 0.6)
         const params = comboParams(dna, lastClose)
-        const blendedScore = Math.round((score + dna.score) / 2)
+        const blendedScore = Math.round(Math.min(score, 100) * 0.35 + dna.score * 0.65) // DNA (drift-aware) dominates
 
         scoredMarkets.push({
           symbol: t.symbol,
