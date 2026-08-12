@@ -932,11 +932,15 @@ const sold = await settleGridSell(o, o.price, cfg, "tp", exchange)
     const buys = active.filter((o) => o.side === "buy" && lo <= o.price)
 for (const o of buys) {
 if (o.buyPrice != null && (gc as any).direction === "neutral") {
-const entry = o.buyPrice
-const grossPnl = (entry - o.price) * o.quantity
-const fees = (entry + o.price) * o.quantity * TAKER_FEE
-const netPnl = grossPnl - fees
-await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
+  // RACE-FIX: Re-check order status before processing (prevents double-fill)
+  const fresh = await db.select({ status: gridOrders.status }).from(gridOrders).where(eq(gridOrders.id, o.id))
+  if (fresh[0]?.status !== "pending") continue
+  
+  const entry = o.buyPrice
+  const grossPnl = (entry - o.price) * o.quantity
+  const fees = (entry + o.price) * o.quantity * TAKER_FEE
+  const netPnl = grossPnl - fees
+  await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
 await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
 await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: (entry * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: false })
 await log("trade", `Grid ${o.symbol} COMBO short closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
