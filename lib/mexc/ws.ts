@@ -77,7 +77,8 @@ export class MexcWebSocketManager {
         if (parsed.channel && parsed.channel.startsWith("push.kline") && parsed.data) {
           const k = parsed.data
           const sym = (k.symbol || this.symbol).toUpperCase()
-          livePrices[sym] = parseFloat(k.close)
+          const __cp = parseFloat(k.close ?? k.c ?? k.kline?.c)
+          if (!isNaN(__cp)) livePrices[sym] = __cp
 // INSTANT FILL TRIGGER: Wake up the engine immediately on live price move
 if (typeof (globalThis as any).__triggerInstantTick === 'function') { (globalThis as any).__triggerInstantTick() }
           livePriceTimestamps[sym] = Date.now()
