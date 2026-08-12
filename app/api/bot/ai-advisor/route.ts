@@ -144,7 +144,7 @@ export async function GET() {
         symbol: m.symbol,
         reason: `DNA: ${m.dnaScore} | Blend: ${m.blendedScore} | Chop: ${m.chopRatio} | Rev: ${m.revRate} | Drift: ${m.driftPct}%`,
         levels: m.suggestedLevels,
-        atrMult: 1.0, // DNA uses spacing% instead of ATR mult
+        atrMult: parseFloat(Math.min(3, Math.max(0.3, m.suggestedSpacingPct / Math.max(m.atrPct, 0.1))).toFixed(2)), // DNA-derived ATR mult
         leverage: m.suggestedLeverage,
         budgetPct: 10,
         dnaScore: m.dnaScore,
