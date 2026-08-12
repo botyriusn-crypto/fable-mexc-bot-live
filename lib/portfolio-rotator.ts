@@ -5,7 +5,8 @@ import { log } from "./logger"
 
 const ROTATION_INTERVAL_MS = 4 * 60 * 60 * 1000 // 4 hours
 const MIN_AGE_HOURS = 6 // Don't kill grids younger than 6h
-const MAX_REPLACEMENTS_PER_CYCLE = 3 // Cap to prevent over-trading
+const MAX_REPLACEMENTS_PER_CYCLE = 3
+const MAX_DEPLOYED_PCT = 90 // Safety cap: never deploy more than 90% of balance // Cap to prevent over-trading
 
 let lastRotationTime = 0
 let rotationEnabled = true
@@ -82,6 +83,7 @@ export async function checkAndRotate(exchange: any): Promise<void> {
     
     // 5. Perform replacements
     const existingSymbols = new Set(comboConfigs.map(c => c.symbol))
+    const totalDeployed = allConfigs.filter(c => c.enabled).reduce((s, c) => s + (c.budgetPct || 0), 0)
     let replaced = 0
     
     for (const deadGrid of dead) {
@@ -90,6 +92,13 @@ export async function checkAndRotate(exchange: any): Promise<void> {
         break
       }
       
+      // Budget safety: stop if adding would exceed cap
+      const newBudget = candidate ? (candidate.budgetPct || 10) : 10
+      if (totalDeployed + newBudget > MAX_DEPLOYED_PCT) {
+        await log("info", `Budget cap reached (${totalDeployed}% deployed) - stopping rotation`)
+        break
+      }
+
       // Find first candidate not already in portfolio
       const candidate = candidates.find(c => !existingSymbols.has(c.symbol))
       if (!candidate) {

@@ -521,6 +521,18 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
       <CardHeader className="flex-row flex-wrap items-center justify-between gap-3 pb-2">
         <div className="flex flex-col gap-1">
           <CardTitle className="text-sm font-medium">Grid Bots</CardTitle>
+        <div className="flex items-center gap-2 ml-auto mr-4">
+          <Button onClick={async () => {
+            const res = await fetch("/api/bot/rotate", { method: "POST" })
+            const data = await res.json().catch(() => ({}))
+            alert(data.success ? "✅ Rotation complete! Check Activity Log." : "❌ Rotation failed: " + (data.error || "unknown"))
+            setTimeout(() => window.location.reload(), 500)
+          }} size="sm" variant="outline" className="text-xs h-7 px-2">🔄 Rotate Now</Button>
+          <Button onClick={async () => {
+            await fetch("/api/bot/rotate", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({enabled: true}) })
+            alert("✅ Auto-rotation enabled! Runs every 4 hours.")
+          }} size="sm" variant="outline" className="text-xs h-7 px-2">⏰ Enable Auto</Button>
+        </div>
           <span className="text-xs text-muted-foreground">{grids.length} pairs · {totalOrders} orders active</span>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 text-xs font-mono">
