@@ -24,6 +24,7 @@ import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
 import { computeConsensus, type ConsensusResult } from "./consensus"
 import { detectSniper, SNIPER_LIVE, maybeScanExchange } from "./sniper"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs } from "./grid"
+import { scanNewListings, cleanupExpiredListings } from "./listing-scanner"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager, livePrices, livePriceTimestamps } from "./mexc/ws"
 
