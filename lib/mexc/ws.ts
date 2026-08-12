@@ -1,8 +1,8 @@
 import WebSocket from "ws"
 import { log } from "../grid"
 
-export const livePrices: Record<string, number> = {}
-export const livePriceTimestamps: Record<string, number> = {}
+export const livePrices: Record<string, number> = ((globalThis as any).__livePrices || ((globalThis as any).__livePrices = {}))
+export const livePriceTimestamps: Record<string, number> = ((globalThis as any).__livePriceTimestamps || ((globalThis as any).__livePriceTimestamps = {}))
 
 export interface KlineUpdate {
   symbol: string
