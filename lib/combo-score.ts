@@ -25,12 +25,13 @@ export function comboDna(candles: Candle[], spacingPct = 0.6): ComboDna {
   const driftPct = ((candles[n - 1].close - candles[0].close) / candles[0].close) * 100
   const atrPct = ((path / n) / mid) * 100
   const touches = candles.reduce((a, k) => a + Math.floor((k.high - k.low) / (mid * (spacingPct / 100))), 0)
-  const score = Math.round(
-    Math.min(chop / 8, 1) * 40 +
-    Math.min(revRate / 0.5, 1) * 25 +
-    (rangePct >= 3 && rangePct <= 12 ? 20 : rangePct < 3 ? (rangePct / 3) * 20 : Math.max(0, 20 - (rangePct - 12))) +
-    Math.max(0, 15 - Math.abs(driftPct) * 3)
-  )
+  const activity = Math.min(touches / 100, 1) * 50 + Math.min(atrPct / 3, 1) * 10
+  const quality =
+    Math.min(chop / 8, 1) * 20 +
+    Math.min(revRate / 0.5, 1) * 10 +
+    (rangePct >= 3 && rangePct <= 15 ? 5 : 0) +
+    Math.max(0, 5 - Math.abs(driftPct) * 0.5)
+  const score = Math.round(activity + quality)
   return { chop, revRate, rangePct, driftPct, atrPct, touches, score }
 }
 
