@@ -186,13 +186,21 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
 const [comboBusy, setComboBusy] = useState(false)
 const isCombo = grid.direction === "neutral"
 const [livePrice, setLivePrice] = useState<number | null>(null)
+const [priceDir, setPriceDir] = useState<"up" | "down" | null>(null)
+const prevPriceRef = useRef<number | null>(null)
 useEffect(() => {
 let alive = true
 const load = async () => {
 try {
 const r = await fetch("/api/bot/live-prices")
 const j = await r.json()
-if (alive && j && j[grid.symbol] != null) setLivePrice(Number(j[grid.symbol]))
+if (alive && j && j[grid.symbol] != null) {
+const np = Number(j[grid.symbol])
+const prev = prevPriceRef.current
+if (prev != null && np !== prev) setPriceDir(np > prev ? "up" : "down")
+prevPriceRef.current = np
+setLivePrice(np)
+}
 } catch {}
 }
 load()
@@ -314,7 +322,7 @@ setComboBusy(false)
           <Badge variant={grid.enabled ? "default" : "outline"} className="shrink-0 cursor-pointer" onClick={toggleExpand}>
             {grid.symbol}
 </Badge>
-{livePrice != null && <span className="shrink-0 font-mono text-[11px] text-chart-3">@{livePrice < 1 ? livePrice.toFixed(6) : livePrice.toFixed(2)}</span>}
+{livePrice != null && <span className={`shrink-0 font-mono text-[11px] ${priceDir === "down" ? "text-danger" : priceDir === "up" ? "text-success" : "text-chart-3"}`}>@{livePrice < 1 ? livePrice.toFixed(6) : livePrice.toFixed(2)}</span>}
 <label className="flex shrink-0 cursor-pointer items-center gap-1" title="COMBO: neutral two-sided grid (buys + sells placed instantly)">
 <input type="checkbox" checked={isCombo} disabled={comboBusy} onChange={handleToggleCombo} className="size-3.5 accent-chart-3" />
 <span className={`font-mono text-[10px] ${isCombo ? "text-chart-3" : "text-muted-foreground/60"}`}>COMBO</span>
