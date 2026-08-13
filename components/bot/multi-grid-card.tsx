@@ -524,6 +524,24 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
         <div className="flex items-center gap-2 ml-auto mr-4">
           <Button 
             onClick={async () => {
+              const res = await fetch("/api/bot/sync-orders", { method: "POST" })
+              const data = await res.json().catch(() => ({}))
+              if (data.success) {
+                alert(`✅ Synced: ${data.imported} imported, ${data.reactivated} reactivated`)
+                setTimeout(() => window.location.reload(), 500)
+              } else {
+                alert("❌ Sync failed: " + (data.error || "unknown"))
+              }
+            }} 
+            size="sm" 
+            variant="outline" 
+            className="text-xs h-7 px-3 transition-all hover:bg-success/10 hover:border-success/40"
+            title="Import all open orders from MEXC"
+          >
+            🔗 Sync Live Orders
+          </Button>
+          <Button 
+            onClick={async () => {
               const res = await fetch("/api/bot/rotate", { method: "POST" })
               const data = await res.json().catch(() => ({}))
               if (data.success) {
