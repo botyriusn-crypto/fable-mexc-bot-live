@@ -26,6 +26,7 @@ import { detectSniper, SNIPER_LIVE, maybeScanExchange } from "./sniper"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs } from "./grid"
 import { scanNewListings, cleanupExpiredListings } from "./listing-scanner"
 import { checkAndRotate } from "./portfolio-rotator"
+import { runWatchdog } from "./watchdog"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager, livePrices, livePriceTimestamps } from "./mexc/ws"
 

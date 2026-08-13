@@ -47,6 +47,11 @@ export function ClassifierCard({ state }: { state: any }) {
           </div>
         )}
 
+                <div className={`rounded-md border p-2 text-[10px] ${(state as any)?.watchdog?.issues?.length ? "border-danger/50 bg-danger/10 text-danger" : "border-yellow-400/30 bg-yellow-400/10 text-yellow-200/70"}`}>
+          🛡️ Watchdog: {(state as any)?.watchdog?.issues?.length ? (state as any).watchdog.issues.join(" · ") : "all clear"}
+          {((state as any)?.watchdog?.fixed?.length ?? 0) > 0 && <span className="text-success"> · auto-fixed: {(state as any).watchdog.fixed.join(", ")}</span>}
+          {(state as any)?.watchdog?.lastRun ? <span className="opacity-60"> · checked {new Date((state as any).watchdog.lastRun).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span> : null}
+        </div>
         <p className="text-[10px] leading-relaxed text-yellow-200/60">
           {resolved < 100
             ? `Collecting baseline… ${100 - resolved} more resolved decisions before this model is trusted to gate SNIPER entries.`

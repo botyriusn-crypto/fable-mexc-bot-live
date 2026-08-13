@@ -12,6 +12,7 @@ import { detectRegime, type Regime } from "@/lib/strategy"
 import { getGridConfigs, gridUnrealizedPnl } from "@/lib/grid"
 import { isRotationEnabled, getLastRotationTime } from "@/lib/portfolio-rotator"
 import { getShadowStats, runShadowCycle } from "@/lib/shadow-evaluator"
+import { getWatchdogReport } from "@/lib/watchdog"
 
 interface MexcAsset {
   currency: string; availableBalance: number; equity: number;
@@ -207,6 +208,7 @@ export async function GET() {
       rotationEnabled: isRotationEnabled(),
       lastRotationTime: getLastRotationTime(),
       shadowStats,
+      watchdog: getWatchdogReport(),
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,
       markPrice, unrealizedPnl: totalGridUnrealized,
       equity: cfg.paperBalance + totalGridUnrealized,
