@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { gridConfigs, gridOrders } from "@/lib/db/schema"
-import { eq, and } from "drizzle-orm"
+import { eq, sql } from "drizzle-orm"
 import { fetchOpenOrders } from "@/lib/mexc/private"
 
 export const dynamic = "force-dynamic"
@@ -11,6 +11,7 @@ export async function POST() {
     const configs = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
     let imported = 0
     let reactivated = 0
+    let updated = 0
     const details: any[] = []
 
     for (const cfg of configs) {
@@ -21,16 +22,14 @@ export async function POST() {
         
         for (const order of mexcOrders) {
           const orderId = String(order.orderId)
+          const side = order.side === 1 ? "buy" : "sell"
+          const price = Number(order.price)
+          const quantity = Number(order.volume)
           
-          // Check if this order exists in DB (any status)
           const existing = await db.select().from(gridOrders).where(eq(gridOrders.mexcOrderId, orderId))
           
           if (existing.length === 0) {
-            // Order not in DB at all - import it
-            const side = order.side === 1 ? "buy" : "sell"
-            const price = Number(order.price)
-            const quantity = Number(order.volume)
-            
+            // Import new order
             await db.insert(gridOrders).values({
               symbol: cfg.symbol,
               timeframe: cfg.timeframe,
@@ -41,20 +40,30 @@ export async function POST() {
               mexcOrderId: orderId,
               exchangeStatus: "open",
               createdAt: new Date(),
+              syncedAt: sql`NOW()`,
             })
             imported++
             details.push({ action: "imported", symbol: cfg.symbol, orderId, side, price })
-          } else if (existing[0].status !== "pending") {
-            // Order exists but marked as cancelled/filled - reactivate it
+          } else {
+            // Update existing order to pending + mark as synced
             await db.update(gridOrders)
-              .set({ status: "pending", exchangeStatus: "open" })
+              .set({ 
+                status: "pending", 
+                exchangeStatus: "open",
+                syncedAt: sql`NOW()`
+              })
               .where(eq(gridOrders.mexcOrderId, orderId))
-            reactivated++
-            details.push({ action: "reactivated", symbol: cfg.symbol, orderId, oldStatus: existing[0].status })
+            
+            if (existing[0].status !== "pending") {
+              reactivated++
+              details.push({ action: "reactivated", symbol: cfg.symbol, orderId, oldStatus: existing[0].status })
+            } else {
+              updated++
+            }
           }
         }
         
-        await new Promise(r => setTimeout(r, 300)) // Slower to avoid rate limits
+        await new Promise(r => setTimeout(r, 300))
       } catch (err) {
         console.error(`[Sync] Failed for ${cfg.symbol}:`, err)
         details.push({ symbol: cfg.symbol, error: String(err) })
@@ -65,7 +74,8 @@ export async function POST() {
       success: true, 
       imported, 
       reactivated,
-      details: details.slice(0, 20) // First 20 for readability
+      updated,
+      details: details.slice(0, 20)
     })
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err?.message }, { status: 500 })
