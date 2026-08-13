@@ -31,8 +31,20 @@ async function fetchLiveAccount() {
 }
 
 export const dynamic = "force-dynamic"
+let lastShadowRun = 0
 
 export async function GET() {
+  const nowMs = Date.now()
+  if (nowMs - lastShadowRun > 60_000) {
+    lastShadowRun = nowMs
+    runShadowCycle().catch(() => {})
+  }
+  let shadowStats: any = null
+  try {
+    shadowStats = await getShadowStats()
+  } catch {
+    shadowStats = { totalEvaluations: 0, resolvedCount: 0, correctCount: 0, accuracy: 0, topCandidate: null }
+  }
   try {
     const [cfgRows, openPosRows, recentTrades, equity, logs, modelRows, activeGridOrders, decisions, gridConfigRows, lifetimeTradesRaw] = await Promise.all([
       db.select().from(botConfig).where(eq(botConfig.id, 1)),
@@ -194,6 +206,7 @@ export async function GET() {
     return NextResponse.json({
       rotationEnabled: isRotationEnabled(),
       lastRotationTime: getLastRotationTime(),
+      shadowStats,
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,
       markPrice, unrealizedPnl: totalGridUnrealized,
       equity: cfg.paperBalance + totalGridUnrealized,

@@ -13,6 +13,25 @@ export function ClassifierCard({ state }: { state: BotState }) {
       <CardHeader className="flex-row items-center justify-between gap-3 pb-2">
         <div className="flex flex-col gap-1">
           <CardTitle className="text-sm font-medium">Entry confirmation</CardTitle>
+        <div className="mb-3 rounded-md border border-chart-3/30 bg-chart-3/5 p-2">
+          <div className="text-[10px] font-medium text-chart-3 mb-1">Shadow Evaluations (Training Mode)</div>
+          <div className="text-[10px] text-muted-foreground space-y-0.5">
+            <div>Total: {state.shadowStats?.totalEvaluations || 0} · Resolved: {state.shadowStats?.resolvedCount || 0}</div>
+            {state.shadowStats?.resolvedCount > 0 && (
+              <div>Accuracy: {((state.shadowStats.accuracy || 0) * 100).toFixed(1)}% ({state.shadowStats.correctCount}/{state.shadowStats.resolvedCount})</div>
+            )}
+            {state.shadowStats?.topCandidate && (
+              <div className="mt-1 font-mono">
+                Top: <span className="text-chart-3">{state.shadowStats.topCandidate.symbol}</span>{" "}
+                <span className={state.shadowStats.topCandidate.direction === "long" ? "text-success" : "text-danger"}>
+                  {state.shadowStats.topCandidate.direction.toUpperCase()}
+                </span>{" "}
+                ({((state.shadowStats.topCandidate.confidence || 0) * 100).toFixed(0)}%)
+              </div>
+            )}
+          </div>
+        </div>
+
           <span className="text-xs text-muted-foreground">Four-closed-bar comparison</span>
         </div>
         <Badge variant="outline" className="uppercase">{state.config.confirmationMode}</Badge>

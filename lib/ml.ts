@@ -108,6 +108,85 @@ export function gateEntry(
 // SGD update from a closed trade. label: 1 = win, 0 = loss.
 // pnlWeight scales the gradient by PnL magnitude (bigger wins/losses teach more).
 // NEW: tradeMode parameter separates grid vs trend learning (optional for backward compat).
+
+
+// Load model by ID (id=1 is grid model, id=2 is shadow/timing model)
+export async function loadModelById(id: number): Promise<MlState> {
+  const rows = await db.select().from(mlModel).where(eq(mlModel.id, id))
+  if (rows.length === 0) {
+    const weights = Object.fromEntries(FEATURE_KEYS.map((k) => [k, 0]))
+    await db.insert(mlModel).values({ id, weights }).onConflictDoNothing()
+    return { weights, bias: 0, sampleCount: 0, correctCount: 0, rollingAccuracy: 0.5 }
+  }
+  const r = rows[0]
+  return {
+    weights: r.weights,
+    bias: r.bias,
+    sampleCount: r.sampleCount,
+    correctCount: r.correctCount,
+    rollingAccuracy: r.rollingAccuracy,
+  }
+}
+
+// Shadow evaluation: predict without placing orders
+export function shadowPredict(model: MlState, features: FeatureVector): number {
+  return predict(model, features)
+}
+
+// Train shadow model on resolved decisions
+export async function trainShadowOnDecision(
+  model: MlState,
+  features: FeatureVector,
+  predictedDirection: "long" | "short",
+  actualDirection: "long" | "short" | "neutral",
+  outcomeReturn: number,
+  learningRate: number,
+  decisionId: number
+): Promise<MlState> {
+  const label = predictedDirection === actualDirection ? 1 : 0
+  
+  const prediction = predict(model, features)
+  const error = prediction - label
+  
+  const lr = learningRate
+  
+  const newWeights: Record<string, number> = { ...model.weights }
+  for (const key of FEATURE_KEYS) {
+    const grad = error * (features[key] ?? 0)
+    newWeights[key] = (newWeights[key] ?? 0) - lr * grad - lr * 0.02 * (newWeights[key] ?? 0)
+  }
+  const newBias = model.bias - lr * error
+  
+  const predictedWin = prediction >= 0.5
+  const correct = predictedWin === (label === 1)
+  const newSampleCount = model.sampleCount + 1
+  const newCorrectCount = model.correctCount + (correct ? 1 : 0)
+  const newRollingAccuracy =
+    model.sampleCount === 0
+      ? correct ? 1 : 0
+      : model.rollingAccuracy * 0.9 + (correct ? 1 : 0) * 0.1
+  
+  await db
+    .update(mlModel)
+    .set({
+      weights: newWeights,
+      bias: newBias,
+      sampleCount: newSampleCount,
+      correctCount: newCorrectCount,
+      rollingAccuracy: newRollingAccuracy,
+      updatedAt: sql`NOW()`,
+    })
+    .where(eq(mlModel.id, 2))
+  
+  return {
+    weights: newWeights,
+    bias: newBias,
+    sampleCount: newSampleCount,
+    correctCount: newCorrectCount,
+    rollingAccuracy: newRollingAccuracy,
+  }
+}
+
 export async function trainOnTrade(
   model: MlState,
   features: FeatureVector,
