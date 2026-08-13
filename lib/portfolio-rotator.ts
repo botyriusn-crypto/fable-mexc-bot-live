@@ -11,6 +11,10 @@ const MAX_DEPLOYED_PCT = 90 // Safety cap: never deploy more than 90% of balance
 let lastRotationTime = 0
 let rotationEnabled = true
 
+export function isRotationEnabled(): boolean {
+  return rotationEnabled
+}
+
 export function setRotationEnabled(enabled: boolean) {
   rotationEnabled = enabled
 }

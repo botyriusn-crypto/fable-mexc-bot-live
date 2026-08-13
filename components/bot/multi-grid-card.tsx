@@ -522,18 +522,53 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
         <div className="flex flex-col gap-1">
           <CardTitle className="text-sm font-medium">Grid Bots</CardTitle>
         <div className="flex items-center gap-2 ml-auto mr-4">
-          <Button onClick={async () => {
-            const res = await fetch("/api/bot/rotate", { method: "POST" })
-            const data = await res.json().catch(() => ({}))
-            alert(data.success ? "✅ Rotation complete! Check Activity Log." : "❌ Rotation failed: " + (data.error || "unknown"))
-            setTimeout(() => window.location.reload(), 500)
-          }} size="sm" variant="outline" className="text-xs h-7 px-2">🔄 Rotate Now</Button>
-          <Button onClick={async () => {
-            await fetch("/api/bot/rotate", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({enabled: true}) })
-            alert("✅ Auto-rotation enabled! Runs every 4 hours.")
-          }} size="sm" variant="outline" className="text-xs h-7 px-2">⏰ Enable Auto</Button>
+          <Button 
+            onClick={async () => {
+              const res = await fetch("/api/bot/rotate", { method: "POST" })
+              const data = await res.json().catch(() => ({}))
+              if (data.success) {
+                alert("✅ Rotation complete! Check Activity Log.")
+                setTimeout(() => window.location.reload(), 500)
+              } else {
+                alert("❌ Rotation failed: " + (data.error || "unknown"))
+              }
+            }} 
+            size="sm" 
+            variant="outline" 
+            className="text-xs h-7 px-3 transition-all hover:bg-chart-3/10 hover:border-chart-3/40"
+            title="Manually trigger portfolio rotation now"
+          >
+            🔄 Rotate Now
+          </Button>
+          <Button 
+            onClick={async () => {
+              const currentState = state.rotationEnabled
+              await fetch("/api/bot/rotate", { 
+                method: "POST", 
+                headers: {"Content-Type":"application/json"}, 
+                body: JSON.stringify({enabled: !currentState}) 
+              })
+              alert(currentState ? "❌ Auto-rotation disabled!" : "✅ Auto-rotation enabled! Runs every 4 hours.")
+              setTimeout(() => window.location.reload(), 500)
+            }} 
+            size="sm" 
+            variant="outline" 
+            className={`text-xs h-7 px-3 transition-all ${
+              state.rotationEnabled 
+                ? 'bg-success/20 border-success/60 text-success font-bold shadow-[0_0_8px_rgba(var(--success),0.3)]' 
+                : 'hover:bg-danger/10 hover:border-danger/40'
+            }`}
+            title={state.rotationEnabled ? 'Auto-rotation is ON (click to disable)' : 'Auto-rotation is OFF (click to enable)'}
+          >
+            ⏰ {state.rotationEnabled ? 'Auto ON' : 'Auto OFF'}
+          </Button>
         </div>
           <span className="text-xs text-muted-foreground">{grids.length} pairs · {totalOrders} orders active</span>
+        {state.lastRotationTime && state.lastRotationTime > 0 && (
+          <span className="text-xs text-muted-foreground">
+            · Last rotation: {new Date(state.lastRotationTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+          </span>
+        )}
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 text-xs font-mono">
           <span className={totalRealized >= 0 ? "text-success" : "text-danger"}>Real: {totalRealized >= 0 ? "+" : ""}{fmt(totalRealized, 2)}</span>

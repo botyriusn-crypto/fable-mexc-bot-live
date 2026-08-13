@@ -10,6 +10,7 @@ import { getAccountAssets } from "@/lib/mexc/private"
 import { ema, computeSnapshot } from "@/lib/indicators"
 import { detectRegime, type Regime } from "@/lib/strategy"
 import { getGridConfigs, gridUnrealizedPnl } from "@/lib/grid"
+import { isRotationEnabled, getLastRotationTime } from "@/lib/portfolio-rotator"
 
 interface MexcAsset {
   currency: string; availableBalance: number; equity: number;
@@ -54,7 +55,10 @@ export async function GET() {
     }
 
     const cfg = cfgRows[0]
-    if (!cfg) return NextResponse.json({ error: "Config not found" }, { status: 500 })
+    if (!cfg) return NextResponse.json({
+      rotationEnabled: isRotationEnabled(),
+      lastRotationTime: getLastRotationTime(),
+ error: "Config not found" }, { status: 500 })
 
     const liveAccount = cfg.mode === "live" ? await fetchLiveAccount() : null
 
