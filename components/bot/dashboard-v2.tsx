@@ -175,6 +175,8 @@ export function DashboardV2() {
 
   const grids = (state as any).gridConfigs || []
   const totalRealized = totalPnl
+  const STARTING_BALANCE = 9819.74
+  const phantomPnl = balance - (totalRealized + STARTING_BALANCE)
   const totalUnrealized = grids.reduce((s: number, g: any) => s + (g.unrealizedPnl || 0), 0)
 
   const pnlTone = (v: number) => v > 0 ? "pos" : v < 0 ? "neg" : "neutral"
@@ -221,6 +223,14 @@ export function DashboardV2() {
           <StatCard label="Equity" value={`${fmt(equity)} USDT`} tone="neutral" />
           <StatCard label="Unreal. PnL" value={`${(upnl ?? 0) >= 0 ? "+" : ""}${fmt(upnl)}`} tone={pnlTone(upnl ?? 0)} />
           <StatCard label="Realized PnL" value={`${totalRealized >= 0 ? "+" : ""}${fmt(totalRealized)}`} tone={pnlTone(totalRealized)} />
+          {Math.abs(phantomPnl) > 0.01 && (
+            <StatCard 
+              label="Phantom PnL" 
+              value={`${phantomPnl >= 0 ? "+" : ""}${fmt(phantomPnl)}`} 
+              tone={phantomPnl > 0 ? "warn" : "neg"} 
+              tooltip="Unrecorded profits. Balance is growing but trades aren't logging to the DB."
+            />
+          )}
           <StatCard label="Historic PnL" value={`${totalPnl >= 0 ? "+" : ""}${fmt(totalPnl)}`} tone={pnlTone(totalPnl)} />
           <StatCard label="Win Rate" value={totalTrades > 0 ? `${(winRate * 100).toFixed(0)}%` : "—"} tone="neutral" />
           <StatCard label="Trades" value={String(totalTrades)} tone="neutral" />
