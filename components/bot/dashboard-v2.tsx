@@ -174,7 +174,7 @@ export function DashboardV2() {
   const totalTrades = lifetime?.totalTrades ?? 0
 
   const grids = (state as any).gridConfigs || []
-  const totalRealized = grids.reduce((s: number, g: any) => s + (g.realizedPnl || 0), 0)
+  const totalRealized = totalPnl
   const totalUnrealized = grids.reduce((s: number, g: any) => s + (g.unrealizedPnl || 0), 0)
 
   const pnlTone = (v: number) => v > 0 ? "pos" : v < 0 ? "neg" : "neutral"

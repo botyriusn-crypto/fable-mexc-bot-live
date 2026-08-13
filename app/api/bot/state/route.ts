@@ -48,9 +48,9 @@ export async function GET() {
     // True all-time stats for LIVE trades only (paper/backtest excluded).
     const liveOnly = lifetimeTradesRaw.filter((t) => t.live)
     const lifetimeStats = {
-      totalTrades: liveOnly.length,
-      totalPnl: liveOnly.reduce((s, t) => s + (t.pnl || 0), 0),
-      winRate: liveOnly.length > 0 ? liveOnly.filter((t) => (t.pnl || 0) > 0).length / liveOnly.length : 0,
+      totalTrades: lifetimeTradesRaw.length,
+      totalPnl: lifetimeTradesRaw.reduce((s, t) => s + (t.pnl || 0), 0),
+      winRate: lifetimeTradesRaw.length > 0 ? lifetimeTradesRaw.filter((t) => (t.pnl || 0) > 0).length / lifetimeTradesRaw.length : 0,
     }
 
     const cfg = cfgRows[0]
