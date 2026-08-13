@@ -1178,6 +1178,11 @@ export async function syncExchangeState() {
         )
         
         for (const dbOrder of dbOrders) {
+          // Skip orders synced in the last 2 hours — trust MEXC open_orders
+          if ((dbOrder as any).syncedAt) {
+            const syncAge = Date.now() - new Date((dbOrder as any).syncedAt).getTime()
+            if (syncAge < 2 * 60 * 60 * 1000) continue
+          }
           // Skip orders created or updated in the last 10 minutes (grace period for synced orders)
           const orderAge = Date.now() - new Date(dbOrder.createdAt).getTime()
           if (orderAge < 10 * 60 * 1000) continue

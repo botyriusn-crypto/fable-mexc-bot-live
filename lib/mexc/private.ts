@@ -86,7 +86,8 @@ export async function placeMarketOrder(opts: {
     await setLeverage(opts.symbol, opts.leverage, positionType)
   }
 
-  return privateRequest("POST", "/order/create", {
+  console.log('[DEBUG] Placing Post-Only order:', JSON.stringify({ symbol: opts.symbol, side: opts.side, price, vol, leverage: opts.leverage }));
+  const result = await privateRequest("POST", "/order/create", {
     symbol: opts.symbol,
     side: opts.side,
     vol,
@@ -102,7 +103,8 @@ export async function getAccountAssets(): Promise<any> {
     if (result && typeof result === "object" && "data" in result) {
       return result.data
     }
-    return result || []
+    console.log('[DEBUG] Post-Only result:', JSON.stringify(result));
+  return result || []
   } catch (err) {
     // Fallback for Paper Mode
     return []
@@ -131,13 +133,37 @@ export async function fetchOrderStatus(orderId: string): Promise<any | null> {
 }
 
 export async function fetchOpenOrders(symbol: string): Promise<any[]> {
+  // MEXC caps open_orders at ~50 per page — paginate through all pages
+  const allOrders: any[] = []
+  let pageNum = 1
+  const pageSize = 100
+  
   try {
-    const res: any = await privateRequest("GET", `/order/list/open_orders/${symbol}`)
-    const data = res?.data
-    return Array.isArray(data) ? data : []
+    while (true) {
+      const res: any = await privateRequest(
+        "GET",
+        `/order/list/open_orders/${symbol}?page_num=${pageNum}&page_size=${pageSize}`
+      )
+      const data = res?.data
+      const pageOrders = Array.isArray(data) ? data : []
+      allOrders.push(...pageOrders)
+      
+      // Stop if we got fewer than pageSize (last page)
+      if (pageOrders.length < pageSize) break
+      pageNum++
+      
+      // Safety valve — don't fetch more than 10 pages per symbol
+      if (pageNum > 10) {
+        console.log(`fetchOpenOrders(${symbol}): stopped after 10 pages (${allOrders.length} orders)`)
+        break
+      }
+      
+      await new Promise(r => setTimeout(r, 100)) // Rate limit protection
+    }
+    return allOrders
   } catch (err) {
     console.log(`fetchOpenOrders(${symbol}) failed:`, String(err))
-    return []
+    return allOrders // Return what we got so far
   }
 }
 
