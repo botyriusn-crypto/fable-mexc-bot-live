@@ -3,7 +3,7 @@
 import { and, eq, isNull, sql } from "drizzle-orm"
 import { db } from "./db"
 import { classifierDecisions, gridConfigs } from "./db/schema"
-import { loadModelById, predict, trainShadowOnDecision } from "./ml"
+import { loadModelById, loadModel, predict, trainShadowOnDecision } from "./ml"
 import { recordOutcome, heuristicScore } from "./advisor"
 import { fetchTicker, fetchKlines } from "./mexc/public"
 import { ema, rsi, macdHistogram, atr, rateOfChange, adx, volumeSurge } from "./indicators"
@@ -156,15 +156,25 @@ export async function getShadowStats() {
   const resolved = rows.filter(d => d.resolvedAt)
   const correct = resolved.filter(d => d.outcomeCorrectLogistic).length
   const unresolved = rows.filter(d => !d.resolvedAt)
+  
+  // Load current model to recompute honest real-time confidence
+  const model = await loadModel()
+  
   const scored = unresolved.map(d => {
     const f = (d.lorentzianFilters ?? {}) as any as FeatureVector
+    // Recompute ML confidence with CURRENT weights (honest real-time read)
+    const longConf = predict(model, { ...f, sideLong: 1 } as FeatureVector)
+    const shortConf = predict(model, { ...f, sideLong: 0 } as FeatureVector)
+    const ml = Math.max(longConf, shortConf)
+    
     const setup = heuristicScore(f, d.candidateDirection)
-    const ml = d.logisticConfidence
     const mlSignal = Math.abs(ml - 0.5)
     const setupSignal = Math.abs(setup - 0.5)
     const source = mlSignal > setupSignal ? "ml" : "setup"
+    
     return { symbol: d.symbol, direction: d.candidateDirection, confidence: Math.max(ml, setup), source }
   }).sort((a, b) => Math.abs(b.confidence - 0.5) - Math.abs(a.confidence - 0.5))
+  
   return {
     totalEvaluations: rows.length,
     resolvedCount: resolved.length,
