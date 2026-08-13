@@ -160,7 +160,9 @@ export async function getShadowStats() {
     const f = (d.lorentzianFilters ?? {}) as any as FeatureVector
     const setup = heuristicScore(f, d.candidateDirection)
     const ml = d.logisticConfidence
-    const source = ml >= setup ? "ml" : "setup"
+    const mlSignal = Math.abs(ml - 0.5)
+    const setupSignal = Math.abs(setup - 0.5)
+    const source = mlSignal > setupSignal ? "ml" : "setup"
     return { symbol: d.symbol, direction: d.candidateDirection, confidence: Math.max(ml, setup), source }
   }).sort((a, b) => Math.abs(b.confidence - 0.5) - Math.abs(a.confidence - 0.5))
   return {
