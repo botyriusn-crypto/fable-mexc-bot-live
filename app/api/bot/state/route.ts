@@ -194,6 +194,8 @@ export async function GET() {
     }
 
     return NextResponse.json({
+      rotationEnabled: isRotationEnabled(),
+      lastRotationTime: getLastRotationTime(),
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,
       markPrice, unrealizedPnl: totalGridUnrealized,
       equity: cfg.paperBalance + totalGridUnrealized,
