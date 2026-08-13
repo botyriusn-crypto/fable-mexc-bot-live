@@ -4,7 +4,7 @@ import { and, eq, isNull, sql } from "drizzle-orm"
 import { db } from "./db"
 import { classifierDecisions, gridConfigs } from "./db/schema"
 import { loadModelById, predict, trainShadowOnDecision } from "./ml"
-import { recordOutcome } from "./advisor"
+import { recordOutcome, heuristicScore } from "./advisor"
 import { fetchTicker, fetchKlines } from "./mexc/public"
 import { ema, rsi, macdHistogram, atr, rateOfChange, adx, volumeSurge } from "./indicators"
 import type { FeatureVector } from "./indicators"
@@ -156,16 +156,18 @@ export async function getShadowStats() {
   const resolved = rows.filter(d => d.resolvedAt)
   const correct = resolved.filter(d => d.outcomeCorrectLogistic).length
   const unresolved = rows.filter(d => !d.resolvedAt)
-    .sort((a, b) => Math.abs(b.logisticConfidence - 0.5) - Math.abs(a.logisticConfidence - 0.5))
+  const scored = unresolved.map(d => {
+    const f = (d.lorentzianFilters ?? {}) as any as FeatureVector
+    const setup = heuristicScore(f, d.candidateDirection)
+    const ml = d.logisticConfidence
+    const source = ml >= setup ? "ml" : "setup"
+    return { symbol: d.symbol, direction: d.candidateDirection, confidence: Math.max(ml, setup), source }
+  }).sort((a, b) => Math.abs(b.confidence - 0.5) - Math.abs(a.confidence - 0.5))
   return {
     totalEvaluations: rows.length,
     resolvedCount: resolved.length,
     correctCount: correct,
     accuracy: resolved.length > 0 ? correct / resolved.length : 0,
-    topCandidate: unresolved.length > 0 ? {
-      symbol: unresolved[0].symbol,
-      direction: unresolved[0].candidateDirection,
-      confidence: unresolved[0].logisticConfidence,
-    } : null,
+    topCandidate: scored[0] ?? null,
   }
 }
