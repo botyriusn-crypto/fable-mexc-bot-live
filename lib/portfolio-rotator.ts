@@ -59,7 +59,7 @@ export async function checkAndRotate(exchange: any): Promise<void> {
     })
     
     // 3. Identify "dead" grids (old enough + no PnL)
-    const dead = audits.filter(a => a.ageHours >= MIN_AGE_HOURS && a.pnl === 0)
+    const dead = audits.filter(a => a.ageHours >= MIN_AGE_HOURS && a.pnl <= 0)
     const alive = audits.filter(a => a.pnl > 0)
     
     await log("info", `Portfolio audit: ${alive.length} alive, ${dead.length} dead (>${MIN_AGE_HOURS}h + $0 PnL)`)
@@ -96,17 +96,17 @@ export async function checkAndRotate(exchange: any): Promise<void> {
         break
       }
       
-      // Budget safety: stop if adding would exceed cap
-      const newBudget = candidate ? (candidate.budgetPct || 10) : 10
-      if (totalDeployed + newBudget > MAX_DEPLOYED_PCT) {
-        await log("info", `Budget cap reached (${totalDeployed}% deployed) - stopping rotation`)
-        break
-      }
-
       // Find first candidate not already in portfolio
       const candidate = candidates.find(c => !existingSymbols.has(c.symbol))
       if (!candidate) {
         await log("info", "No more new candidates available - stopping rotation")
+        break
+      }
+
+      // Budget safety: stop if adding would exceed cap
+      const newBudget = candidate.budgetPct || 10
+      if (totalDeployed + newBudget > MAX_DEPLOYED_PCT) {
+        await log("info", `Budget cap reached (${totalDeployed}% deployed) - stopping rotation`)
         break
       }
       
