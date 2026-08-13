@@ -1,80 +1,60 @@
-import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import type { BotState } from "@/lib/use-bot-state"
 
-const percent = (value: number | null) => value == null ? "Collecting" : `${Math.round(value * 100)}%`
-
-export function ClassifierCard({ state }: { state: BotState }) {
-  const analytics = state.classifierAnalytics
-  const latest = analytics.latest
+export function ClassifierCard({ state }: { state: any }) {
+  const s = (state as any)?.shadowStats
+  const total = s?.totalEvaluations ?? 0
+  const resolved = s?.resolvedCount ?? 0
+  const correct = s?.correctCount ?? 0
+  const accuracy = s?.accuracy ?? 0
+  const top = s?.topCandidate
 
   return (
-    <Card>
-      <CardHeader className="flex-row items-center justify-between gap-3 pb-2">
-        <div className="flex flex-col gap-1">
-          <CardTitle className="text-sm font-medium">Entry confirmation</CardTitle>
-        <div className="mb-3 rounded-md border border-chart-3/30 bg-chart-3/5 p-2">
-          <div className="text-[10px] font-medium text-chart-3 mb-1">Shadow Evaluations (Training Mode)</div>
-          <div className="text-[10px] text-muted-foreground space-y-0.5">
-            <div>Total: {state.shadowStats?.totalEvaluations || 0} · Resolved: {state.shadowStats?.resolvedCount || 0}</div>
-            {state.shadowStats?.resolvedCount > 0 && (
-              <div>Accuracy: {((state.shadowStats.accuracy || 0) * 100).toFixed(1)}% ({state.shadowStats.correctCount}/{state.shadowStats.resolvedCount})</div>
-            )}
-            {state.shadowStats?.topCandidate && (
-              <div className="mt-1 font-mono">
-                Top: <span className="text-chart-3">{state.shadowStats.topCandidate.symbol}</span>{" "}
-                <span className={state.shadowStats.topCandidate.direction === "long" ? "text-success" : "text-danger"}>
-                  {state.shadowStats.topCandidate.direction.toUpperCase()}
-                </span>{" "}
-                ({((state.shadowStats.topCandidate.confidence || 0) * 100).toFixed(0)}%)
-              </div>
-            )}
+    <Card className="border-yellow-400/50 bg-yellow-400/5 shadow-[0_0_16px_rgba(250,204,21,0.12)]">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-lg font-bold text-yellow-300">
+          Shadow ML — Live Entry Training
+        </CardTitle>
+        <p className="text-xs text-yellow-200/70">
+          Scores every pair on every candle without placing orders, then grades itself against real price movement.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-3 gap-2">
+          <div className="rounded-md border border-yellow-400/40 bg-yellow-400/10 p-3 text-center">
+            <div className="text-3xl font-bold text-yellow-300">{total}</div>
+            <div className="text-[10px] text-yellow-200/70">EVALUATIONS</div>
+          </div>
+          <div className="rounded-md border border-yellow-400/40 bg-yellow-400/10 p-3 text-center">
+            <div className="text-3xl font-bold text-yellow-300">{resolved}</div>
+            <div className="text-[10px] text-yellow-200/70">RESOLVED</div>
+          </div>
+          <div className="rounded-md border border-yellow-400/40 bg-yellow-400/10 p-3 text-center">
+            <div className="text-3xl font-bold text-yellow-300">{resolved > 0 ? (accuracy * 100).toFixed(0) + "%" : "—"}</div>
+            <div className="text-[10px] text-yellow-200/70">ACCURACY ({correct}/{resolved})</div>
           </div>
         </div>
 
-          <span className="text-xs text-muted-foreground">Four-closed-bar comparison</span>
-        </div>
-        <Badge variant="outline" className="uppercase">{state.config.confirmationMode}</Badge>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        <div className="grid grid-cols-3 gap-2">
-          <Metric label="Logistic" value={percent(analytics.logisticAccuracy)} />
-          <Metric label="Lorentzian" value={percent(analytics.lorentzianAccuracy)} />
-          <Metric label="Agreement" value={percent(analytics.agreementRate)} />
-        </div>
-        <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/30 p-3 text-xs">
-          <span className="text-muted-foreground">Candidates</span>
-          <span className="font-mono">
-            {analytics.sampleCount} total · {analytics.acceptedCount} accepted · {analytics.rejectedCount} rejected
-          </span>
-        </div>
-        {latest ? (
-          <div className="flex flex-col gap-2 border-t pt-3">
-            <div className="flex items-center justify-between gap-3 text-xs">
-              <span className="text-muted-foreground">Latest {latest.candidateDirection} candidate</span>
-              <span className="font-mono">vote {latest.lorentzianVote > 0 ? "+" : ""}{latest.lorentzianVote}</span>
+        {top && (
+          <div className="rounded-md border border-yellow-400/40 bg-yellow-400/10 p-3">
+            <div className="text-[10px] text-yellow-200/70 mb-1">STRONGEST CURRENT READ</div>
+            <div className="font-mono text-xl font-bold text-yellow-300">
+              {top.symbol}{" "}
+              <span className={top.direction === "long" ? "text-success" : "text-danger"}>
+                {String(top.direction).toUpperCase()}
+              </span>{" "}
+              <span className="text-yellow-200/80">({(((top.confidence ?? 0) as number) * 100).toFixed(0)}%)</span>
             </div>
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <span>Logistic <strong className="font-mono">{Math.round(latest.logisticConfidence * 100)}%</strong></span>
-              <span>Lorentzian <strong className="font-mono">{Math.round(latest.lorentzianConfidence * 100)}%</strong></span>
-            </div>
-            <p className="text-pretty text-xs leading-relaxed text-muted-foreground">{latest.reason}</p>
           </div>
-        ) : (
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Waiting for the next Trend/Range entry candidate. Observe mode is safe for collecting a baseline.
-          </p>
         )}
+
+        <p className="text-[10px] leading-relaxed text-yellow-200/60">
+          {resolved < 100
+            ? `Collecting baseline… ${100 - resolved} more resolved decisions before this model is trusted to gate SNIPER entries.`
+            : accuracy >= 0.55
+              ? "Model shows a real edge — ready to be wired as a SNIPER entry gate."
+              : "Model not beating baseline yet — keep collecting, do not gate entries."}
+        </p>
       </CardContent>
     </Card>
-  )
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col gap-1 rounded-md border p-2">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <strong className="font-mono text-sm">{value}</strong>
-    </div>
   )
 }

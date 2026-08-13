@@ -265,7 +265,7 @@ export function DashboardV2() {
               <MlCard state={state} />
             </CollapsibleSection>
 
-            <CollapsibleSection title="Entry Confirmation" defaultOpen={false}>
+            <CollapsibleSection title="Shadow ML Trainer" defaultOpen={true}>
               <ClassifierCard state={state} />
             </CollapsibleSection>
 
