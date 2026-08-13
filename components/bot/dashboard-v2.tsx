@@ -11,6 +11,7 @@ import { PositionCard } from "./position-card"
 import { TradesTable } from "./trades-table"
 import { ActivityLog } from "./activity-log"
 import { SettingsPanel } from "./settings-panel"
+import { SniperAlertBubble, SniperCommand } from "./sniper-alerts"
 import { MultiGridCard } from "./multi-grid-card"
 import { PerformanceAnalyzer } from "./performance-analyzer"
 import { MarketBar } from "./market-bar"
@@ -270,6 +271,7 @@ export function DashboardV2() {
             </CollapsibleSection>
 
             <CollapsibleSection title="Strategy Settings" defaultOpen={false}>
+              <SniperCommand state={state} />
               <SettingsPanel state={state} />
             </CollapsibleSection>
           </div>
@@ -278,6 +280,7 @@ export function DashboardV2() {
 
       {/* TERMINAL */}
       <TerminalPanel state={state} isOpen={terminalOpen} onToggle={() => setTerminalOpen(!terminalOpen)} />
+      <SniperAlertBubble />
     </div>
   )
 }
