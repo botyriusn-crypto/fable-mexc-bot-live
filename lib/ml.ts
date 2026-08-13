@@ -176,7 +176,7 @@ export async function trainShadowOnDecision(
       rollingAccuracy: newRollingAccuracy,
       updatedAt: sql`NOW()`,
     })
-    .where(eq(mlModel.id, 2))
+    .where(eq(mlModel.id, 1))
   
   return {
     weights: newWeights,

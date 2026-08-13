@@ -263,10 +263,6 @@ export function DashboardV2() {
               <PositionCard state={state} />
             </CollapsibleSection>
 
-            <CollapsibleSection title="ML Model" defaultOpen={true}>
-              <MlCard state={state} />
-            </CollapsibleSection>
-
             <CollapsibleSection title="Shadow ML Trainer" defaultOpen={true}>
               <ClassifierCard state={state} />
             <AdvisorCard />

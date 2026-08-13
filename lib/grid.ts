@@ -562,7 +562,7 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
   if (trade && order.entryFeatures) {
     try {
       const model = await loadModel()
-      await trainOnTrade(model, order.entryFeatures as unknown as FeatureVector, netPnl > 0, sizeUsdt > 0 ? (netPnl / sizeUsdt) * 100 : 0, cfg.mlLearningRate, trade.id, null)
+      // [non-grid ML] grid fills no longer train the model
     } catch (err) {
       await log("error", `Grid ML update failed: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -606,7 +606,7 @@ if (cfg.mode === "paper") {
 if (trade && order.entryFeatures) {
 try {
 const model = await loadModel()
-await trainOnTrade(model, order.entryFeatures as unknown as FeatureVector, netPnl > 0, sizeUsdt > 0 ? (netPnl / sizeUsdt) * 100 : 0, cfg.mlLearningRate, trade.id, null)
+// [non-grid ML] grid fills no longer train the model
 } catch (err) {
 await log("error", `Grid ${order.symbol} (maker short) ML update failed: ${dbErr(err)}`)
 }

@@ -65,7 +65,7 @@ async function computeLiveFeatures(symbol: string, timeframe: string): Promise<{
 }
 
 export async function runShadowCycle(): Promise<void> {
-  let model = await loadModelById(2)
+  let model = await loadModelById(1)
 
   // 1) Iterate enabled grid configs (one evaluation per symbol per candle bucket)
   const configs = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
