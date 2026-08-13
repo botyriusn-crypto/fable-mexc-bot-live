@@ -11,7 +11,7 @@ import { ema, computeSnapshot } from "@/lib/indicators"
 import { detectRegime, type Regime } from "@/lib/strategy"
 import { getGridConfigs, gridUnrealizedPnl } from "@/lib/grid"
 import { isRotationEnabled, getLastRotationTime } from "@/lib/portfolio-rotator"
-import { getShadowStats } from "@/lib/shadow-evaluator"
+import { getShadowStats, runShadowCycle } from "@/lib/shadow-evaluator"
 
 interface MexcAsset {
   currency: string; availableBalance: number; equity: number;
