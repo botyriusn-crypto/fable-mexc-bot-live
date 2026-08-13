@@ -12,6 +12,7 @@ import { TradesTable } from "./trades-table"
 import { ActivityLog } from "./activity-log"
 import { SettingsPanel } from "./settings-panel"
 import { SniperAlertBubble, SniperCommand } from "./sniper-alerts"
+import { AdvisorCard } from "./advisor-card"
 import { MultiGridCard } from "./multi-grid-card"
 import { PerformanceAnalyzer } from "./performance-analyzer"
 import { MarketBar } from "./market-bar"
@@ -268,6 +269,7 @@ export function DashboardV2() {
 
             <CollapsibleSection title="Shadow ML Trainer" defaultOpen={true}>
               <ClassifierCard state={state} />
+            <AdvisorCard />
             </CollapsibleSection>
 
             <CollapsibleSection title="Strategy Settings" defaultOpen={false}>
