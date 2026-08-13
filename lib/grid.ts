@@ -1178,6 +1178,10 @@ export async function syncExchangeState() {
         )
         
         for (const dbOrder of dbOrders) {
+          // Skip orders created or updated in the last 10 minutes (grace period for synced orders)
+          const orderAge = Date.now() - new Date(dbOrder.createdAt).getTime()
+          if (orderAge < 10 * 60 * 1000) continue
+          
           if (dbOrder.mexcOrderId) {
             try {
               const st: any = await fetchOrderStatus(dbOrder.mexcOrderId as string)
