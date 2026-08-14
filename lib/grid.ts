@@ -219,6 +219,16 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
     }
   }
 
+  // ENFORCE BUDGET: Check if we already have enough orders
+  const existingPendingOrders = await db.select().from(gridOrders)
+    .where(and(eq(gridOrders.symbol, gc.symbol), eq(gridOrders.status, "pending")));
+  
+  const maxOrders = Math.min(totalLevels, 12);
+  if (existingPendingOrders.length >= maxOrders) {
+    await log("info", `Grid ${gc.symbol}: Budget enforced - already has ${existingPendingOrders.length}/${maxOrders} orders`);
+    return;
+  }
+  
   // Cleanup: Cancel all existing orders for this symbol before rebuilding
   if (cfg.mode === "live" && exchange) {
   // Fetch MEXC specs for this symbol before calculating orders
