@@ -338,9 +338,20 @@ const orders: any[] = []
 // COMBO (neutral) grids: only place BUY orders initially (DCA down)
 // SELL orders will be created by tick handler after buys fill and open positions
 if (isNeutral) {
-  await log("info", `Grid ${gc.symbol}: COMBO mode - placing ${totalLevels} buy orders (sells created after fills)`)
+  // BULLETPROOF BUDGET ENFORCEMENT: Hard cap at 12 orders
+  if (orders.length > MAX_ORDERS) {
+    await log("info", `Grid ${gc.symbol}: Budget enforcement - trimming from ${orders.length} to ${MAX_ORDERS} orders`);
+    orders.splice(MAX_ORDERS);
+  }
+  await log("info", `Grid ${gc.symbol}: COMBO mode - placing ${orders.length} buy orders (sells created after fills)`)
 }
-if (volatility && volatility.surge) {
+// BULLETPROOF: Cap all orders at 12 for non-neutral grids too
+  if (orders.length > MAX_ORDERS) {
+    await log("info", `Grid ${gc.symbol}: Budget enforcement - trimming from ${orders.length} to ${MAX_ORDERS} orders`);
+    orders.splice(MAX_ORDERS);
+  }
+  
+  if (volatility && volatility.surge) {
     await log("info", `Grid ${gc.symbol}: ${volatility.reason}`)
   }
   
