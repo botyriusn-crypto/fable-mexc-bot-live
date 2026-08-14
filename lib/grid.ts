@@ -203,6 +203,30 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
 }
 
 export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, volatility?: VolatilityState, exchange?: ExchangeClient, startAtPrice = false): Promise<void> {
+  // Cleanup: Cancel all existing orders for this symbol before rebuilding
+  if (cfg.mode === "live" && exchange) {
+    try {
+      const existingOrders = await getActiveOrders(gc.symbol, gc.timeframe)
+      if (existingOrders.length > 0) {
+        const orderIds = existingOrders.filter(o => o.mexcOrderId).map(o => o.mexcOrderId)
+        if (orderIds.length > 0) {
+          await cancelOrders(orderIds)
+          await log("info", `Grid ${gc.symbol}: Cancelled ${orderIds.length} existing orders before rebuild`)
+        }
+        await db.update(gridOrders)
+          .set({ status: "cancelled" })
+          .where(eq(gridOrders.symbol, gc.symbol))
+      }
+    } catch (err) {
+      await log("error", `Grid ${gc.symbol}: Failed to cleanup old orders: ${dbErr(err)}`)
+    }
+  } else {
+    // Paper mode: just mark old orders as cancelled
+    await db.update(gridOrders)
+      .set({ status: "cancelled" })
+      .where(eq(gridOrders.symbol, gc.symbol))
+  }
+
   const center = snap.price
   const configuredHalf = snap.atr * gc.rangeAtrMult
   const breakeven = center * 2 * TAKER_FEE
@@ -275,10 +299,25 @@ const orders: any[] = []
       status: "pending" as const,
 })
 }
-// Neutral grids: only place BUY orders initially (SELL orders come after position is opened)
-// SELL orders will be added by the tick handler once a position exists
+// COMBO (neutral) grids: create both buy and sell orders
 if (isNeutral) {
-  await log("info", `Grid ${gc.symbol}: Neutral mode - placing BUY orders only (SELL orders require open position)`)
+  for (let i = 1; i <= totalLevels; i++) {
+    const dist = geomRatio === 1 ? baseSpacing * i : baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
+    const orderPrice = center + dist
+    if (orderPrice <= 0 || !Number.isFinite(orderPrice)) continue
+    orders.push({
+      symbol: gc.symbol,
+      timeframe: gc.timeframe,
+      leverage: gc.leverage,
+      spacing: baseSpacing,
+      levelIndex: i,
+      side: "sell",
+      price: orderPrice,
+      quantity: Number.isFinite(notionalPerLevel / orderPrice) ? notionalPerLevel / orderPrice : 0,
+      status: "pending" as const,
+    })
+  }
+  await log("info", `Grid ${gc.symbol}: COMBO mode - placing ${totalLevels} buy + ${totalLevels} sell orders`)
 }
 if (volatility && volatility.surge) {
     await log("info", `Grid ${gc.symbol}: ${volatility.reason}`)
