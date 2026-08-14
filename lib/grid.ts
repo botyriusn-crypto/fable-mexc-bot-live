@@ -205,6 +205,19 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
 
 // Pre-fetch MEXC specs before grid setup
 export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, volatility?: VolatilityState, exchange?: ExchangeClient, startAtPrice = false): Promise<void> {
+  // BUDGET ENFORCEMENT: Hard cap orders and check existing before setup
+  const MAX_ORDERS = 12; // Never exceed 12 orders regardless of config
+  
+  if (cfg.mode === "live") {
+    const existingOrders = await db.select().from(gridOrders)
+      .where(and(eq(gridOrders.symbol, gc.symbol), eq(gridOrders.status, "pending")));
+    
+    if (existingOrders.length >= MAX_ORDERS) {
+      await log("info", `Grid ${gc.symbol}: Budget enforced - already has ${existingOrders.length}/${MAX_ORDERS} orders, skipping setup`);
+      return;
+    }
+  }
+
   // Guard: Don't rebuild if we just set up (prevent duplicate orders)
   const recentOrders = await db.select().from(gridOrders)
     .where(eq(gridOrders.symbol, gc.symbol))
@@ -219,17 +232,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
     }
   }
 
-  // ENFORCE BUDGET: Check if we already have enough orders
-  const existingPendingOrders = await db.select().from(gridOrders)
-    .where(and(eq(gridOrders.symbol, gc.symbol), eq(gridOrders.status, "pending")));
-  
-  const maxOrders = Math.min(totalLevels, 12);
-  if (existingPendingOrders.length >= maxOrders) {
-    await log("info", `Grid ${gc.symbol}: Budget enforced - already has ${existingPendingOrders.length}/${maxOrders} orders`);
-    return;
-  }
-  
-  // Cleanup: Cancel all existing orders for this symbol before rebuilding
+// Cleanup: Cancel all existing orders for this symbol before rebuilding
   if (cfg.mode === "live" && exchange) {
   // Fetch MEXC specs for this symbol before calculating orders
   try {
