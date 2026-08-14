@@ -10,6 +10,7 @@ import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderSta
 import { marketScales } from "./mexc/public"
 import type { Candle } from "./mexc/public"
 import { fetchTicker } from "./mexc/public"
+import { roundMexcQuantity, roundMexcPrice, getMexcSpecAsync } from "./mexc/precision"
 
 // Grid trading engine: a ladder of buy levels below price with paired sell
 // targets one spacing above. Profits from oscillation inside a range.
