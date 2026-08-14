@@ -744,4 +744,13 @@ export async function initRealtimeEngine(symbol: string, timeframe: string) {
   manager.connect()
 }
 
+export function stopRealtimeEngine(symbol: string) {
+  if (!globalThis.__wsManagers) return
+  const manager = globalThis.__wsManagers[symbol]
+  if (!manager) return
+  console.log(`[Engine] Stopping real-time WebSocket engine for ${symbol}...`)
+  manager.disconnect()
+  delete globalThis.__wsManagers[symbol]
+}
+
 

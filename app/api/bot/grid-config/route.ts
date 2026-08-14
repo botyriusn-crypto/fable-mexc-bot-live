@@ -4,6 +4,7 @@ import { gridConfigs, gridOrders } from "@/lib/db/schema"
 import { eq, and, inArray } from "drizzle-orm"
 import { cancelOrders } from "@/lib/mexc/private"
 import { log } from "@/lib/grid"
+import { initRealtimeEngine, stopRealtimeEngine } from "@/lib/engine"
 
 export const dynamic = "force-dynamic"
 
@@ -104,6 +105,17 @@ export async function PATCH(request: Request) {
     await db.update(gridConfigs)
       .set(updates)
       .where(and(eq(gridConfigs.symbol, symbol), eq(gridConfigs.timeframe, timeframe)))
+
+    // Keep the live WebSocket engine in sync with the enabled flag,
+    // instead of waiting for the next redeploy/restart to pick it up.
+    if (updates.enabled === true) {
+      await initRealtimeEngine(symbol.toUpperCase(), timeframe)
+      await log("info", `${symbol.toUpperCase()} enabled — WebSocket engine started`)
+    } else if (updates.enabled === false) {
+      stopRealtimeEngine(symbol.toUpperCase())
+      await log("info", `${symbol.toUpperCase()} disabled — WebSocket engine stopped`)
+    }
+
     return NextResponse.json({ ok: true })
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : "Unknown" }, { status: 500 })
