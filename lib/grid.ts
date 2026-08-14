@@ -12,6 +12,11 @@ import type { Candle } from "./mexc/public"
 import { fetchTicker } from "./mexc/public"
 import { roundMexcQuantity, roundMexcPrice, getMexcSpecAsync } from "./mexc/precision"
 
+
+// Global cooldown to prevent duplicate setups
+const GRID_SETUP_COOLDOWN = new Map<string, number>(); // symbol -> timestamp
+const COOLDOWN_MS = 60000; // 60 seconds between setups
+
 // Grid trading engine: a ladder of buy levels below price with paired sell
 // targets one spacing above. Profits from oscillation inside a range.
 // Complements the signal strategies — regime detection auto-pauses the grid
@@ -205,6 +210,18 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
 
 // Pre-fetch MEXC specs before grid setup
 export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, volatility?: VolatilityState, exchange?: ExchangeClient, startAtPrice = false): Promise<void> {
+  // COOLDOWN LOCK: Prevent duplicate setups
+  const lastSetup = GRID_SETUP_COOLDOWN.get(gc.symbol) || 0;
+  const timeSinceLastSetup = Date.now() - lastSetup;
+  
+  if (timeSinceLastSetup < COOLDOWN_MS) {
+    await log("info", `Grid ${gc.symbol}: Cooldown active - ${Math.floor((COOLDOWN_MS - timeSinceLastSetup)/1000)}s remaining, skipping setup`);
+    return;
+  }
+  
+  // Mark this setup as starting
+  GRID_SETUP_COOLDOWN.set(gc.symbol, Date.now());
+
   // BUDGET ENFORCEMENT: Hard cap orders and check existing before setup
   const MAX_ORDERS = 12; // Never exceed 12 orders regardless of config
   
