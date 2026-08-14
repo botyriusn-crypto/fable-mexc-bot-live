@@ -542,6 +542,21 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
           </Button>
           <Button 
             onClick={async () => {
+              if (!window.confirm(`Cancel ALL live orders for ${grid.symbol} on MEXC (including orphans)?`)) return
+              const res = await fetch("/api/bot/clear-orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol: grid.symbol }) })
+              const data = await res.json().catch(() => ({}))
+              alert(data.success ? `✅ ${grid.symbol}: cancelled ${data.cancelledOnMexc} on MEXC, ${data.cancelledInDb} in DB` : "❌ " + (data.error || "failed"))
+              setTimeout(() => window.location.reload(), 500)
+            }} 
+            size="sm" 
+            variant="outline" 
+            className="text-xs h-7 px-3 transition-all hover:bg-danger/10 hover:border-danger/40"
+            title="Cancel ALL orders for this pair on MEXC, including orphans"
+          >
+            🧹 Cancel MEXC Orders
+          </Button>
+          <Button 
+            onClick={async () => {
               const res = await fetch("/api/bot/rotate", { method: "POST" })
               const data = await res.json().catch(() => ({}))
               if (data.success) {
