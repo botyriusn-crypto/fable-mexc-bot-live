@@ -4,7 +4,7 @@ import {
   botConfig, gridConfigs, positions, trades, equitySnapshots,
   botLogs, mlModel, gridOrders, classifierDecisions,
 } from "@/lib/db/schema"
-import { eq, desc } from "drizzle-orm"
+import { inArray, eq, desc  } from "drizzle-orm"
 import { fetchTicker, fetchKlines } from "@/lib/mexc/public"
 import { getAccountAssets } from "@/lib/mexc/private"
 import { ema, computeSnapshot } from "@/lib/indicators"
@@ -57,7 +57,7 @@ export async function GET() {
       db.select().from(equitySnapshots).orderBy(desc(equitySnapshots.createdAt)).limit(200),
       db.select().from(botLogs).orderBy(desc(botLogs.createdAt)).limit(50),
       db.select().from(mlModel).where(eq(mlModel.id, 1)),
-      db.select().from(gridOrders).where(eq(gridOrders.status, "pending")).orderBy(desc(gridOrders.price)),
+      db.select().from(gridOrders).where(inArray(gridOrders.status, ["pending", "external"])).orderBy(desc(gridOrders.price)),
       db.select().from(classifierDecisions).orderBy(desc(classifierDecisions.createdAt)).limit(100),
       db.select().from(gridConfigs).orderBy(gridConfigs.symbol),
       db.select({ pnl: trades.pnl, live: trades.live }).from(trades),
