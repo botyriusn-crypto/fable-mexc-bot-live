@@ -299,25 +299,10 @@ const orders: any[] = []
       status: "pending" as const,
 })
 }
-// COMBO (neutral) grids: create both buy and sell orders
+// COMBO (neutral) grids: only place BUY orders initially (DCA down)
+// SELL orders will be created by tick handler after buys fill and open positions
 if (isNeutral) {
-  for (let i = 1; i <= totalLevels; i++) {
-    const dist = geomRatio === 1 ? baseSpacing * i : baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
-    const orderPrice = center + dist
-    if (orderPrice <= 0 || !Number.isFinite(orderPrice)) continue
-    orders.push({
-      symbol: gc.symbol,
-      timeframe: gc.timeframe,
-      leverage: gc.leverage,
-      spacing: baseSpacing,
-      levelIndex: i,
-      side: "sell",
-      price: orderPrice,
-      quantity: Number.isFinite(notionalPerLevel / orderPrice) ? notionalPerLevel / orderPrice : 0,
-      status: "pending" as const,
-    })
-  }
-  await log("info", `Grid ${gc.symbol}: COMBO mode - placing ${totalLevels} buy + ${totalLevels} sell orders`)
+  await log("info", `Grid ${gc.symbol}: COMBO mode - placing ${totalLevels} buy orders (sells created after fills)`)
 }
 if (volatility && volatility.surge) {
     await log("info", `Grid ${gc.symbol}: ${volatility.reason}`)
