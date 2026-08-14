@@ -133,37 +133,13 @@ export async function fetchOrderStatus(orderId: string): Promise<any | null> {
 }
 
 export async function fetchOpenOrders(symbol: string): Promise<any[]> {
-  // MEXC caps open_orders at ~50 per page — paginate through all pages
-  const allOrders: any[] = []
-  let pageNum = 1
-  const pageSize = 100
-  
   try {
-    while (true) {
-      const res: any = await privateRequest(
-        "GET",
-        `/order/list/open_orders/${symbol}?page_num=${pageNum}&page_size=${pageSize}`
-      )
-      const data = res?.data
-      const pageOrders = Array.isArray(data) ? data : []
-      allOrders.push(...pageOrders)
-      
-      // Stop if we got fewer than pageSize (last page)
-      if (pageOrders.length < pageSize) break
-      pageNum++
-      
-      // Safety valve — don't fetch more than 10 pages per symbol
-      if (pageNum > 10) {
-        console.log(`fetchOpenOrders(${symbol}): stopped after 10 pages (${allOrders.length} orders)`)
-        break
-      }
-      
-      await new Promise(r => setTimeout(r, 100)) // Rate limit protection
-    }
-    return allOrders
+    const res: any = await privateRequest("GET", `/order/list/open_orders/${symbol}`)
+    const data = res?.data
+    return Array.isArray(data) ? data : []
   } catch (err) {
     console.log(`fetchOpenOrders(${symbol}) failed:`, String(err))
-    return allOrders // Return what we got so far
+    return []
   }
 }
 
@@ -176,10 +152,7 @@ export async function placePostOnlyOrder(opts: {
 }): Promise<any> {
   const vol = roundMexcQuantity(opts.symbol, opts.price, opts.volume)
   const price = roundMexcPrice(opts.symbol, opts.price)
-  if (opts.side === 1 || opts.side === 3) {
-    const positionType: 1 | 2 = opts.side === 1 ? 1 : 2
-    await setLeverage(opts.symbol, opts.leverage, positionType)
-  }
+  // Leverage is set once at grid setup time, not per order — avoid rate limits
   return privateRequest("POST", "/order/create", {
     symbol: opts.symbol,
     side: opts.side,
@@ -190,6 +163,7 @@ export async function placePostOnlyOrder(opts: {
     openType: 1,
   })
 }
+
 
 export async function cancelOrders(orderIds: string[]): Promise<any> {
   const apiKey = process.env.MEXC_API_KEY
