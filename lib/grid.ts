@@ -158,6 +158,7 @@ async function cancelOtherPendingOrders(active: GridOrder[], keepId: number): Pr
       await log("error", `Grid stop-loss: failed cancelling ${realIds.length} real resting order(s) on exchange: ${dbErr(err)}`)
     }
   }
+  await log("info", `[CancelOp] Line ~161: Cancelling orders`).catch(() => {});
   await db.update(gridOrders).set({ status: "cancelled" }).where(inArray(gridOrders.id, others.map(x => x.id)))
 }
 
@@ -338,7 +339,8 @@ export async function teardownGrid(cfg: BotConfig, currentPrice: number | null):
 
   const remaining = active.filter((o) => o.side === "buy").map((o) => o.id)
   if (remaining.length > 0) {
-    await db.update(gridOrders).set({ status: "cancelled" }).where(inArray(gridOrders.id, remaining))
+    await log("info", `[CancelOp] Line ~341: Cancelling orders`).catch(() => {});
+  await db.update(gridOrders).set({ status: "cancelled" }).where(inArray(gridOrders.id, remaining))
   }
 
   await db
@@ -888,7 +890,8 @@ if (shouldRecenter) {
       const cancelAll = shouldRecenter || (gc.direction as string) === "neutral" // COMBO-FIX: neutral rebuilds wipe both sides
       for (const o of active) {
         if (o.side === "buy" || cancelAll) {
-          await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
+          await log("info", `[CancelOp] Line ~891: Cancelling orders`).catch(() => {});
+  await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
         }
       }
       // Rebuild buys at current price
@@ -1022,7 +1025,8 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
         await log("error", `Short ${o.symbol} buy placement failed: ${dbErr(err)}`)
       }
     } else if ([4,5].includes(Number(st.state))) {
-      await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
+      await log("info", `[CancelOp] Line ~1025: Cancelling orders`).catch(() => {});
+  await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
     }
   }
   for (const o of active.filter(o => o.side === "buy" && o.mexcOrderId)) {
@@ -1048,7 +1052,8 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
         await log("error", `Short ${o.symbol} re-arm sell failed: ${dbErr(err)}`)
       }
     } else if ([4,5].includes(Number(st.state))) {
-      await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
+      await log("info", `[CancelOp] Line ~1051: Cancelling orders`).catch(() => {});
+  await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
     }
   }
   const pendingSells = (await getActiveOrders(gc.symbol, gc.timeframe)).filter(o => o.side === "sell")
