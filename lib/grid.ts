@@ -275,7 +275,31 @@ if (isNeutral) {
 if (volatility && volatility.surge) {
     await log("info", `Grid ${gc.symbol}: ${volatility.reason}`)
   }
+  
+  // Balance check: ensure we have enough margin for all orders
   if (cfg.mode === "live") {
+    try {
+      const assets = await getAccountAssets()
+      const usdtAsset = assets.find((a: any) => a.currency === "USDT")
+      const availableBalance = usdtAsset ? Number(usdtAsset.availableBalance) : 0
+      const requiredMargin = orders.length * notionalPerLevel / gc.leverage
+      
+      if (requiredMargin > availableBalance * 0.95) {
+        const maxOrders = Math.floor((availableBalance * 0.95 * gc.leverage) / notionalPerLevel)
+        await log("error", `Grid ${gc.symbol}: Insufficient margin. Available: ${availableBalance.toFixed(2)} USDT, Required: ${requiredMargin.toFixed(2)} USDT. Reducing to ${maxOrders} levels.`)
+        
+        if (maxOrders <= 0) {
+          await log("error", `Grid ${gc.symbol}: Cannot place any orders with available balance`)
+          return
+        }
+        
+        orders.splice(maxOrders)
+      }
+    } catch (err) {
+      await log("error", `Grid ${gc.symbol}: Failed to check balance: ${dbErr(err)}`)
+    }
+  }
+if (cfg.mode === "live") {
     let balanceExhausted = false
     for (const ord of orders) {
       if (balanceExhausted) break // Stop placing if balance is insufficient
