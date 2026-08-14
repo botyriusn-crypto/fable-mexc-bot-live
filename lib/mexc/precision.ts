@@ -12,6 +12,9 @@ const SPECS: Record<string, MexcSymbolSpec> = {
   ADA_USDT:   { priceScale: 4, priceUnit: 0.0001,  contractSize: 1,      minVol: 1, maxVol: 11000000 },
   BANK_USDT:  { priceScale: 5, priceUnit: 0.00001, contractSize: 100,    minVol: 1, maxVol: 2000 },
   RIVER_USDT: { priceScale: 3, priceUnit: 0.001,   contractSize: 0.1,    minVol: 1, maxVol: 91500 },
+  BEAT_USDT:  { priceScale: 3, priceUnit: 0.001,   contractSize: 1,      minVol: 1, maxVol: 34100 },
+  AKE_USDT:   { priceScale: 6, priceUnit: 0.000001,contractSize: 1,      minVol: 1, maxVol: 1000000 },
+  PUMPFUN_USDT: { priceScale: 6, priceUnit: 0.000001, contractSize: 1,   minVol: 1, maxVol: 1000000 },
 }
 
 export function getMexcSpec(symbol: string, price: number): MexcSymbolSpec {

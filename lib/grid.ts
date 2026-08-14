@@ -254,7 +254,7 @@ const orders: any[] = []
     // Calculate cumulative distance for geometric spacing
     const dist = geomRatio === 1 ? baseSpacing * i : baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
     const orderPrice = isShort ? center + dist : center - dist
-    if (orderPrice <= 0) continue
+    if (orderPrice <= 0 || !Number.isFinite(orderPrice)) continue
     orders.push({
       symbol: gc.symbol,
       timeframe: gc.timeframe,
@@ -263,7 +263,7 @@ const orders: any[] = []
       levelIndex: i,
       side: isShort ? "sell" : "buy",
       price: orderPrice,
-      quantity: notionalPerLevel / orderPrice,
+      quantity: Number.isFinite(notionalPerLevel / orderPrice) ? notionalPerLevel / orderPrice : 0,
       status: "pending" as const,
 })
 }
@@ -306,16 +306,38 @@ if (cfg.mode === "live") {
       
       try {
         const side = isShort ? (ord.side === "sell" ? 3 : 2) : (ord.side === "sell" ? 4 : 1)
-        const res: any = await placePostOnlyOrder({
-          symbol: ord.symbol,
-          side,
-          volume: ord.quantity,
-          price: ord.price,
-          leverage: ord.leverage,
-        })
+        let res: any;
+        let retries = 0;
+        const maxRetries = 3;
+        
+        while (retries < maxRetries) {
+          try {
+            res = await placePostOnlyOrder({
+              symbol: ord.symbol,
+              side,
+              volume: ord.quantity,
+              price: ord.price,
+              leverage: ord.leverage,
+            });
+            break; // Success, exit retry loop
+          } catch (err) {
+            const errMsg = dbErr(err);
+            if (errMsg.includes("510") && retries < maxRetries - 1) {
+              // Rate limit - wait and retry with exponential backoff
+              const waitTime = Math.pow(2, retries) * 1000; // 1s, 2s, 4s
+              await log("info", `Grid ${gc.symbol}: Rate limited, waiting ${waitTime}ms before retry ${retries + 1}/${maxRetries}`);
+              await new Promise(r => setTimeout(r, waitTime));
+              retries++;
+            } else {
+              throw err; // Not a rate limit or max retries reached
+            }
+          }
+        }
+        
         const oid = extractOrderId(res)
         await db.insert(gridOrders).values({ ...ord, mexcOrderId: oid, exchangeStatus: "new" })
         await log("info", `Grid ${gc.symbol}: resting ${ord.side} @ ${ord.price.toFixed(6)} id=${oid}`)
+        await new Promise(r => setTimeout(r, 800))
         
         // Add delay between order placements to avoid rate limits
         await new Promise(r => setTimeout(r, 400))
