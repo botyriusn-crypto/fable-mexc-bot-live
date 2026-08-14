@@ -337,9 +337,16 @@ if (volatility && volatility.surge) {
       const assets = await getAccountAssets()
       const usdtAsset = assets.find((a: any) => a.currency === "USDT")
       const availableBalance = usdtAsset ? Number(usdtAsset.availableBalance) : 0
-      const requiredMargin = orders.length * notionalPerLevel / gc.leverage
       
-      if (requiredMargin > availableBalance * 0.95) {
+      // Check existing orders for this symbol
+      const existingOrders = await db.select().from(gridOrders)
+        .where(and(eq(gridOrders.symbol, gc.symbol), eq(gridOrders.status, "pending")))
+      const existingMargin = existingOrders.length * notionalPerLevel / gc.leverage
+      
+      const requiredMargin = orders.length * notionalPerLevel / gc.leverage
+      const totalRequired = requiredMargin + existingMargin
+      
+      if (totalRequired > availableBalance * 0.95) {
         const maxOrders = Math.floor((availableBalance * 0.95 * gc.leverage) / notionalPerLevel)
         await log("error", `Grid ${gc.symbol}: Insufficient margin. Available: ${availableBalance.toFixed(2)} USDT, Required: ${requiredMargin.toFixed(2)} USDT. Reducing to ${maxOrders} levels.`)
         
