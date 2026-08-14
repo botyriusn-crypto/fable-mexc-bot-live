@@ -314,6 +314,7 @@ if (volatility && volatility.surge) {
       const assets = await getAccountAssets()
       const usdtAsset = assets.find((a: any) => a.currency === "USDT")
       const availableBalance = usdtAsset ? Number(usdtAsset.availableBalance) : 0
+      await log("info", `[Balance Check 2] ${gc.symbol}: availableBalance = ${availableBalance.toFixed(2)} USDT, requiredMargin = ${requiredMargin.toFixed(2)} USDT`)
       const requiredMargin = orders.length * notionalPerLevel / gc.leverage
       
       if (requiredMargin > availableBalance * 0.95) {
