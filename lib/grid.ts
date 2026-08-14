@@ -6,7 +6,7 @@ import { detectVolatilitySurge, adaptiveSpacing, type VolatilityState } from "./
 import type { Regime } from "./strategy"
 import { loadModel, trainOnTrade } from "./ml"
 import { getExchangeClient, type ExchangeClient } from "./exchange"
-import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderStatus, cancelOrders } from "./mexc/private"
+import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderStatus, cancelOrders, getAccountAssets } from "./mexc/private"
 import { marketScales } from "./mexc/public"
 import type { Candle } from "./mexc/public"
 import { fetchTicker } from "./mexc/public"
