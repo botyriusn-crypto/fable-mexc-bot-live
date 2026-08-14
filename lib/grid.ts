@@ -334,7 +334,7 @@ if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, 
 
   const isNeutral = gc.direction === "neutral"
 const isShort = !isNeutral && (gc.direction === "short" || (gc as any)._autoSide === "short")
-const orders: any[] = []
+let orders: any[] = []
   for (let i = 1; i <= totalLevels; i++) {
     // Calculate cumulative distance for geometric spacing
     const dist = geomRatio === 1 ? baseSpacing * i : baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
@@ -352,15 +352,30 @@ const orders: any[] = []
       status: "pending" as const,
 })
 }
-// COMBO (neutral) grids: only place BUY orders initially (DCA down)
-// SELL orders will be created by tick handler after buys fill and open positions
+// COMBO (neutral) grids: Place BOTH buy AND sell orders immediately (Bitsgap-style)
+// This captures oscillations in both directions from the start
 if (isNeutral) {
-  // BULLETPROOF BUDGET ENFORCEMENT: Hard cap at 12 orders
-  if (orders.length > MAX_ORDERS) {
-    await log("info", `Grid ${gc.symbol}: Budget enforcement - trimming from ${orders.length} to ${MAX_ORDERS} orders`);
-    orders.splice(MAX_ORDERS);
+  // Buy orders below center
+  const buyOrders = orders.filter(o => o.side === "buy")
+  const sellOrders = orders.filter(o => o.side === "sell")
+  
+  // BULLETPROOF BUDGET ENFORCEMENT: Hard cap at 12 orders per side
+  if (buyOrders.length > MAX_ORDERS) {
+    await log("info", `Grid ${gc.symbol}: Budget enforcement - trimming buys from ${buyOrders.length} to ${MAX_ORDERS}`);
+    orders = orders.filter(o => o.side !== "buy" || buyOrders.indexOf(o) < MAX_ORDERS);
   }
-  await log("info", `Grid ${gc.symbol}: COMBO mode - placing ${orders.length} buy orders (sells created after fills)`)
+  if (sellOrders.length > MAX_ORDERS) {
+    await log("info", `Grid ${gc.symbol}: Budget enforcement - trimming sells from ${sellOrders.length} to ${MAX_ORDERS}`);
+    orders = orders.filter(o => o.side !== "sell" || sellOrders.indexOf(o) < MAX_ORDERS);
+  }
+  
+  const finalBuys = orders.filter(o => o.side === "buy").length;
+  const finalSells = orders.filter(o => o.side === "sell").length;
+  await log("info", `Grid ${gc.symbol}: COMBO mode - placing ${finalBuys} buy orders and ${finalSells} sell orders (two-sided ladder)`)
+  // Force immediate tick to ensure orders appear
+  if (cfg.mode === "live") {
+    setTimeout(() => { runTick().catch(() => {}) }, 1000);
+  }
 }
 // BULLETPROOF: Cap all orders at 12 for non-neutral grids too
   if (orders.length > MAX_ORDERS) {
