@@ -267,29 +267,19 @@ const orders: any[] = []
       status: "pending" as const,
 })
 }
+// Neutral grids: only place BUY orders initially (SELL orders come after position is opened)
+// SELL orders will be added by the tick handler once a position exists
 if (isNeutral) {
-for (let i = 1; i <= totalLevels; i++) {
-const dist = geomRatio === 1 ? baseSpacing * i : baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
-const orderPrice = center + dist
-if (orderPrice <= 0) continue
-orders.push({
-symbol: gc.symbol,
-timeframe: gc.timeframe,
-leverage: gc.leverage,
-spacing: baseSpacing,
-levelIndex: i,
-side: "sell",
-price: orderPrice,
-quantity: notionalPerLevel / orderPrice,
-status: "pending" as const,
-})
-}
+  await log("info", `Grid ${gc.symbol}: Neutral mode - placing BUY orders only (SELL orders require open position)`)
 }
 if (volatility && volatility.surge) {
     await log("info", `Grid ${gc.symbol}: ${volatility.reason}`)
   }
   if (cfg.mode === "live") {
+    let balanceExhausted = false
     for (const ord of orders) {
+      if (balanceExhausted) break // Stop placing if balance is insufficient
+      
       try {
         const side = isShort ? (ord.side === "sell" ? 3 : 2) : (ord.side === "sell" ? 4 : 1)
         const res: any = await placePostOnlyOrder({
@@ -302,8 +292,23 @@ if (volatility && volatility.surge) {
         const oid = extractOrderId(res)
         await db.insert(gridOrders).values({ ...ord, mexcOrderId: oid, exchangeStatus: "new" })
         await log("info", `Grid ${gc.symbol}: resting ${ord.side} @ ${ord.price.toFixed(6)} id=${oid}`)
+        
+        // Add delay between order placements to avoid rate limits
+        await new Promise(r => setTimeout(r, 400))
       } catch (err) {
-        await log("error", `Grid ${gc.symbol}: ${ord.side} rejected @ ${ord.price.toFixed(6)}: ${dbErr(err)}`)
+        const errMsg = dbErr(err)
+        await log("error", `Grid ${gc.symbol}: ${ord.side} rejected @ ${ord.price.toFixed(6)}: ${errMsg}`)
+        
+        // Stop placing if balance is insufficient or position doesn't exist
+        if (errMsg.includes("2005") || errMsg.includes("Balance insufficient")) {
+          await log("error", `Grid ${gc.symbol}: Balance insufficient, stopping order placement`)
+          balanceExhausted = true
+          break
+        }
+        if (errMsg.includes("2009") || errMsg.includes("Position is nonexistent")) {
+          await log("error", `Grid ${gc.symbol}: Cannot place ${ord.side} without position, stopping`)
+          break
+        }
       }
     }
   } else {
