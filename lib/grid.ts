@@ -202,9 +202,17 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
   return false
 }
 
+// Pre-fetch MEXC specs before grid setup
 export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, volatility?: VolatilityState, exchange?: ExchangeClient, startAtPrice = false): Promise<void> {
   // Cleanup: Cancel all existing orders for this symbol before rebuilding
   if (cfg.mode === "live" && exchange) {
+  // Fetch MEXC specs for this symbol before calculating orders
+  try {
+    await getMexcSpecAsync(gc.symbol, snap.price);
+  } catch (err) {
+    await log("error", `Grid ${gc.symbol}: Failed to fetch MEXC specs: ${dbErr(err)}`);
+  }
+
     try {
       const existingOrders = await getActiveOrders(gc.symbol, gc.timeframe)
       if (existingOrders.length > 0) {
