@@ -21,7 +21,7 @@ export async function POST() {
       ...historicalSymbols.map(s => s.symbol)
     ])]
     
-    console.log(`[SyncAll] Checking ${allSymbols.length} symbols: ${allSymbols.join(', ')}`)
+    console.log(`[SyncAll] Checking ${allSymbols.length} symbols`)
     
     let imported = 0
     let reactivated = 0
@@ -45,28 +45,20 @@ export async function POST() {
             .where(sql`${gridOrders.mexcOrderId} = ${orderId}`)
           
           if (existing.length === 0) {
-            await db.insert(gridOrders).values({
-              symbol,
-              timeframe: "Min15",
-              side,
-              price,
-              quantity,
-              status: "pending",
-              mexcOrderId: orderId,
-              exchangeStatus: "open",
-              createdAt: new Date(),
-              syncedAt: sql`NOW()`,
-            })
+            // Import new order
+            await db.execute(sql`
+              INSERT INTO grid_orders (symbol, timeframe, side, price, quantity, status, mexc_order_id, exchange_status, created_at, synced_at)
+              VALUES (${symbol}, 'Min15', ${side}, ${price}, ${quantity}, 'pending', ${orderId}, 'open', NOW(), NOW())
+            `)
             imported++
             symbolImported++
           } else if (existing[0].status !== "pending") {
-            await db.update(gridOrders)
-              .set({ 
-                status: "pending", 
-                exchangeStatus: "open",
-                syncedAt: sql`NOW()`,
-              })
-              .where(sql`${gridOrders.mexcOrderId} = ${orderId}`)
+            // Reactivate - use raw SQL to ensure synced_at is set
+            await db.execute(sql`
+              UPDATE grid_orders 
+              SET status = 'pending', exchange_status = 'open', synced_at = NOW()
+              WHERE mexc_order_id = ${orderId}
+            `)
             reactivated++
             symbolReactivated++
           } else {
