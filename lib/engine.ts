@@ -1,3 +1,6 @@
+// Global reference for WebSocket callbacks
+let globalRunTick: (() => Promise<any>) | null = null;
+
 // Tick orchestration: data → features → ML-gated signal → exit management →
 // paper/live execution → model update → persistence.
 
@@ -413,10 +416,11 @@ async function checkMacroRegime(exchange: any): Promise<{ riskOff: boolean; reas
 
 let isTicking = false
 ;(globalThis as any).__triggerInstantTick = async () => {
-  if (!isTicking) { await runTick() }
+  if (!isTicking) { await (globalRunTick ? globalRunTick() : Promise.resolve()) }
 }
 
 export async function runTick(): Promise<{ status: string; detail?: string }> {
+  globalRunTick = runTick;
   if (isTicking) return { status: "skipped", detail: "Tick already in progress" }
   isTicking = true
   const cfg = await getConfig()
@@ -729,7 +733,7 @@ export async function initRealtimeEngine(symbol: string, timeframe: string) {
     if (kline.isClosed) {
       console.log(`[WS] ${symbol} candle closed. Triggering instant tick...`)
       try {
-        await runTick()
+        await (globalRunTick ? globalRunTick() : Promise.resolve())
       } catch (err) {
         console.error(`[WS] Error during ${symbol} WS-triggered tick:`, err)
       }
