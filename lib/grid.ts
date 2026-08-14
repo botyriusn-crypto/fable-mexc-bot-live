@@ -205,6 +205,20 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
 
 // Pre-fetch MEXC specs before grid setup
 export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, volatility?: VolatilityState, exchange?: ExchangeClient, startAtPrice = false): Promise<void> {
+  // Guard: Don't rebuild if we just set up (prevent duplicate orders)
+  const recentOrders = await db.select().from(gridOrders)
+    .where(eq(gridOrders.symbol, gc.symbol))
+    .orderBy(desc(gridOrders.id))
+    .limit(1);
+  
+  if (recentOrders.length > 0 && recentOrders[0].status === "pending") {
+    const orderAge = Date.now() - new Date(recentOrders[0].createdAt).getTime();
+    if (orderAge < 60000) { // Less than 1 minute old
+      await log("info", `Grid ${gc.symbol}: Skipping rebuild - orders are ${Math.floor(orderAge/1000)}s old`);
+      return;
+    }
+  }
+
   // Cleanup: Cancel all existing orders for this symbol before rebuilding
   if (cfg.mode === "live" && exchange) {
   // Fetch MEXC specs for this symbol before calculating orders
@@ -1027,6 +1041,9 @@ const sold = await settleGridSell(o, o.price, cfg, "tp", exchange)
     const buys = active.filter((o) => o.side === "buy" && lo <= o.price)
 for (const o of buys) {
 if (o.buyPrice != null && (gc as any).direction === "neutral") {
+  // COMBO: Create corresponding SELL order after buy fills
+  const sellPrice = o.price + o.spacing * gc.leverage; // TP at spacing distance
+  await log("info", `Grid ${o.symbol}: COMBO buy filled, creating SELL @ ${sellPrice.toFixed(6)}`);
   // RACE-FIX: Re-check order status before processing (prevents double-fill)
   const fresh = await db.select({ status: gridOrders.status }).from(gridOrders).where(eq(gridOrders.id, o.id))
   if (fresh[0]?.status !== "pending") continue
