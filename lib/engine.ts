@@ -642,7 +642,13 @@ if (isSelected && !marketPosition) {
               confirmationMode: marketCfg.confirmationMode,
             })
             if (confirmation.allowed) {
-              await openPosition(marketCfg, signal.candidateDirection, snap, signal.confidence, signal.features, signal.strategy)
+              // Skip if this symbol has an active COMBO (neutral) grid - grid handles its own positions
+        const activeGridConfig = await db.select().from(gridConfigs).where(eq(gridConfigs.symbol, symbol)).limit(1)
+        if (activeGridConfig.length > 0 && activeGridConfig[0].direction === "neutral" && activeGridConfig[0].enabled) {
+          await log("info", `[Skip] ${symbol}: COMBO grid active, skipping main strategy entry`)
+          continue
+        }
+        await openPosition(marketCfg, signal.candidateDirection, snap, signal.confidence, signal.features, signal.strategy)
             }
           }
         }
