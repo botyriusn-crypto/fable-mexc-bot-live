@@ -230,9 +230,17 @@ if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, 
     try {
       const { getAccountAssets } = await import("./mexc/private")
       const assets = await getAccountAssets() as any[]
+      await log("info", `[Balance] Fetched ${assets.length} assets from MEXC`);
       const usdt = Array.isArray(assets) ? assets.find((a: any) => a.currency === "USDT") : null
-      if (usdt) effectiveBalance = usdt.availableBalance
-    } catch (err) {}
+      if (usdt) {
+        effectiveBalance = Number(usdt.availableBalance)
+        await log("info", `[Balance] USDT available: ${effectiveBalance.toFixed(2)}`);
+      } else {
+        await log("error", `[Balance] USDT not found in assets: ${JSON.stringify(assets.slice(0, 3))}`);
+      }
+    } catch (err) {
+      await log("error", `[Balance] Failed to fetch MEXC balance: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   const budget = (effectiveBalance * gc.budgetPct) / 100
   const notionalPerLevel = (budget / totalLevels) * gc.leverage
