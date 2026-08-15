@@ -163,7 +163,7 @@ export function DashboardV2() {
   }
 
   const running = state?.config?.status === "running"
-  const isLive = state.config.mode === "live"
+  const isLive = state?.config?.mode === "live"
   const exchangeName = state.config.exchange || "mexc"
   const exchangeLabel = { mexc: "MEXC", gate: "Gate.io", bybit: "Bybit" }[exchangeName] || exchangeName.toUpperCase()
   const live = isLive && state.liveAccount && !("error" in state.liveAccount) ? state.liveAccount : null
