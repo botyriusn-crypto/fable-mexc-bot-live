@@ -86,7 +86,7 @@ export async function placeMarketOrder(opts: {
     await setLeverage(opts.symbol, opts.leverage, positionType)
   }
 
-  console.log('[DEBUG] Placing Post-Only order:', JSON.stringify({ symbol: opts.symbol, side: opts.side, price, vol, leverage: opts.leverage }));
+  console.log('[DEBUG] Placing market order:', JSON.stringify({ symbol: opts.symbol, side: opts.side, price: opts.price, vol, leverage: opts.leverage }));
   const result = await privateRequest("POST", "/order/create", {
     symbol: opts.symbol,
     side: opts.side,
@@ -95,6 +95,7 @@ export async function placeMarketOrder(opts: {
     type: 5,
     openType: 1,
   })
+  return result
 }
 
 export async function getAccountAssets(): Promise<any> {
@@ -113,12 +114,21 @@ export async function getAccountAssets(): Promise<any> {
 
 export async function getOpenPositions(symbol?: string): Promise<any> {
   try {
-    const path = symbol ? `/position/open?symbol=${symbol}` : "/position/open"
-    const res: any = await privateRequest("GET", path)
-    return res?.data || []
+    // IMPORTANT: pass symbol via the params object, not embedded directly
+    // in the path string. privateRequest signs based on the params object
+    // it's given — embedding the query string manually in the path meant
+    // the signature was computed over an empty param string while the
+    // actual request carried a query string, causing MEXC to reject every
+    // per-symbol call with "602 Confirming signature failed".
+    const res: any = await privateRequest("GET", "/position/open_positions", symbol ? { symbol } : {})
+    const data = res?.data
+    return Array.isArray(data) ? data : []
   } catch (err) {
-    // 404 is completely normal in Paper Mode or if no real positions exist
-    return []
+    // Log loudly — a broken/wrong endpoint here must never look identical
+    // to "genuinely no open positions". Real exposure has previously gone
+    // unnoticed because this silently returned [] on any failure.
+    console.error(`getOpenPositions(${symbol ?? "all"}) failed:`, err instanceof Error ? err.message : String(err))
+    throw err
   }
 }
 
