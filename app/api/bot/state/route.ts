@@ -34,6 +34,14 @@ export async function GET() {
         unrealized: 0,
       },
       equity: config.paperBalance || 0,
+      grid: {
+        orders: allGridOrders || [],
+        holdingCount: (allGridOrders || []).filter((o: any) => o.status === "pending" && o.buyPrice != null).length,
+        unrealizedPnl: 0,
+        realizedPnl: (allTrades || []).reduce((sum: number, t: any) => sum + (t.pnl || 0), 0),
+        holdings: [],
+      },
+
       marketData: [],
       logs: [],
     })
