@@ -65,10 +65,20 @@ export async function GET() {
 
     // True all-time stats for LIVE trades only (paper/backtest excluded).
     const liveOnly = lifetimeTradesRaw.filter((t) => t.live)
-    const lifetimeStats = {
-      totalTrades: lifetimeTradesRaw.length,
-      totalPnl: lifetimeTradesRaw.reduce((s, t) => s + (t.pnl || 0), 0),
-      winRate: lifetimeTradesRaw.length > 0 ? lifetimeTradesRaw.filter((t) => (t.pnl || 0) > 0).length / lifetimeTradesRaw.length : 0,
+    // LIVE-ONLY stats (paper trades excluded)
+    const liveStats = {
+      totalTrades: liveOnly.length,
+      totalPnl: liveOnly.reduce((s, t) => s + (t.pnl || 0), 0),
+      winRate: liveOnly.length > 0 ? liveOnly.filter((t) => (t.pnl || 0) > 0).length / liveOnly.length : 0,
+    }
+    
+    // TODAY stats (last 24h)
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const todayTrades = liveOnly.filter((t: any) => new Date(t.closedAt) > oneDayAgo)
+    const todayStats = {
+      trades: todayTrades.length,
+      pnl: todayTrades.reduce((s, t) => s + (t.pnl || 0), 0),
+      winRate: todayTrades.length > 0 ? todayTrades.filter((t) => (t.pnl || 0) > 0).length / todayTrades.length : 0,
     }
 
     const cfg = cfgRows[0]
@@ -216,7 +226,7 @@ export async function GET() {
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,
       markPrice, unrealizedPnl: totalGridUnrealized,
       equity: cfg.paperBalance + totalGridUnrealized,
-      trades: recentTrades, winRate, lifetimeStats, equityCurve: equity.reverse(), logs,
+      trades: recentTrades, winRate, liveStats, todayStats, equityCurve: equity.reverse(), logs,
       model: modelRows[0] ?? null, classifierAnalytics, ticker, chart, liveAccount, regime, adxValue,
       grid: { orders: selectedGridOrders, allOrders: activeGridOrders, holdingCount: gridHolding.length, unrealizedPnl: gridUnrealized, realizedPnl: gridRealized },
       gridConfigs: gridConfigsState,

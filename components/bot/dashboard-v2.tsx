@@ -170,16 +170,17 @@ export function DashboardV2() {
   const balance = live ? live.availableBalance : state.config.paperBalance
   const equity = live ? live.equity : state.equity
   const upnl = live ? live.unrealized : state.unrealizedPnl
-  const lifetime = (state as any).lifetimeStats
-  const totalPnl = lifetime?.totalPnl ?? 0
-  const winRate = lifetime?.winRate ?? 0
-  const totalTrades = lifetime?.totalTrades ?? 0
+  const liveStats = (state as any).liveStats
+  const todayStats = (state as any).todayStats
+  const totalPnl = liveStats?.totalPnl ?? 0
+  const winRate = liveStats?.winRate ?? 0
+  const totalTrades = liveStats?.totalTrades ?? 0
+  const todayPnl = today?.pnl ?? 0
+  const todayTrades = today?.trades ?? 0
 
   const grids = (state as any).gridConfigs || []
   const totalRealized = totalPnl
-  const STARTING_BALANCE = 9819.74
-  const phantomPnl = balance - (totalRealized + STARTING_BALANCE)
-  const totalUnrealized = grids.reduce((s: number, g: any) => s + (g.unrealizedPnl || 0), 0)
+  
 
   const pnlTone = (v: number) => v > 0 ? "pos" : v < 0 ? "neg" : "neutral"
 
@@ -224,18 +225,11 @@ export function DashboardV2() {
           <StatCard label="Available" value={`${fmt(balance)} USDT`} tone="neutral" />
           <StatCard label="Equity" value={`${fmt(equity)} USDT`} tone="neutral" />
           <StatCard label="Unreal. PnL" value={`${(upnl ?? 0) >= 0 ? "+" : ""}${fmt(upnl)}`} tone={pnlTone(upnl ?? 0)} />
-          <StatCard label="Realized PnL" value={`${totalRealized >= 0 ? "+" : ""}${fmt(totalRealized)}`} tone={pnlTone(totalRealized)} />
-          {Math.abs(phantomPnl) > 0.01 && (
-            <StatCard 
-              label="Phantom PnL" 
-              value={`${phantomPnl >= 0 ? "+" : ""}${fmt(phantomPnl)}`} 
-              tone={phantomPnl > 0 ? "warn" : "neg"} 
-              tooltip="Unrecorded profits. Balance is growing but trades aren't logging to the DB."
-            />
-          )}
-          <StatCard label="Historic PnL" value={`${totalPnl >= 0 ? "+" : ""}${fmt(totalPnl)}`} tone={pnlTone(totalPnl)} />
-          <StatCard label="Win Rate" value={totalTrades > 0 ? `${(winRate * 100).toFixed(0)}%` : "—"} tone="neutral" />
-          <StatCard label="Trades" value={String(totalTrades)} tone="neutral" />
+          <StatCard label="Realized (LIVE)" value={`${totalRealized >= 0 ? "+" : ""}${fmt(totalRealized)}`} tone={pnlTone(totalRealized)} />
+          <StatCard label="Today" value={`${todayPnl >= 0 ? "+" : ""}${fmt(todayPnl)}`} tone={pnlTone(todayPnl)} />
+          <StatCard label="Win Rate (LIVE)" value={totalTrades > 0 ? `${(winRate * 100).toFixed(0)}%` : "—"} tone="neutral" />
+          <StatCard label="Trades (LIVE)" value={String(totalTrades)} tone="neutral" />
+          <StatCard label="Today Trades" value={String(todayTrades)} tone="neutral" />
         </div>
 
         {/* 65/35 SPLIT */}
