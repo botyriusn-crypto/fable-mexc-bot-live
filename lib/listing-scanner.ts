@@ -2,6 +2,7 @@ import { db } from "./db"
 import { gridConfigs } from "./db/schema"
 import { eq } from "drizzle-orm"
 import { log } from "./logger"
+import { computeSafeGridSettings } from "./grid-sizing"
 
 // Cache of known symbols to detect new listings
 let knownSymbols: Set<string> = new Set()
@@ -67,15 +68,19 @@ export async function scanNewListings(exchange: any): Promise<void> {
           continue
         }
 
-        // Insert new grid config with aggressive parameters for new listings
+        // Insert new grid config sized against real available balance and
+        // the number of pairs already competing for margin — a fixed
+        // budgetPct/levels here previously ignored account size entirely
+        // and could size a new listing into an unfundable ladder.
+        const safe = await computeSafeGridSettings(1)
         await db.insert(gridConfigs).values({
           symbol,
           timeframe: "Min5", // Hyper-fast for new listing volatility
           direction: "neutral", // COMBO mode
-          levels: 10,
+          levels: safe.levels,
           rangeAtrMult: 1.5,
-          leverage: 3,
-          budgetPct: BUDGET_PCT,
+          leverage: safe.leverage,
+          budgetPct: safe.budgetPct,
           autoPause: false, // Don't pause on trend - new listings are always trending
           enabled: true,
           makerMode: true,
