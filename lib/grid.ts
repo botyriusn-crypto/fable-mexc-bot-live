@@ -323,6 +323,7 @@ if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, 
       if (usdt) {
         effectiveBalance = Number(usdt.availableBalance)
         await log("info", `[Balance] USDT available: ${effectiveBalance.toFixed(2)}`);
+        await log("info", `[Balance] Full USDT asset object: ${JSON.stringify(usdt)}`);
       } else {
         await log("error", `[Balance] USDT not found in assets: ${JSON.stringify(assets.slice(0, 3))}`);
       }
@@ -332,22 +333,32 @@ if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, 
   }
   const isNeutral = gc.direction === "neutral"
   const budget = (effectiveBalance * gc.budgetPct) / 100
-  // COMBO mode: divide budget by total orders (buys + sells), not just levels
-  const orderCount = isNeutral ? totalLevels * 2 : totalLevels
-  let notionalPerLevel = (budget / orderCount) * gc.leverage
-  
-  // MINIMUM ORDER SIZE: Ensure each order is at least $1 notional
+
+  // Decide how many levels per side we can actually afford BEFORE
+  // generating any orders. The old approach generated a fixed number of
+  // orders first, then applied three separate, inconsistent trims after
+  // the fact — one of which inflated per-order size without reducing the
+  // count that was actually generated, and another which spliced the
+  // combined buy+sell array directly, silently producing an uneven
+  // buy/sell split for COMBO grids. Computing the count up front avoids
+  // all of that: notionalPerLevel and the actual order count are always
+  // derived from the same numbers.
   const MIN_NOTIONAL = 1.0
-  if (notionalPerLevel < MIN_NOTIONAL) {
-    const maxPossibleOrders = Math.floor((budget * gc.leverage) / MIN_NOTIONAL)
-    if (maxPossibleOrders < 1) {
-      await log("error", `Grid ${gc.symbol}: Budget ${budget.toFixed(2)} USDT too small for even 1 order at $${MIN_NOTIONAL} notional. Need at least $${(MIN_NOTIONAL / gc.leverage).toFixed(2)} margin.`)
-      return
-    }
-    notionalPerLevel = (budget * gc.leverage) / maxPossibleOrders
-    await log("info", `Grid ${gc.symbol}: Reducing orders to ${maxPossibleOrders} to meet $${MIN_NOTIONAL} minimum notional (budget: ${budget.toFixed(2)})`)
+  const sidesPerLevel = isNeutral ? 2 : 1
+  const maxLevelsByBudget = Math.max(0, Math.floor((budget * gc.leverage) / (MIN_NOTIONAL * sidesPerLevel)))
+  const effectiveLevelsPerSide = Math.max(0, Math.min(totalLevels, MAX_ORDERS, maxLevelsByBudget))
+
+  if (effectiveLevelsPerSide < 1) {
+    await log("error", `Grid ${gc.symbol}: Budget ${budget.toFixed(2)} USDT too small for even 1 order per side at $${MIN_NOTIONAL} minimum notional. Need at least $${((MIN_NOTIONAL * sidesPerLevel) / gc.leverage).toFixed(2)} margin.`)
+    return
   }
-  
+  if (effectiveLevelsPerSide < totalLevels) {
+    await log("info", `Grid ${gc.symbol}: Reducing levels from ${totalLevels} to ${effectiveLevelsPerSide} per side (minimum notional / order cap constraint, budget: ${budget.toFixed(2)})`)
+  }
+
+  const orderCount = effectiveLevelsPerSide * sidesPerLevel
+  const notionalPerLevel = (budget / orderCount) * gc.leverage
+
   // Liquidation Safety Check: Ensure leverage isn't so high that MEXC liquidates 
   // the position before our 5% GRID_STOP_LOSS_PCT can trigger.
   // MEXC liquidates at roughly 100% / leverage adverse move.
@@ -360,7 +371,7 @@ if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, 
 
   const isShort = !isNeutral && (gc.direction === "short" || (gc as any)._autoSide === "short")
 let orders: any[] = []
-  for (let i = 1; i <= totalLevels; i++) {
+  for (let i = 1; i <= effectiveLevelsPerSide; i++) {
     // Calculate cumulative distance for geometric spacing
     const dist = geomRatio === 1 ? baseSpacing * i : baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
 
@@ -402,42 +413,14 @@ let orders: any[] = []
     })
   }
 // COMBO (neutral) grids: Place BOTH buy AND sell orders immediately (Bitsgap-style)
-// This captures oscillations in both directions from the start
+// This captures oscillations in both directions from the start. Order
+// count is already correct at this point (computed before generation), so
+// no post-hoc trimming is needed or performed here.
 if (isNeutral) {
-  // Buy orders below center
-  const buyOrders = orders.filter(o => o.side === "buy")
-  const sellOrders = orders.filter(o => o.side === "sell")
-  
-  // BULLETPROOF BUDGET ENFORCEMENT: Hard cap at 12 orders per side
-  if (buyOrders.length > MAX_ORDERS) {
-    await log("info", `Grid ${gc.symbol}: Budget enforcement - trimming buys from ${buyOrders.length} to ${MAX_ORDERS}`);
-    orders = orders.filter(o => o.side !== "buy" || buyOrders.indexOf(o) < MAX_ORDERS);
-  }
-  if (sellOrders.length > MAX_ORDERS) {
-    await log("info", `Grid ${gc.symbol}: Budget enforcement - trimming sells from ${sellOrders.length} to ${MAX_ORDERS}`);
-    orders = orders.filter(o => o.side !== "sell" || sellOrders.indexOf(o) < MAX_ORDERS);
-  }
-  
   const finalBuys = orders.filter(o => o.side === "buy").length;
   const finalSells = orders.filter(o => o.side === "sell").length;
   await log("info", `Grid ${gc.symbol}: COMBO mode - placing ${finalBuys} buy orders and ${finalSells} sell orders (two-sided ladder)`)
-  // Force immediate tick to ensure orders appear
-  if (cfg.mode === "live") {
-  // Immediate re-tick removed - API route already triggers runTick after setup
-  }
 }
-// BULLETPROOF: Cap all orders at 12 for non-neutral grids too
-  if (orders.length > MAX_ORDERS) {
-    await log("info", `Grid ${gc.symbol}: Budget enforcement - trimming from ${orders.length} to ${MAX_ORDERS} orders`);
-    orders.splice(MAX_ORDERS);
-  }
-  
-  // UNIFORM BUDGET ENFORCEMENT: Trim to what the budget can support
-  const maxOrdersByBudget = Math.floor((budget * gc.leverage) / 1.0) // $1 minimum notional
-  if (orders.length > maxOrdersByBudget) {
-    await log("info", `Grid ${gc.symbol}: Budget enforcement - trimming from ${orders.length} to ${maxOrdersByBudget} orders (budget constraint)`);
-    orders.splice(maxOrdersByBudget);
-  }
   
   if (volatility && volatility.surge) {
     await log("info", `Grid ${gc.symbol}: ${volatility.reason}`)
@@ -479,7 +462,10 @@ if (cfg.mode === "live") {
       if (balanceExhausted) break // Stop placing if balance is insufficient
       
       try {
-        const side = isShort ? (ord.side === "sell" ? 3 : 2) : (ord.side === "sell" ? 4 : 1)
+        const isOpening = ord.buyPrice == null
+        const side = ord.side === "sell"
+          ? (isOpening ? 3 : 4)   // sell: open short (fresh) vs close long (has entry)
+          : (isOpening ? 1 : 2)   // buy: open long (fresh) vs close short (has entry)
         let res: any;
         let retries = 0;
         const maxRetries = 3;
@@ -893,12 +879,30 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
           await log("info", `Grid ${gc.symbol} (maker): price drifted ${(minDrift * 100).toFixed(1)}% from resting buys. Recentering at ${livePrice.toFixed(6)}.`)
           try {
             const toCancel = (gc.direction as string) === "neutral" ? active : restingBuys
-const liveIds = toCancel.filter(o => o.mexcOrderId).map((o) => o.mexcOrderId!) as string[]
-if (liveIds.length > 0) await cancelOrders(liveIds)
-await db.update(gridOrders)
-.set({ status: "cancelled", exchangeStatus: "cancelled" })
-.where(inArray(gridOrders.id, toCancel.map((o) => o.id)))
-await setupGrid(cfg, gc, snap, volatility, undefined, true)
+            // SAFETY: never cancel an order that represents a real held
+            // position (buyPrice set — a filled buy awaiting its sell, or
+            // a filled sell awaiting its buy-to-close) without closing it
+            // at market first. Cancelling it outright here is exactly how
+            // APR_USDT became a real, untracked, unprotected exchange
+            // position after a recenter.
+            const held = toCancel.filter((o) => o.buyPrice != null)
+            const naked = toCancel.filter((o) => o.buyPrice == null)
+            for (const o of held) {
+              await log("info", `Grid ${gc.symbol} (maker): recenter closing held ${o.side} @ ${o.price.toFixed(6)} (entry ${o.buyPrice!.toFixed(6)}) at market before rebuild`)
+              if (o.side === "sell") {
+                await settleMakerStopLoss(o, livePrice!, cfg, "max-hold")
+              } else {
+                await settleMakerShortStopLoss(o, livePrice!, cfg, "max-hold")
+              }
+            }
+            const liveIds = naked.filter(o => o.mexcOrderId).map((o) => o.mexcOrderId!) as string[]
+            if (liveIds.length > 0) await cancelOrders(liveIds)
+            if (naked.length > 0) {
+              await db.update(gridOrders)
+                .set({ status: "cancelled", exchangeStatus: "cancelled" })
+                .where(inArray(gridOrders.id, naked.map((o) => o.id)))
+            }
+            await setupGrid(cfg, gc, snap, volatility, undefined, true)
           } catch (err) {
             await log("error", `Grid ${gc.symbol} (maker): recenter failed: ${dbErr(err)}`)
           }
@@ -1096,7 +1100,28 @@ if (shouldRecenter) {
       // Cancel ALL pending orders — if price crashed >40%, sells are hopeless
       const cancelAll = shouldRecenter || (gc.direction as string) === "neutral" // COMBO-FIX: neutral rebuilds wipe both sides
       for (const o of active) {
-        if (o.side === "buy" || cancelAll) {
+        if (!(o.side === "buy" || cancelAll)) continue
+        // SAFETY: an order with buyPrice set represents a real held
+        // position (filled buy awaiting sell, or filled sell awaiting
+        // buy-to-close). Close it at market before wiping it from
+        // tracking — cancelling it outright here previously turned a
+        // recenter into a silently abandoned, unprotected real position.
+        if (o.buyPrice != null) {
+          if (o.side === "sell") {
+            await log("info", `Grid ${o.symbol}: recenter closing held long @ ${price.toFixed(6)} (entry ${o.buyPrice.toFixed(6)}) at market before rebuild`)
+            await settleGridSell(o, price, cfg, "manual", exchange)
+          } else {
+            await log("info", `Grid ${o.symbol}: recenter closing held short @ ${price.toFixed(6)} (entry ${o.buyPrice.toFixed(6)}) at market before rebuild`)
+            try {
+              if (cfg.mode === "live" && exchange) {
+                await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage })
+              }
+            } catch (err) {
+              await log("error", `Grid ${o.symbol}: recenter short close failed: ${err instanceof Error ? err.message : String(err)}`)
+            }
+            await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
+          }
+        } else {
           await log("info", `[CancelOp] Line ~891: Cancelling orders`).catch(() => {});
   await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
         }
