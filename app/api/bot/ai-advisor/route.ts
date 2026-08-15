@@ -5,6 +5,8 @@ import { db } from "@/lib/db"
 import { botLogs } from "@/lib/db/schema"
 import { livePrices } from "@/lib/mexc/ws"
 import type { Candle } from "@/lib/mexc/public"
+import { fetchDepth, depthNotionalNearMid } from "@/lib/mexc/public"
+import { computeSafeGridSettings } from "@/lib/grid-sizing"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
@@ -34,9 +36,13 @@ export async function GET() {
     const tickerJson = await tickerRes.json() as any
     if (!tickerJson.success) throw new Error("Failed to fetch MEXC tickers")
     
+    // $1M was not meaningfully liquid for a futures contract — easily one
+    // or two large trades' worth of volume on a thin book. Raised to a
+    // real floor; we're already scanning the top 100 by volume anyway.
+    const MIN_VOLUME_24H = 15_000_000
     const candidates = (tickerJson.data as any[])
       .filter(t => t.symbol.endsWith("_USDT") && !t.symbol.includes("STOCK") && !t.symbol.includes("3L") && !t.symbol.includes("3S"))
-      .filter(t => t.amount24 > 1000000) // $1M min volume (allows mid-cap alts) // > $50M volume
+      .filter(t => t.amount24 > MIN_VOLUME_24H)
       .sort((a, b) => b.amount24 - a.amount24)
       .slice(0, 100)
 
@@ -107,8 +113,9 @@ export async function GET() {
         score += atrPct * 5      // Reward volatility
         score -= (lastAdx - 20) * 1.5 // Penalize trend
         
-        const dna = comboDna(candles, 0.6)
+        const dna = comboDna(candles, 0.6, lastAdx)
         const params = comboParams(dna, lastClose)
+        if (dna.rejected) continue // hard-gated: drift or trend too high for a grid entry
         const blendedScore = Math.round(Math.min(score, 100) * 0.35 + dna.score * 0.65) // DNA (drift-aware) dominates
 
         scoredMarkets.push({
@@ -135,9 +142,38 @@ export async function GET() {
       } catch (err) { continue }
     }
 
-    // 3. Sort by OQS and pick top 3
-    const topPicks = scoredMarkets.sort((a, b) => b.blendedScore - a.blendedScore).slice(0, 3)
-    
+    // 3. Sort by OQS and take a wider shortlist, then verify real
+    // order-book depth before finalizing picks — a coin can look calm on
+    // historical candles and still be unsafe if the actual book is thin
+    // relative to the position size the bot would place. This directly
+    // targets "the bot's own order moves the price and trips its own
+    // stop-loss", which historical price shape alone cannot detect.
+    const shortlist = scoredMarkets.sort((a, b) => b.blendedScore - a.blendedScore).slice(0, 8)
+    const safeSizingPreview = await computeSafeGridSettings(3)
+    const depthChecked: typeof shortlist = []
+    for (const m of shortlist) {
+      if (depthChecked.length >= 3) break
+      try {
+        const depth = await fetchDepth(m.symbol)
+        const currentPrice = livePrices[m.symbol] ?? 0
+        if (!currentPrice) { depthChecked.push(m); continue }
+        const nearMidNotional = depthNotionalNearMid(depth, currentPrice, 0.02)
+        const estOrderNotional = (safeSizingPreview.availableBalance * safeSizingPreview.budgetPct / 100 / Math.max(1, safeSizingPreview.levels)) * m.suggestedLeverage
+        const MIN_DEPTH_MULTIPLE = 25
+        if (nearMidNotional < estOrderNotional * MIN_DEPTH_MULTIPLE) {
+          await db.insert(botLogs).values({
+            level: "info",
+            message: `AI Advisor: ${m.symbol} skipped — thin book ($${nearMidNotional.toFixed(0)} resting near mid vs $${estOrderNotional.toFixed(2)} order size, need ${MIN_DEPTH_MULTIPLE}x)`,
+          }).catch(() => {})
+          continue
+        }
+        depthChecked.push(m)
+      } catch {
+        continue
+      }
+    }
+    const topPicks = depthChecked
+
     // 4. Generate optimal parameters mathematically based on the metrics
     const recommendations = topPicks.map(m => {
       return {

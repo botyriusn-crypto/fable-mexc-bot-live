@@ -106,6 +106,36 @@ if (c) return c.d
 throw new Error("MEXC ticker unavailable")
 }
 
+// Order-book depth: used to check whether a candidate market can actually
+// absorb the position size a grid bot intends to place, without the bot's
+// own order being a large fraction of what's resting at that price level.
+// A coin can look perfectly calm on historical candles (low drift, decent
+// ATR) and still be unsafe if the real book is thin — historical price
+// shape alone can't detect this, only live depth can.
+export interface DepthLevel { price: number; volume: number }
+export interface MarketDepth { bids: DepthLevel[]; asks: DepthLevel[] }
+
+export async function fetchDepth(symbol: string, limit = 20): Promise<MarketDepth> {
+  const res = await fetch(`${BASE_URL}/depth/${symbol}?limit=${limit}`, { cache: "no-store" })
+  if (!res.ok) throw new Error(`MEXC depth fetch failed for ${symbol}: ${res.status}`)
+  const json = await res.json()
+  if (!json.success) throw new Error(`MEXC depth response unsuccessful for ${symbol}`)
+  const data = json.data ?? {}
+  const toLevels = (raw: any[]): DepthLevel[] =>
+    Array.isArray(raw) ? raw.map((r: any) => ({ price: Number(r[0]), volume: Number(r[1]) })) : []
+  return { bids: toLevels(data.bids), asks: toLevels(data.asks) }
+}
+
+// Sums notional (price * volume) resting within `pctFromMid` of the current
+// price on both sides — a rough proxy for how much size the market can
+// absorb near where a grid order would actually sit.
+export function depthNotionalNearMid(depth: MarketDepth, midPrice: number, pctFromMid = 0.02): number {
+  const band = midPrice * pctFromMid
+  const inBand = (levels: DepthLevel[]) =>
+    levels.filter((l) => Math.abs(l.price - midPrice) <= band).reduce((sum, l) => sum + l.price * l.volume, 0)
+  return inBand(depth.bids) + inBand(depth.asks)
+}
+
 let _marketsCache: { data: any; ts: number } | null = null
 export async function fetchMarkets() {
   if (_marketsCache && Date.now() - _marketsCache.ts < 5 * 60 * 1000) return _marketsCache.data
