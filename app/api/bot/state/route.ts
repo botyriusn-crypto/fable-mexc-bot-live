@@ -9,7 +9,12 @@ export async function GET(request: Request) {
   try {
     // Get bot config
     const configs = await db.select().from(botConfig).where(eq(botConfig.id, 1))
-    const cfg = configs[0] || { mode: "paper", status: "stopped", paperBalance: 10000 }
+    const cfg = configs[0]
+    
+    if (!cfg) {
+      return NextResponse.json({ error: "Config not found" }, { status: 500 })
+    }
+    
     const isLive = cfg.mode === "live"
     
     // Get balance based on mode
@@ -33,7 +38,6 @@ export async function GET(request: Request) {
         }
       } catch (err: any) {
         console.error("Failed to fetch live balance:", err?.message || err)
-        // Fallback to paper balance if live fetch fails
         balance = { available: Number(cfg.paperBalance) || 0, total: Number(cfg.paperBalance) || 0, locked: 0, unrealized: 0 }
       }
     } else {
@@ -81,10 +85,11 @@ export async function GET(request: Request) {
       .groupBy(gridOrders.symbol)
     
     return NextResponse.json({
-      status: cfg.status || "running",
-      mode: cfg.mode || "paper",
+      config: cfg,  // <-- THIS WAS MISSING!
+      status: cfg.status,
+      mode: cfg.mode,
       balance,
-      trades: allTrades.slice(0, 20), // Last 20 trades
+      trades: allTrades.slice(0, 20),
       tradeStats: {
         total: allTrades.length,
         wins,
