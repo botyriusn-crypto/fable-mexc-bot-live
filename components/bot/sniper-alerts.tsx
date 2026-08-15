@@ -29,7 +29,7 @@ export function SniperCommand({ state }: { state: any }) {
   useEffect(() => { writeLS(LS_THRESHOLD, String(threshold)); window.dispatchEvent(new Event("sniper-config")) }, [threshold])
 
   const testAlert = () => {
-    window.dispatchEvent(new CustomEvent("sniper-test", { detail: { symbol: "TEST_USDT", direction: "long", confidence: 0.72 } }))
+    window.dispatchEvent(new CustomEvent("sniper-test", { detail: { symbol: "TEST_USDT", direction: "long", confidence: 0.72, createdAt: new Date().toISOString() } }))
   }
 
   return (
@@ -109,7 +109,7 @@ export function SniperAlertBubble() {
       {!open ? (
         <button onClick={() => setOpen(true)}
           className="animate-pulse rounded-full border-2 border-yellow-400 bg-yellow-400/20 px-4 py-3 text-sm font-bold text-yellow-300 shadow-[0_0_20px_rgba(250,204,21,0.5)] backdrop-blur">
-          🎯 {top.symbol} {(top?.direction || "unknown").toUpperCase()} {(top.confidence * 100).toFixed(0)}% · {top.source === "ml" ? "ML" : "SETUP"}
+          🎯 {top.symbol} {(top?.direction || "unknown").toUpperCase()} {(top.confidence * 100).toFixed(0)}% · {top.source === "ml" ? "ML" : "SETUP"}{timeAgo ? ` · ${timeAgo}` : ""}
         </button>
       ) : (
         <Card className="w-72 border-yellow-400/60 bg-black/90 shadow-[0_0_24px_rgba(250,204,21,0.4)]">
@@ -117,6 +117,7 @@ export function SniperAlertBubble() {
             <span className="text-sm font-bold text-yellow-300">🎯 Sniper Candidate</span>
             <div className="font-mono text-lg text-yellow-200">{top.symbol} <span className={top.direction === "long" ? "text-success" : "text-danger"}>{(top?.direction || "unknown").toUpperCase()}</span></div>
             <div className="text-xs text-yellow-200/80">Confidence: {(top.confidence * 100).toFixed(0)}% · Source: {top.source === "ml" ? "Learned ML" : "Momentum setup"}</div>
+            {timeAgo && <div className="text-[10px] font-mono text-yellow-200/60">⏱ Detected {timeAgo} ago</div>}
             <div className="text-[10px] text-yellow-200/60">Shadow ML flagged this setup. Review the pair before entering manually.</div>
             <div className="flex gap-2">
               <Button size="sm" variant="outline" className="flex-1 text-xs" onClick={() => setOpen(false)}>Keep watching</Button>
