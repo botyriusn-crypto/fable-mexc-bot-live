@@ -1,12 +1,32 @@
+# Large files
+claude-desktop_*.deb
+pumpfun-bot/
+*.exe
+*.dmg
+*.iso
+*.zip
+*.tar.gz
+*.rar
 
-bot.log
-.DS_Store
-.env
-.env*
-.env.local
-*.log
-.next
-.next/
-node_modules
+# Dependencies
 node_modules/
-pm2-*.log
+
+# Next.js
+.next/
+out/
+build/
+dist/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# TypeScript
+*.tsbuildinfo
