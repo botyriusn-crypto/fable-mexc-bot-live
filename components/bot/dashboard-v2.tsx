@@ -162,7 +162,7 @@ export function DashboardV2() {
     return <div className="flex h-screen items-center justify-center"><span className="text-sm text-muted-foreground">Loading dashboard…</span></div>
   }
 
-  const running = state.config.status === "running"
+  const running = state?.config?.status === "running"
   const isLive = state.config.mode === "live"
   const exchangeName = state.config.exchange || "mexc"
   const exchangeLabel = { mexc: "MEXC", gate: "Gate.io", bybit: "Bybit" }[exchangeName] || exchangeName.toUpperCase()
