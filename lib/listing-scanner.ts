@@ -92,7 +92,7 @@ export async function scanNewListings(exchange: any): Promise<void> {
           }
         })
 
-        await log("trade", `✅ Auto-created COMBO grid for ${symbol} (Min5, 10 levels, 5% budget, 24h TTL)`)
+        await log("trade", `✅ Auto-created COMBO grid for ${symbol} (Min5, ${safe.levels} levels, ${safe.budgetPct}% budget sized for ${safe.totalPairs} pairs @ $${safe.availableBalance.toFixed(2)} available, 24h TTL)`)
         knownSymbols.add(symbol)
       } catch (err) {
         // Individual ticker fetch failed, skip this symbol
