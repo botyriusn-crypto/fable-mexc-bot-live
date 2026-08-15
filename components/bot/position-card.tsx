@@ -45,19 +45,19 @@ export function PositionCard({ state }: { state: BotState }) {
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex flex-col gap-1">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-mono text-sm font-semibold">{position.symbol.replace("_", "/")}</span>
+                        <span className="font-mono text-sm font-semibold">{(position?.symbol || "UNKNOWN").replace("_", "/")}</span>
                         <Badge variant="secondary" className="font-mono text-xs">{position.timeframe}</Badge>
                         {selected ? <Badge className="bg-primary text-primary-foreground">Selected</Badge> : <Badge variant="outline">Legacy</Badge>}
                       </div>
                       <span className="text-xs text-muted-foreground">
-                        {position.side.toUpperCase()} {position.leverage}x · entry {fmt(position.entryPrice)} · mark {fmt(markPrice)}
+                        {(position?.side || "unknown").toUpperCase()} {position.leverage}x · entry {fmt(position.entryPrice)} · mark {fmt(markPrice)}
                       </span>
                     </div>
                     <Badge
                       variant="outline"
                       className={isLong ? "border-success/30 bg-success/15 text-success" : "border-danger/30 bg-danger/15 text-danger"}
                     >
-                      {position.side.toUpperCase()}
+                      {(position?.side || "unknown").toUpperCase()}
                     </Badge>
                   </div>
                   <div className="mt-3 flex items-end justify-between gap-3">

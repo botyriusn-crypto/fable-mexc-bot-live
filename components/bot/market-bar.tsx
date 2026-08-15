@@ -60,8 +60,8 @@ export function MarketBar({ state }: { state: BotState }) {
 
   const filteredMarkets = useMemo(() => {
     if (!data?.markets) return []
-    const q = query.trim().toUpperCase()
-    const pool = q ? data.markets.filter((m) => m.symbol.includes(q) || m.displayName.toUpperCase().includes(q)) : data.markets
+    const q = (query || "").trim().toUpperCase()
+    const pool = q ? data.markets.filter((m) => m.symbol.includes(q) || (m?.displayName || "unknown").toUpperCase().includes(q)) : data.markets
     return pool.slice(0, 50)
   }, [data?.markets, query])
 
@@ -72,11 +72,11 @@ export function MarketBar({ state }: { state: BotState }) {
   }, [state.config.symbol, state.config.timeframe, state.config.leverage])
 
   const selectedMarket = useMemo(
-    () => data?.markets.find((market) => market.symbol === symbol.toUpperCase()),
+    () => data?.markets.find((market) => market.symbol === (symbol || "").toUpperCase()),
     [data?.markets, symbol],
   )
   const dirty =
-    symbol.toUpperCase() !== state.config.symbol ||
+    (symbol || "").toUpperCase() !== state.config.symbol ||
     timeframe !== state.config.timeframe ||
     Number(leverage) !== state.config.leverage
 
@@ -87,7 +87,7 @@ export function MarketBar({ state }: { state: BotState }) {
       const response = await fetch("/api/bot/market", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol: symbol.toUpperCase(), timeframe, leverage: Number(leverage) }),
+        body: JSON.stringify({ symbol: (symbol || "").toUpperCase(), timeframe, leverage: Number(leverage) }),
       })
       const json = await response.json()
       if (!response.ok) throw new Error(json.error ?? "Market switch failed")
@@ -109,12 +109,12 @@ export function MarketBar({ state }: { state: BotState }) {
           </div>
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="truncate font-mono text-lg font-semibold">{state.config.symbol.replace("_", "/")}</h2>
+              <h2 className="truncate font-mono text-lg font-semibold">{(state?.config?.symbol || "UNKNOWN").replace("_", "/")}</h2>
               <Badge variant="outline" className="border-primary/40 bg-primary/15 text-primary text-[10px] px-1.5 ml-1 shrink-0">ACTIVE</Badge>
               <Badge variant="secondary">{timeframeLabel[state.config.timeframe] ?? state.config.timeframe}</Badge>
               <Badge variant="outline">{state.config.leverage}x</Badge>
               <Badge variant="outline" className="gap-1">
-                <Radio aria-hidden="true" /> {state.config.mode.toUpperCase()}
+                <Radio aria-hidden="true" /> {(state?.config?.mode || "paper").toUpperCase()}
               </Badge>
             </div>
             <div className="flex flex-wrap items-baseline gap-2">
