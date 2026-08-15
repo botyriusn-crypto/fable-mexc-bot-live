@@ -1,6 +1,6 @@
 import { db } from "./db"
 import { botConfig, gridConfigs, gridOrders, trades, botLogs, type BotConfig, type GridOrder } from "./db/schema"
-import { eq, sql, and, inArray, desc } from 'drizzle-orm'
+import { eq, sql, and, inArray, desc, isNotNull } from 'drizzle-orm'
 import type { FeatureVector, IndicatorSnapshot } from "./indicators"
 import { detectVolatilitySurge, adaptiveSpacing, type VolatilityState } from "./volatility-guard"
 import type { Regime } from "./strategy"
@@ -10,6 +10,7 @@ import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderSta
 import type { Candle } from "./mexc/public"
 import { fetchTicker } from "./mexc/public"
 import { roundMexcQuantity, roundMexcPrice, getMexcSpec, getMexcSpecAsync } from "./mexc/precision"
+import { livePrices } from "./mexc/ws"
 
 
 // Global cooldown to prevent duplicate setups
@@ -819,6 +820,54 @@ await log("error", `Grid ${order.symbol} (maker short) ML update failed: ${dbErr
 }
 }
 await log("trade", `Grid ${order.symbol} (maker short) ${reason.toUpperCase()} closed @ ${exitPrice.toFixed(6)} (shorted ${entryPrice.toFixed(6)}) | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
+}
+
+// Fast, symbol-agnostic risk check for ALL held positions (long and
+// short), independent of candle-close cadence. Long holdings were
+// previously only checked once per candle close (up to 15 min late,
+// observed losses running 4-12x past the intended 4% cap). Short
+// holdings had NO periodic check at all -- settleMakerShortStopLoss
+// existed but was only ever called incidentally during grid recenters.
+// This function is meant to be called on a short interval (e.g. every
+// 15-20s) from instrumentation.ts, using the already-live in-memory
+// livePrices instead of an extra REST call per symbol.
+export async function checkAllHeldPositionsRisk(): Promise<void> {
+  const cfgRows = await db.select().from(botConfig).where(eq(botConfig.id, 1)).limit(1)
+  const cfg = cfgRows[0]
+  if (!cfg) return
+
+  const held = await db.select().from(gridOrders).where(
+    and(eq(gridOrders.status, "pending"), isNotNull(gridOrders.buyPrice))
+  )
+
+  for (const o of held) {
+    const currentPrice = livePrices[o.symbol]
+    if (!currentPrice || currentPrice <= 0) continue
+    const entryPrice = o.buyPrice as number
+    const heldMinutes = o.createdAt ? (Date.now() - new Date(o.createdAt as any).getTime()) / 60000 : 0
+
+    if (o.side === "sell") {
+      // Held long: loses when price falls below entry.
+      const adverseMove = (currentPrice - entryPrice) / entryPrice
+      if (adverseMove <= -MAKER_STOP_LOSS_PCT) {
+        await log("info", `Grid ${o.symbol} (maker, fast-check): stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% below entry ${entryPrice.toFixed(6)}`)
+        await settleMakerStopLoss(o, currentPrice, cfg, "stop-loss")
+      } else if (heldMinutes >= MAKER_MAX_HOLD_MINUTES) {
+        await log("info", `Grid ${o.symbol} (maker, fast-check): max-hold triggered — held ${heldMinutes.toFixed(0)}m, closing at market`)
+        await settleMakerStopLoss(o, currentPrice, cfg, "max-hold")
+      }
+    } else if (o.side === "buy") {
+      // Held short: loses when price rises above entry.
+      const adverseMove = (currentPrice - entryPrice) / entryPrice
+      if (adverseMove >= MAKER_STOP_LOSS_PCT) {
+        await log("info", `Grid ${o.symbol} (maker, fast-check): short stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% above entry ${entryPrice.toFixed(6)}`)
+        await settleMakerShortStopLoss(o, currentPrice, cfg, "stop-loss")
+      } else if (heldMinutes >= MAKER_MAX_HOLD_MINUTES) {
+        await log("info", `Grid ${o.symbol} (maker, fast-check): short max-hold triggered — held ${heldMinutes.toFixed(0)}m, closing at market`)
+        await settleMakerShortStopLoss(o, currentPrice, cfg, "max-hold")
+      }
+    }
+  }
 }
 
 async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): Promise<void> {

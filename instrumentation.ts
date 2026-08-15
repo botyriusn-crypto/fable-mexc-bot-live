@@ -38,6 +38,20 @@ export async function register() {
           console.error("[AI Feedback] Scheduled evaluation failed:", e)
         }
       }, 30 * 60 * 1000)
+
+      // Fast risk check (stop-loss / max-hold) for all held long and
+      // short positions, decoupled from candle-close cadence. Uses
+      // livePrices (already updating from the WS stream) instead of an
+      // extra REST call. Long positions were previously only checked
+      // once per candle close; shorts had no periodic check at all.
+      const { checkAllHeldPositionsRisk } = await import("./lib/grid")
+      setInterval(async () => {
+        try {
+          await checkAllHeldPositionsRisk()
+        } catch (e) {
+          console.error("[Risk Check] Scheduled check failed:", e)
+        }
+      }, 20 * 1000)
     } catch (err) {
       console.error("[Startup] Failed to initialize WebSockets:", err)
       // Fallback to BTC/SOL if DB isn't ready yet
