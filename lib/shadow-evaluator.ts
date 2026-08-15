@@ -172,7 +172,7 @@ export async function getShadowStats() {
     const setupSignal = Math.abs(setup - 0.5)
     const source = mlSignal > setupSignal ? "ml" : "setup"
     
-    return { symbol: d.symbol, direction: d.candidateDirection, confidence: Math.max(ml, setup), source }
+    return { symbol: d.symbol, direction: d.candidateDirection, confidence: Math.max(ml, setup), source, createdAt: d.createdAt?.toISOString?.() ?? new Date().toISOString() }
   }).sort((a, b) => Math.abs(b.confidence - 0.5) - Math.abs(a.confidence - 0.5))
   
   return {

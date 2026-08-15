@@ -60,6 +60,7 @@ export function SniperAlertBubble() {
   const [enabled, setEnabled] = useState(true)
   const [threshold, setThreshold] = useState(0.55)
   const [open, setOpen] = useState(false)
+  const [timeAgo, setTimeAgo] = useState("")
   const [test, setTest] = useState<any>(null)
   const [dismissed, setDismissed] = useState<Record<string, number>>({})
 
@@ -79,6 +80,19 @@ export function SniperAlertBubble() {
   const top = test ?? state?.shadowStats?.topCandidate
   const key = top ? `${top.symbol}-${top.direction}` : ""
   const inCooldown = Boolean(key && dismissed[key] && (Date.now() - dismissed[key] < COOLDOWN_MS))
+  
+  useEffect(() => {
+    if (!top?.createdAt) { setTimeAgo(""); return }
+    const update = () => {
+      const diff = Math.floor((Date.now() - new Date(top.createdAt).getTime()) / 1000)
+      if (diff < 60) setTimeAgo(`${diff}s`)
+      else setTimeAgo(`${Math.floor(diff / 60)}:${String(diff % 60).padStart(2, "0")}`)
+    }
+    update()
+    const id = setInterval(update, 1000)
+    return () => clearInterval(id)
+  }, [top?.createdAt])
+
   const active = Boolean(enabled && top && top.confidence >= threshold && !inCooldown)
 
   const acknowledge = () => {
