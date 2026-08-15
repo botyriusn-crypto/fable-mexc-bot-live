@@ -23,7 +23,13 @@ export async function scanNewListings(exchange: any): Promise<void> {
   try {
     // Fetch all USDT perpetual pairs from MEXC
     const markets = await exchange.loadMarkets()
-    const usdtPairs = Object.keys(markets).filter(s => s.endsWith('_USDT') && markets[s].active)
+    // Exclude tokenized stocks and leveraged tokens — these often don't
+    // support opening a short (MEXC rejects with 2009 Position is
+    // nonexistent), which breaks COMBO grids that need a naked short leg.
+    const usdtPairs = Object.keys(markets).filter(s =>
+      s.endsWith('_USDT') && markets[s].active &&
+      !s.includes('STOCK') && !s.includes('3L') && !s.includes('3S')
+    )
     
     // Initialize known symbols on first run
     if (knownSymbols.size === 0) {
