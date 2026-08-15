@@ -5,6 +5,7 @@ import { eq, and, inArray } from "drizzle-orm"
 import { cancelOrders } from "@/lib/mexc/private"
 import { log } from "@/lib/grid"
 import { initRealtimeEngine, stopRealtimeEngine, runTick } from "@/lib/engine"
+import { computeSafeGridSettings } from "@/lib/grid-sizing"
 
 export const dynamic = "force-dynamic"
 
@@ -44,20 +45,25 @@ export async function POST(request: Request) {
     if (existing.length > 0) {
       return NextResponse.json({ error: "This pair already exists" }, { status: 409 })
     }
+    // Size against real available balance and how many pairs are already
+    // enabled, instead of a fixed template that ignores account size. The
+    // pair is created disabled, but should still start with numbers the
+    // account can actually support once enabled.
+    const safe = await computeSafeGridSettings(1)
     await db.insert(gridConfigs).values({
       symbol: symbol.toUpperCase(),
       timeframe,
       enabled: false,
-      levels: GRID_TEMPLATE.levels,
-      rangeAtrMult: GRID_TEMPLATE.rangeAtrMult,
-      budgetPct: GRID_TEMPLATE.budgetPct,
-      leverage: GRID_TEMPLATE.leverage,
+      levels: safe.levels,
+      rangeAtrMult: safe.rangeAtrMult,
+      budgetPct: safe.budgetPct,
+      leverage: safe.leverage,
       feeMarginMult: GRID_TEMPLATE.feeMarginMult,
       autoPause: GRID_TEMPLATE.autoPause,
       makerMode: body.makerMode !== undefined ? body.makerMode : GRID_TEMPLATE.makerMode,
       direction: body.direction || GRID_TEMPLATE.direction,
     })
-    await log("info", `Grid template applied to ${symbol.toUpperCase()}: levels=${GRID_TEMPLATE.levels} atrMult=${GRID_TEMPLATE.rangeAtrMult}x budget=${GRID_TEMPLATE.budgetPct}% leverage=${GRID_TEMPLATE.leverage}x maker=${GRID_TEMPLATE.makerMode}`)
+    await log("info", `Grid sized for ${symbol.toUpperCase()}: levels=${safe.levels} atrMult=${safe.rangeAtrMult}x budget=${safe.budgetPct}% leverage=${safe.leverage}x (sized for ${safe.totalPairs} pairs @ $${safe.availableBalance.toFixed(2)} available) maker=${GRID_TEMPLATE.makerMode}`)
     return NextResponse.json({ ok: true })
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : "Unknown" }, { status: 500 })
