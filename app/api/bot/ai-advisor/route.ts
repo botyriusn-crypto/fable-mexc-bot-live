@@ -174,15 +174,22 @@ export async function GET() {
     }
     const topPicks = depthChecked
 
-    // 4. Generate optimal parameters mathematically based on the metrics
+    // 4. Generate optimal parameters, capped to what the account can
+    // actually fund. Market-quality scoring (DNA, chop, depth) picks WHICH
+    // coins are safe to trade — this step ensures the recommended SIZE is
+    // also safe, independent of what the quality scoring alone suggested.
+    // Sizing every pick together (topPicks.length) so applying all of them
+    // at once doesn't each independently claim a budgetPct that's only
+    // safe in isolation.
+    const finalSizing = await computeSafeGridSettings(topPicks.length)
     const recommendations = topPicks.map(m => {
       return {
         symbol: m.symbol,
-        reason: `DNA: ${m.dnaScore} | Blend: ${m.blendedScore} | Chop: ${m.chopRatio} | Rev: ${m.revRate} | Drift: ${m.driftPct}%`,
-        levels: m.suggestedLevels,
+        reason: `DNA: ${m.dnaScore} | Blend: ${m.blendedScore} | Chop: ${m.chopRatio} | Rev: ${m.revRate} | Drift: ${m.driftPct}% | Sized for ${finalSizing.totalPairs} pairs @ $${finalSizing.availableBalance.toFixed(2)} available`,
+        levels: Math.min(m.suggestedLevels, finalSizing.levels),
         atrMult: parseFloat(Math.min(3, Math.max(0.3, m.suggestedSpacingPct / Math.max(m.atrPct, 0.1))).toFixed(2)), // DNA-derived ATR mult
-        leverage: m.suggestedLeverage,
-        budgetPct: 10,
+        leverage: Math.max(1, Math.min(m.suggestedLeverage, finalSizing.leverage)),
+        budgetPct: finalSizing.budgetPct,
         dnaScore: m.dnaScore,
         blendedScore: m.blendedScore,
         chopRatio: m.chopRatio,
