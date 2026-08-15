@@ -75,6 +75,45 @@ export function useBotState() {
   return useSWR<BotState>("/api/bot/state", fetcher, {
     refreshInterval: 5000,
     revalidateOnFocus: true,
+    fallbackData: {
+      config: { status: "stopped", mode: "paper", exchange: "mexc" },
+      openPosition: null,
+      openPositions: [],
+      exposures: [],
+      managedMarkets: [],
+      markPrice: null,
+      unrealizedPnl: 0,
+      equity: 0,
+      trades: [],
+      winRate: 0,
+      equityCurve: [],
+      logs: [],
+      model: null,
+      aiAdvisorEnabled: false,
+      aiAnalysisSchedule: "manual",
+      aiLastAnalysis: null,
+      classifierAnalytics: {
+        sampleCount: 0,
+        resolvedCount: 0,
+        acceptedCount: 0,
+        rejectedCount: 0,
+        agreementRate: null,
+        logisticAccuracy: null,
+        lorentzianAccuracy: null,
+        latest: null
+      },
+      ticker: null,
+      chart: [],
+      liveAccount: null,
+      regime: null,
+      adxValue: null,
+      grid: {
+        orders: [],
+        holdingCount: 0,
+        unrealizedPnl: 0,
+        realizedPnl: 0
+      }
+    }
   })
 }
 

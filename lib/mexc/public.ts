@@ -12,13 +12,27 @@ async function __fetchKlinesRaw(symbol: string, interval: string, limit = 200): 
   const end = Math.floor(Date.now() / 1000)
   const seconds = intervalToSeconds(interval)
   const start = end - seconds * limit
-  const res = await fetch(`${BASE_URL}/kline/${symbol}?interval=${interval}&start=${start}&end=${end}`, { cache: "no-store" })
-  if (!res) throw new Error("Null response from MEXC kline")
-  if (!res.ok) throw new Error(`MEXC kline fetch failed: ${res.status}`)
-  const json = await res.json()
-  if (!json.success || !json.data) throw new Error("MEXC kline response unsuccessful")
-  const { time, open, high, low, close, vol } = json.data
-  return time.map((_: number, i: number) => ({ time: time[i], open: open[i], high: high[i], low: low[i], close: close[i], volume: vol[i] }))
+  const url = `${BASE_URL}/kline/${symbol}?interval=${interval}&start=${start}&end=${end}`
+  console.log(`[MEXC] Fetching klines: ${url}`)
+  
+  try {
+    const res = await fetch(url, { cache: "no-store" })
+    if (!res) throw new Error("Null response from MEXC kline")
+    if (!res.ok) throw new Error(`MEXC kline fetch failed: ${res.status}`)
+    
+    const json = await res.json()
+    console.log(`[MEXC] Kline response: success=${json.success}, hasData=${!!json.data}, dataLength=${json.data?.time?.length || 0}`)
+    
+    if (!json.success || !json.data) {
+      console.error(`[MEXC] Kline error response:`, JSON.stringify(json).substring(0, 200))
+      throw new Error("MEXC kline response unsuccessful")
+    }
+    const { time, open, high, low, close, vol } = json.data
+    return time.map((_: number, i: number) => ({ time: time[i], open: open[i], high: high[i], low: low[i], close: close[i], volume: vol[i] }))
+  } catch (err) {
+    console.error(`[MEXC] Error fetching klines for ${symbol}:`, err)
+    throw err
+  }
 }
 export async function fetchKlines(symbol: string, interval: string, limit = 200) {
 const key = String(symbol + "|" + interval + "|" + limit)

@@ -72,6 +72,7 @@ export async function scanNewListings(exchange: any): Promise<void> {
           budgetPct: BUDGET_PCT,
           autoPause: false, // Don't pause on trend - new listings are always trending
           enabled: true,
+          makerMode: true,
           paused: false,
           metadata: { 
             isNewListing: true, 

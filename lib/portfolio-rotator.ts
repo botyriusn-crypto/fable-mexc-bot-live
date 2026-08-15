@@ -62,9 +62,10 @@ export async function checkAndRotate(exchange: any): Promise<void> {
     const dead = audits.filter(a => a.ageHours >= MIN_AGE_HOURS && a.pnl <= 0)
     const alive = audits.filter(a => a.pnl > 0)
     
-    await log("info", `Portfolio audit: ${alive.length} alive, ${dead.length} dead (>${MIN_AGE_HOURS}h + $0 PnL)`)
+    await log("info", `Portfolio audit: ${alive.length} alive, ${dead.length} dead. Active COMBO grids: ${comboConfigs.length}. Needs >${MIN_AGE_HOURS}h age with <=$0 PnL to be dead.`)
     
     if (dead.length === 0) {
+      await log("info", `No dead grids found (${alive.length} alive, ${dead.length} dead). Rotation needs grids >6h old with <=$0 PnL.`)
       await log("info", "✅ All grids performing - no rotation needed")
       lastRotationTime = now
       return
@@ -136,6 +137,7 @@ export async function checkAndRotate(exchange: any): Promise<void> {
           budgetPct: 10,
           autoPause: false,
           enabled: true,
+          makerMode: true,
           paused: false,
           metadata: { 
             rotatedFrom: deadGrid.config.symbol,

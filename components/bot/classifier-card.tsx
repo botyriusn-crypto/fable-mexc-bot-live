@@ -52,7 +52,7 @@ export function ClassifierCard({ state }: { state: any }) {
             <div className="font-mono text-xl font-bold text-yellow-300">
               {top.symbol}{" "}
               <span className={top.direction === "long" ? "text-success" : "text-danger"}>
-                {String(top.direction).toUpperCase()}
+                {String(top?.direction || "unknown").toUpperCase()}
               </span>{" "}
               <span className="text-yellow-200/80">({(((top.confidence ?? 0) as number) * 100).toFixed(0)}% · {top.source === "ml" ? "ML" : "SETUP"})</span>
             </div>

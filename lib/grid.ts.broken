@@ -7,9 +7,10 @@ import type { Regime } from "./strategy"
 import { loadModel, trainOnTrade } from "./ml"
 import { getExchangeClient, type ExchangeClient } from "./exchange"
 import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderStatus, cancelOrders, getAccountAssets } from "./mexc/private"
+import { marketScales } from "./mexc/public"
 import type { Candle } from "./mexc/public"
 import { fetchTicker } from "./mexc/public"
-import { roundMexcQuantity, roundMexcPrice, getMexcSpec, getMexcSpecAsync } from "./mexc/precision"
+import { roundMexcQuantity, roundMexcPrice, getMexcSpecAsync } from "./mexc/precision"
 
 
 // Global cooldown to prevent duplicate setups
@@ -61,13 +62,13 @@ function isMakerSymbol(gc: { makerMode?: boolean }): boolean {
 }
 
 function roundForMexc(symbol: string, price: number, quantity: number): { price: number, quantity: number } {
-  // Use safe synchronous specs to avoid initialization errors
-  const spec = getMexcSpec(symbol, price)
-  const roundedPrice = Number((Math.round(price / spec.priceUnit) * spec.priceUnit).toFixed(spec.priceScale))
-  const roundedQty = Math.max(spec.minVol, Math.round(quantity / spec.contractSize) * spec.contractSize)
+  // Use live MEXC contract scales, fallback to safe defaults if not yet fetched
+  const scale = marketScales[symbol] || { price: 2, amount: 0 }
+  let qty = Math.floor(quantity * Math.pow(10, scale.amount)) / Math.pow(10, scale.amount)
+  if (qty < Math.pow(10, -scale.amount)) qty = Math.pow(10, -scale.amount)
   return {
-    price: roundedPrice,
-    quantity: roundedQty
+    price: parseFloat(price.toFixed(scale.price)),
+    quantity: qty
   }
 }
 
@@ -106,6 +107,8 @@ export interface GridConfig {
 // was silently orphaning held positions on any pair you disabled.
 export async function getGridConfigs(): Promise<GridConfig[]> {
   const rows = await db.select().from(gridConfigs)
+  // Return ALL configs, including those without orders
+  console.log(`[getGridConfigs] Found ${rows.length} grid configs`)
   return rows.map(r => ({
     id: r.id,
     symbol: r.symbol,
@@ -234,7 +237,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   GRID_SETUP_COOLDOWN.set(gc.symbol, Date.now());
 
   // BUDGET ENFORCEMENT: Hard cap orders and check existing before setup
-  const MAX_ORDERS = 8; // Never exceed 8 orders (4 per side) regardless of config
+  const MAX_ORDERS = 12; // Never exceed 12 orders regardless of config
   
   if (cfg.mode === "live") {
     const existingOrders = await db.select().from(gridOrders)
@@ -305,7 +308,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
 let baseSpacing = Math.min(Math.max(bbBaseSpacing, minSpacing), maxSpacing)
 if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, minSpacing) // COMBO-DENSE
   const geomRatio = gc.direction === "neutral" ? 1.0 : 1.15 // COMBO-DENSE: uniform arithmetic spacing like Bitsgap
-  const totalLevels = Math.max(1, Math.min(4, Math.floor(gc.levels / 2))) // Cap at 4 levels per side
+  const totalLevels = Math.max(1, Math.min(12, Math.floor(gc.levels / 2))) // Cap at 12 levels per side
   const effectiveLevels = gc.levels
   // Approximate half-range for DB logging
   let distAccum = 0
@@ -330,23 +333,8 @@ if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, 
       await log("error", `[Balance] Failed to fetch MEXC balance: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  const isNeutral = gc.direction === "neutral"
   const budget = (effectiveBalance * gc.budgetPct) / 100
-  // COMBO mode: divide budget by total orders (buys + sells), not just levels
-  const orderCount = isNeutral ? totalLevels * 2 : totalLevels
-  let notionalPerLevel = (budget / orderCount) * gc.leverage
-  
-  // MINIMUM ORDER SIZE: Ensure each order is at least $1 notional
-  const MIN_NOTIONAL = 1.0
-  if (notionalPerLevel < MIN_NOTIONAL) {
-    const maxPossibleOrders = Math.floor((budget * gc.leverage) / MIN_NOTIONAL)
-    if (maxPossibleOrders < 1) {
-      await log("error", `Grid ${gc.symbol}: Budget ${budget.toFixed(2)} USDT too small for even 1 order at $${MIN_NOTIONAL} notional. Need at least $${(MIN_NOTIONAL / gc.leverage).toFixed(2)} margin.`)
-      return
-    }
-    notionalPerLevel = (budget * gc.leverage) / maxPossibleOrders
-    await log("info", `Grid ${gc.symbol}: Reducing orders to ${maxPossibleOrders} to meet $${MIN_NOTIONAL} minimum notional (budget: ${budget.toFixed(2)})`)
-  }
+  const notionalPerLevel = (budget / totalLevels) * gc.leverage
   
   // Liquidation Safety Check: Ensure leverage isn't so high that MEXC liquidates 
   // the position before our 5% GRID_STOP_LOSS_PCT can trigger.
@@ -358,14 +346,16 @@ if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, 
     return
   }
 
-  const isShort = !isNeutral && (gc.direction === "short" || (gc as any)._autoSide === "short")
+  const isNeutral = gc.direction === "neutral"
+const isShort = !isNeutral && (gc.direction === "short" || (gc as any)._autoSide === "short")
 let orders: any[] = []
   for (let i = 1; i <= totalLevels; i++) {
     // Calculate cumulative distance for geometric spacing
     const dist = geomRatio === 1 ? baseSpacing * i : baseSpacing * (Math.pow(geomRatio, i) - 1) / (geomRatio - 1)
 
     if (isNeutral) {
-      // COMBO: place BOTH buy below center AND sell above center for each rung
+      // COMBO: place a buy level below center AND a sell level above center
+      // for every rung, so both sides of the ladder exist from the start.
       const buyPrice = center - dist
       const sellPrice = center + dist
       if (buyPrice > 0 && Number.isFinite(buyPrice)) {
@@ -399,8 +389,8 @@ let orders: any[] = []
       price: orderPrice,
       quantity: Number.isFinite(notionalPerLevel / orderPrice) ? notionalPerLevel / orderPrice : 0,
       status: "pending" as const,
-    })
-  }
+})
+}
 // COMBO (neutral) grids: Place BOTH buy AND sell orders immediately (Bitsgap-style)
 // This captures oscillations in both directions from the start
 if (isNeutral) {
@@ -421,22 +411,15 @@ if (isNeutral) {
   const finalBuys = orders.filter(o => o.side === "buy").length;
   const finalSells = orders.filter(o => o.side === "sell").length;
   await log("info", `Grid ${gc.symbol}: COMBO mode - placing ${finalBuys} buy orders and ${finalSells} sell orders (two-sided ladder)`)
-  // Force immediate tick to ensure orders appear
-  if (cfg.mode === "live") {
-  // Immediate re-tick removed - API route already triggers runTick after setup
-  }
+  // NOTE: immediate-tick-after-setup removed. The API route that enables a
+  // pair already fires one runTick() right after this function returns.
+  // Self-scheduling a second one here caused setupGrid to run twice in
+  // quick succession, placing every ladder level on the exchange twice.
 }
 // BULLETPROOF: Cap all orders at 12 for non-neutral grids too
   if (orders.length > MAX_ORDERS) {
     await log("info", `Grid ${gc.symbol}: Budget enforcement - trimming from ${orders.length} to ${MAX_ORDERS} orders`);
     orders.splice(MAX_ORDERS);
-  }
-  
-  // UNIFORM BUDGET ENFORCEMENT: Trim to what the budget can support
-  const maxOrdersByBudget = Math.floor((budget * gc.leverage) / 1.0) // $1 minimum notional
-  if (orders.length > maxOrdersByBudget) {
-    await log("info", `Grid ${gc.symbol}: Budget enforcement - trimming from ${orders.length} to ${maxOrdersByBudget} orders (budget constraint)`);
-    orders.splice(maxOrdersByBudget);
   }
   
   if (volatility && volatility.surge) {
@@ -479,14 +462,18 @@ if (cfg.mode === "live") {
       if (balanceExhausted) break // Stop placing if balance is insufficient
       
       try {
-        const side = isShort ? (ord.side === "sell" ? 3 : 2) : (ord.side === "sell" ? 4 : 1)
+        const side = isNeutral
+          ? (ord.side === "sell" ? 3 : 1) // COMBO: naked sell opens a short, naked buy opens a long
+          : isShort ? (ord.side === "sell" ? 3 : 2) : (ord.side === "sell" ? 4 : 1)
         let res: any;
         let retries = 0;
         const maxRetries = 3;
         
         while (retries < maxRetries) {
           try {
-            res = await placeRoundedMakerOrder(ord.symbol, side, ord.price, ord.quantity, ord.leverage);
+            const roundedOrder = roundForMexc(ord.symbol, ord.price, ord.quantity);
+            res = await placeRoundedMakerOrder(ord.symbol, side, ord.price, ord.quantity, ord.leverage)
+            });
             break; // Success, exit retry loop
           } catch (err) {
             const errMsg = dbErr(err);
@@ -505,10 +492,10 @@ if (cfg.mode === "live") {
         const oid = extractOrderId(res)
         await db.insert(gridOrders).values({ ...ord, mexcOrderId: oid, exchangeStatus: "new" })
         await log("info", `Grid ${gc.symbol}: resting ${ord.side} @ ${ord.price.toFixed(6)} id=${oid}`)
-        await new Promise(r => setTimeout(r, 2000))
+        await new Promise(r => setTimeout(r, 800))
         
         // Add delay between order placements to avoid rate limits
-        await new Promise(r => setTimeout(r, 1000))
+        await new Promise(r => setTimeout(r, 400))
       } catch (err) {
         const errMsg = dbErr(err)
         await log("error", `Grid ${gc.symbol}: ${ord.side} rejected @ ${ord.price.toFixed(6)}: ${errMsg}`)
@@ -928,11 +915,6 @@ await setupGrid(cfg, gc, snap, volatility, undefined, true)
       const sellPrice = fillPrice + (snap.atr * gc.rangeAtrMult)
       try {
         const res: any = await placeRoundedMakerOrder(o.symbol, 4, sellPrice, o.quantity, o.leverage)
-              const sid = extractOrderId(res)
-        await db.insert(gridOrders).values({
-          symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
-          spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell",
-          price: sellPrice, quantity: o.quantity, buyPrice: fillPrice,
           entryFeatures: { ...snap.features, sideLong: 1 },
           mexcOrderId: sid, exchangeStatus: "new", status: "pending",
         })
@@ -958,7 +940,7 @@ await setupGrid(cfg, gc, snap, volatility, undefined, true)
       if (o.buyPrice != null && !paused) {
         try {
           const res: any = await placeRoundedMakerOrder(o.symbol, 1, o.buyPrice, o.quantity, o.leverage)
-              const bid = extractOrderId(res)
+          const bid = extractOrderId(res)
           await db.insert(gridOrders).values({
             symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
             spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy",
@@ -966,12 +948,9 @@ await setupGrid(cfg, gc, snap, volatility, undefined, true)
             mexcOrderId: bid, exchangeStatus: "new", status: "pending",
           })
         } catch (err) {
-              await log("error", `Grid ${o.symbol} (maker): re-arm buy failed @ ${o.buyPrice.toFixed(6)}: ${dbErr(err)}`)
+          await log("error", `Grid ${o.symbol} (maker): re-arm buy failed @ ${o.buyPrice.toFixed(6)}: ${dbErr(err)}`)
         }
       }
-    } else if (state === 4 || state === 5) {
-      await db.update(gridOrders).set({ status: "cancelled", exchangeStatus: "cancelled" }).where(eq(gridOrders.id, o.id))
-    }
   }
 
   // Risk control: protect held inventory regardless of pause/regime state.
@@ -999,6 +978,8 @@ await setupGrid(cfg, gc, snap, volatility, undefined, true)
 }
 
 export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime, exchange?: ExchangeClient, candles?: Candle[]): Promise<void> {
+  // TEMP DIAGNOSTIC — remove after debugging
+  await log("info", `[DIAG] ${gc.symbol}: cfg.mode=${cfg.mode} MAKER_ENABLED=${MAKER_ENABLED} gc.makerMode=${gc.makerMode} isMakerSymbol=${isMakerSymbol(gc)}`)
   // Maker mode (live + enabled symbol): use the real-order polling path and
   // skip the entire virtual-fill engine below.
   if (cfg.mode === "live" && isMakerSymbol(gc)) {
@@ -1107,8 +1088,21 @@ if (shouldRecenter) {
     }
   }
 
-  // 1) Sell fills: price rose to/above a pending sell level
-  const sells = active.filter((o) => o.side === "sell" && hi >= o.price)
+  // 1) Sell fills: price rose to/above a pending sell level.
+  // Guard: a freshly-placed order must not be matched against `hi`, since
+  // `hi` can reflect the forming candle's high BEFORE the order existed
+  // (e.g. immediately after setupGrid places a sell at/below the candle's
+  // already-recorded high). That previously caused newly-resting sells to
+  // be marked "filled" in the DB within seconds, while the real order was
+  // still resting untouched on the exchange. Orders younger than one full
+  // tick interval use live `price` only, never the candle's `hi`.
+  const ORDER_FILL_GRACE_MS = 5000
+  const sells = active.filter((o) => {
+    if (o.side !== "sell") return false
+    const ageMs = o.createdAt ? Date.now() - new Date(o.createdAt as any).getTime() : Infinity
+    const effectiveHi = ageMs < ORDER_FILL_GRACE_MS ? price : hi
+    return effectiveHi >= o.price
+  })
 for (const o of sells) {
 if (o.buyPrice == null && (gc as any).direction === "neutral") {
 await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
@@ -1423,7 +1417,7 @@ export async function syncExchangeState() {
               // Silently skip individual order status failures to keep the loop moving
             }
             // 100ms delay to avoid rate limits during sync
-            await new Promise(r => setTimeout(r, 500))
+            await new Promise(r => setTimeout(r, 100))
           }
         }
       } catch (e) {

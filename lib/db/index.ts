@@ -28,6 +28,15 @@ pool.query = async (...args: any[]) => {
       return await originalQuery(...args)
     } catch (err: any) {
       console.error('[DB] Query error:', err.message, 'Code:', err.code)
+      try {
+        const q = args[0]
+        const qText = typeof q === 'string' ? q : q?.text
+        const qParams = typeof q === 'string' ? undefined : q?.values
+        console.error('[DB] Failing query text:', qText)
+        if (qParams) console.error('[DB] Failing query params:', JSON.stringify(qParams))
+      } catch (logErr) {
+        console.error('[DB] Could not log failing query:', logErr)
+      }
       // Retry on common transient network errors (Neon cold starts, DNS drops, etc.)
       if (['ETIMEDOUT', 'ENETUNREACH', 'ECONNRESET', 'EAI_AGAIN'].includes(err?.code) && attempt < 2) {
         console.log(`[DB] Connection issue, retry ${attempt + 1}/3...`)

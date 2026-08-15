@@ -95,13 +95,13 @@ export function SniperAlertBubble() {
       {!open ? (
         <button onClick={() => setOpen(true)}
           className="animate-pulse rounded-full border-2 border-yellow-400 bg-yellow-400/20 px-4 py-3 text-sm font-bold text-yellow-300 shadow-[0_0_20px_rgba(250,204,21,0.5)] backdrop-blur">
-          🎯 {top.symbol} {top.direction.toUpperCase()} {(top.confidence * 100).toFixed(0)}% · {top.source === "ml" ? "ML" : "SETUP"}
+          🎯 {top.symbol} {(top?.direction || "unknown").toUpperCase()} {(top.confidence * 100).toFixed(0)}% · {top.source === "ml" ? "ML" : "SETUP"}
         </button>
       ) : (
         <Card className="w-72 border-yellow-400/60 bg-black/90 shadow-[0_0_24px_rgba(250,204,21,0.4)]">
           <CardContent className="flex flex-col gap-2 p-3">
             <span className="text-sm font-bold text-yellow-300">🎯 Sniper Candidate</span>
-            <div className="font-mono text-lg text-yellow-200">{top.symbol} <span className={top.direction === "long" ? "text-success" : "text-danger"}>{top.direction.toUpperCase()}</span></div>
+            <div className="font-mono text-lg text-yellow-200">{top.symbol} <span className={top.direction === "long" ? "text-success" : "text-danger"}>{(top?.direction || "unknown").toUpperCase()}</span></div>
             <div className="text-xs text-yellow-200/80">Confidence: {(top.confidence * 100).toFixed(0)}% · Source: {top.source === "ml" ? "Learned ML" : "Momentum setup"}</div>
             <div className="text-[10px] text-yellow-200/60">Shadow ML flagged this setup. Review the pair before entering manually.</div>
             <div className="flex gap-2">

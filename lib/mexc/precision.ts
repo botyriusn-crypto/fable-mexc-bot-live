@@ -15,6 +15,11 @@ const CACHE_TTL = 300000; // 5 minutes
 const KNOWN_SPECS: Record<string, MexcSymbolSpec> = {
   BTC_USDT:   { priceScale: 1, priceUnit: 0.1,     contractSize: 0.0001, minVol: 1, maxVol: 400000 },
   ETH_USDT:   { priceScale: 2, priceUnit: 0.01,    contractSize: 0.01,   minVol: 1, maxVol: 70000 },
+  BEAT_USDT:  { priceScale: 3, priceUnit: 0.001,   contractSize: 1,      minVol: 1, maxVol: 34100 },
+  APR_USDT:   { priceScale: 4, priceUnit: 0.0001,  contractSize: 1,      minVol: 1, maxVol: Number.MAX_SAFE_INTEGER },
+  AKE_USDT:   { priceScale: 4, priceUnit: 0.0001,  contractSize: 1,      minVol: 1, maxVol: Number.MAX_SAFE_INTEGER },
+  PROM_USDT:  { priceScale: 4, priceUnit: 0.0001,  contractSize: 1,      minVol: 1, maxVol: Number.MAX_SAFE_INTEGER },
+  VELVET_USDT:{ priceScale: 4, priceUnit: 0.0001,  contractSize: 1,      minVol: 1, maxVol: Number.MAX_SAFE_INTEGER },
 };
 
 async function fetchMexcSpecs(): Promise<Record<string, MexcSymbolSpec>> {

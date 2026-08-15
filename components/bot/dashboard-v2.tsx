@@ -165,7 +165,7 @@ export function DashboardV2() {
   const running = state?.config?.status === "running"
   const isLive = state?.config?.mode === "live"
   const exchangeName = state.config.exchange || "mexc"
-  const exchangeLabel = { mexc: "MEXC", gate: "Gate.io", bybit: "Bybit" }[exchangeName] || exchangeName.toUpperCase()
+  const exchangeLabel = { mexc: "MEXC", gate: "Gate.io", bybit: "Bybit" }[exchangeName || "mexc"] || (exchangeName || "mexc").toUpperCase()
   const live = isLive && state.liveAccount && !("error" in state.liveAccount) ? state.liveAccount : null
   const balance = live ? live.availableBalance : state.config.paperBalance
   const equity = live ? live.equity : state.equity

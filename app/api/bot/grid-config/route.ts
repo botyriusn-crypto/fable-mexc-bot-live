@@ -4,7 +4,7 @@ import { gridConfigs, gridOrders } from "@/lib/db/schema"
 import { eq, and, inArray } from "drizzle-orm"
 import { cancelOrders } from "@/lib/mexc/private"
 import { log } from "@/lib/grid"
-import { initRealtimeEngine, stopRealtimeEngine } from "@/lib/engine"
+import { initRealtimeEngine, stopRealtimeEngine, runTick } from "@/lib/engine"
 
 export const dynamic = "force-dynamic"
 
@@ -19,7 +19,7 @@ const GRID_TEMPLATE = {
   feeMarginMult: 3,
   autoPause: true,
   makerMode: true,         // Default to maker for all new pairs
-  direction: "auto",
+  direction: "neutral",
 }
 
 export async function GET() {
@@ -111,6 +111,10 @@ export async function PATCH(request: Request) {
     if (updates.enabled === true) {
       await initRealtimeEngine(symbol.toUpperCase(), timeframe)
       await log("info", `${symbol.toUpperCase()} enabled — WebSocket engine started`)
+      // Fire an immediate tick so the grid ladder builds right away instead
+      // of waiting for the next 15m candle close. Don't await the API
+      // response on it — a full tick loops over every enabled pair.
+      runTick().catch((err) => log("error", `Immediate tick after enable failed: ${err instanceof Error ? err.message : String(err)}`))
     } else if (updates.enabled === false) {
       stopRealtimeEngine(symbol.toUpperCase())
       await log("info", `${symbol.toUpperCase()} disabled — WebSocket engine stopped`)

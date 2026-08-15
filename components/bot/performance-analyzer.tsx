@@ -146,7 +146,7 @@ export function PerformanceAnalyzer() {
                   <div className="flex items-center gap-2">
                     <Badge variant="outline" className="text-xs">{grid.symbol}</Badge>
                     <Badge variant="outline" className={`text-[10px] ${statusColors[analysis.status]}`}>
-                      {analysis.status.toUpperCase()}
+                      {(analysis?.status || "unknown").toUpperCase()}
                     </Badge>
                   </div>
                   <span className="font-mono text-xs text-muted-foreground">

@@ -1,6 +1,3 @@
-// Global reference for WebSocket callbacks
-let globalRunTick: (() => Promise<any>) | null = null;
-
 // Tick orchestration: data → features → ML-gated signal → exit management →
 // paper/live execution → model update → persistence.
 
@@ -15,31 +12,32 @@ import {
   classifierDecisions,
   type BotConfig,
   type Position,
-  gridConfigs,
 } from "./db/schema"
 import { and, eq, isNull, sql } from "drizzle-orm"
 import { type Candle } from "./mexc/public"
 import { getExchangeClient, type Exchange } from "./exchange"
 import { classifyLorentzian, combineConfirmation } from "./lorentzian"
-import { computeSnapshot, getFeatures, type FeatureVector, type IndicatorSnapshot } from "./indicators"
+import { computeSnapshot, type FeatureVector, type IndicatorSnapshot } from "./indicators"
 import { loadModel, trainOnTrade, gateEntry } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
-import { computeConsensus, type ConsensusResult } from "./consensus"
-import { detectSniper, SNIPER_LIVE, maybeScanExchange } from "./sniper"
-import { runGridTick, gridUnrealizedPnl, getGridConfigs } from "./grid"
-import { scanNewListings, cleanupExpiredListings } from "./listing-scanner"
-import { checkAndRotate } from "./portfolio-rotator"
-import { runWatchdog } from "./watchdog"
+import { runGridTick, gridUnrealizedPnl, getGridConfigs, type GridConfig } from "./grid"
+import { detectFlashFade, executeFlashFade } from "./flash-fade"
+import { analyzeTradesForMarket, applyRecommendations } from "./ai-advisor"
 import { computeInitialStops, evaluateExit } from "./exits"
-import { MexcWebSocketManager, livePrices, livePriceTimestamps } from "./mexc/ws"
-
-// Chandelier Exit calculation: Trails from highest high/lowest low
-function calcChandelierExit(isLong: boolean, extremePrice: number, atr: number, mult: number): number {
-  const safeMult = Math.max(1, mult) // Ensure multiplier is at least 1
-  return isLong ? extremePrice - (atr * safeMult) : extremePrice + (atr * safeMult)
-}
+import { MexcWebSocketManager } from './mexc/ws';
 
 const TAKER_FEE = 0.0002 // 0.02%
+
+// Symbol format utilities - converts BTC_USDT to BTCUSDT for MEXC API
+function toExchangeSymbol(symbol: string): string {
+  // MEXC futures uses underscores in symbols (e.g., RE_USDT, BTC_USDT)
+  // Return the symbol as-is, preserving the underscore
+  return symbol;
+}
+
+function toDbSymbol(symbol: string): string {
+  return symbol.replace(/\//g, "_");
+}
 
 function lorentzianOptions(cfg: BotConfig) {
   return {
@@ -79,11 +77,15 @@ async function resolveClassifierOutcomes(symbol: string, timeframe: string, cand
 }
 
 async function log(level: "info" | "trade" | "error", message: string, details?: unknown) {
-  await db.insert(botLogs).values({
-    level,
-    message,
-    details: details ? (details as Record<string, unknown>) : null,
-  })
+  try {
+    await db.insert(botLogs).values({
+      level,
+      message,
+      details: details || null,
+    })
+  } catch (error) {
+    console.error("Failed to insert log:", error)
+  }
 }
 
 export async function getConfig(): Promise<BotConfig> {
@@ -112,8 +114,7 @@ async function openPosition(
   snap: IndicatorSnapshot,
   confidence: number,
   features: FeatureVector,
-  strategy: "trend" | "range" | "webhook" | "sniper" = "trend",
-stops?: { stopLoss: number; takeProfit: number } | null,
+  strategy: "trend" | "range" | "webhook" = "trend",
 ): Promise<void> {
   const price = snap.price
   const quantity = (cfg.positionSizeUsdt * cfg.leverage) / price
@@ -127,18 +128,16 @@ stops?: { stopLoss: number; takeProfit: number } | null,
     rangeTarget = snap.bbMiddle
     takeProfit = snap.bbMiddle
     stopLoss = direction === "long" ? price - snap.atr * 1.0 : price + snap.atr * 1.0
-  } else if (stops) {
+  } else {
+    const stops = computeInitialStops(direction, price, snap.atr, cfg)
     stopLoss = stops.stopLoss
     takeProfit = stops.takeProfit
-} else {
-    const initStops = computeInitialStops(direction, price, snap.atr, cfg)
-    stopLoss = initStops.stopLoss
-    takeProfit = initStops.takeProfit
-}
+  }
 
   if (cfg.mode === "live") {
     try {
-      const exchange = getExchangeClient(cfg.exchange as Exchange)
+      const tickerCache = new Map()
+    const exchange = getExchangeClient(cfg.exchange as Exchange)
       await exchange.placeMarketOrder({
         symbol: cfg.symbol,
         side: direction === "long" ? 1 : 3,
@@ -174,7 +173,7 @@ stops?: { stopLoss: number; takeProfit: number } | null,
 
   await db
     .update(botConfig)
-    .set({ paperBalance: sql`${botConfig.paperBalance}` /* MARGIN DEDUCTION REMOVED FOR PAPER TRADING */ })
+    .set({ paperBalance: sql`${botConfig.paperBalance} - ${openFee}` })
     .where(eq(botConfig.id, 1))
 
   await log(
@@ -191,7 +190,8 @@ export async function closePosition(
 ): Promise<void> {
   if (cfg.mode === "live") {
     try {
-      const exchange = getExchangeClient(cfg.exchange as Exchange)
+      const tickerCache = new Map()
+    const exchange = getExchangeClient(cfg.exchange as Exchange)
       await exchange.placeMarketOrder({
         symbol: position.symbol,
         side: position.side === "long" ? 4 : 2,
@@ -225,7 +225,6 @@ export async function closePosition(
       strategy: position.strategy ?? "trend",
       entryConfidence: position.entryConfidence,
       openedAt: position.openedAt,
-      live: cfg.mode === "live",
     })
     .returning()
 
@@ -234,12 +233,10 @@ export async function closePosition(
     .set({ status: "closed", closedAt: sql`NOW()` })
     .where(eq(positions.id, position.id))
 
-  if (cfg.mode === "paper") {
-    await db
-      .update(botConfig)
-      .set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` })
-      .where(eq(botConfig.id, 1))
-  }
+  await db
+    .update(botConfig)
+    .set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` })
+    .where(eq(botConfig.id, 1))
 
   await log(
     "trade",
@@ -249,17 +246,16 @@ export async function closePosition(
   // Learning loop: every closed trade trains the model
   if (position.entryFeatures) {
     try {
-      const modelForTrain = await loadModel()
-await trainOnTrade(
-modelForTrain,
-position.entryFeatures as unknown as Record<string, number>,
-netPnl > 0,
-pnlPct,
-cfg.mlLearningRate,
-trade.id,
-position.id,
-position.strategy === "grid" ? "grid" : "trend",
-)
+      const model = await loadModel()
+      await trainOnTrade(
+        model,
+        position.entryFeatures as unknown as FeatureVector,
+        netPnl > 0,
+        pnlPct,
+        cfg.mlLearningRate,
+        trade.id,
+        position.id,
+      )
       await log("info", `Model updated from trade #${trade.id} (${netPnl > 0 ? "win" : "loss"})`)
     } catch (err) {
       await log("error", `Model training failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -284,11 +280,11 @@ export async function runWebhookSignal(
   }
 
   try {
+    const tickerCache = new Map()
     const exchange = getExchangeClient(cfg.exchange as Exchange)
-    await new Promise(r => setTimeout(r, 200)); // 200ms delay to prevent MEXC rate limits
-        const [candles, ticker] = await Promise.all([
-      exchange.fetchKlines(cfg.symbol, cfg.timeframe, cfg.lorentzianWebhooks ? Math.max(200, cfg.lorentzianLookback + 40) : 200),
-      exchange.fetchTicker(cfg.symbol),
+    const [candles, ticker] = await Promise.all([
+      exchange.fetchKlines(toExchangeSymbol(cfg.symbol), cfg.timeframe, cfg.lorentzianWebhooks ? Math.max(200, cfg.lorentzianLookback + 40) : 200),
+      fetchTickerWithRetry(exchange, cfg.symbol, tickerCache),
     ])
     if (candles.length < 60) {
       await log("error", `Webhook: insufficient candle data: ${candles.length}`)
@@ -349,84 +345,25 @@ export async function runWebhookSignal(
 }
 
 
-async function syncWithMexc(cfg: BotConfig) {
-  if (cfg.mode !== "live") return
-
-  try {
-    const exchange = getExchangeClient(cfg.exchange as Exchange)
-    const mexPositions = await exchange.getOpenPositions() as any[]
-
-    if (Array.isArray(mexPositions)) {
-      // Get all DB pending orders
-      const dbOrders = await db.select().from(gridOrders).where(eq(gridOrders.status, "pending"))
-
-      // Get MEXC open orders - these are the real ones
-      const mexcSymbols = new Set(mexPositions.map((p: any) => p.symbol))
-
-      // Cancel any DB orders for symbols that have NO real MEXC positions
-      for (const order of dbOrders) {
-        if (!mexcSymbols.has(order.symbol)) {
-          await db.update(gridOrders)
-            .set({ status: "cancelled" })
-            .where(eq(gridOrders.id, order.id))
-        }
-      }
-
-      // Log the sync
-      const cancelledCount = dbOrders.filter(o => !mexcSymbols.has(o.symbol)).length
-      if (cancelledCount > 0) {
-        await log("info", `Synced with MEXC: cancelled ${cancelledCount} ghost orders`)
-      }
+async function fetchTickerWithRetry(exchange: any, symbol: string, cache: Map<string, any>) {
+  if (cache.has(symbol)) return cache.get(symbol)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const result = await exchange.fetchTicker(toExchangeSymbol(symbol))
+      cache.set(symbol, result)
+      return result
+    } catch (err) {
+      if (attempt === 2) throw err
+      await new Promise(r => setTimeout(r, 1000))
     }
-  } catch (err) {
-    // Sync is best-effort, don't block trading
   }
+  throw new Error("Ticker fetch failed after 3 retries")
 }
 
-
-// ── Institutional Layer: Macro Regime & Plan Matching ──
-// Checks the broad market (BTC) to determine if we should be in "Risk-On" or "Risk-Off" mode.
-async function checkMacroRegime(exchange: any): Promise<{ riskOff: boolean; reason: string }> {
-  try {
-    const btcCandles = await exchange.fetchKlines("BTC_USDT", "Hour4", 60)
-    if (btcCandles.length < 50) return { riskOff: false, reason: "Insufficient BTC data" }
-    
-    const closes = btcCandles.map((c: any) => c.close)
-    const currentPrice = closes[closes.length - 1]
-    
-    // Calculate 50-period EMA on 4H chart
-    const k = 2 / (50 + 1)
-    let ema50 = closes[0]
-    for (let i = 1; i < closes.length; i++) {
-      ema50 = closes[i] * k + ema50 * (1 - k)
-    }
-    
-    // Calculate short-term momentum (Rate of Change over last 3 candles / 12 hours)
-    const roc = ((currentPrice - closes[closes.length - 4]) / closes[closes.length - 4]) * 100
-    
-    // Risk-Off Condition: Price is below macro trend AND momentum is negative
-    if (currentPrice < ema50 && roc < -1.5) {
-      return { riskOff: true, reason: `BTC below 4H EMA50 & dropping (${roc.toFixed(1)}% ROC)` }
-    }
-    return { riskOff: false, reason: `BTC healthy (Above EMA50, ${roc.toFixed(1)}% ROC)` }
-  } catch (err) {
-    return { riskOff: false, reason: "Macro check failed" }
-  }
-}
-
-let isTicking = false
-;(globalThis as any).__triggerInstantTick = async () => {
-  if (!isTicking) { await (globalRunTick ? globalRunTick() : Promise.resolve()) }
-}
-
+// Ticker cache to avoid rate limits
 export async function runTick(): Promise<{ status: string; detail?: string }> {
-  globalRunTick = runTick;
-  if (isTicking) return { status: "skipped", detail: "Tick already in progress" }
-  isTicking = true
   const cfg = await getConfig()
-  if (cfg.status !== "running") return { status: "skipped", detail: "Bot is stopped" }
-  // Sync with MEXC to remove ghost orders
-  await syncWithMexc(cfg)
+  console.log("TICK: bot running"); if (cfg.status !== "running") return { status: "skipped", detail: "Bot is stopped" }
 
   try {
     const [openPositions, activeGrid] = await Promise.all([
@@ -439,105 +376,56 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
 
     const model = await loadModel()
     const marks = new Map<string, number>()
-    const tickerCache = new Map<string, any>()
+
+    const tickerCache = new Map()
     const exchange = getExchangeClient(cfg.exchange as Exchange)
-    // ── Execute Macro Plan Matching ──
-const macroState = await checkMacroRegime(exchange)
-if (macroState.riskOff) {
-  await log("error", `⚠️ MACRO RISK-OFF: ${macroState.reason}. Shifting altcoins to Capital Preservation Plan (Budgets halved, Longs restricted).`)
-} else {
-  // Only log risk-on occasionally to avoid spam (every ~4 hours / 16 ticks)
-  const tickCount = (globalThis as any).__macroTickCount || 0
-  if (tickCount % 16 === 0) await log("info", `✅ MACRO RISK-ON: ${macroState.reason}`)
-  ;(globalThis as any).__macroTickCount = tickCount + 1
-}
-const gridCfgs = await getGridConfigs()
+    // ── Multi-pair grid execution ──
+    const gridCfgs = await getGridConfigs()
 
     for (const gc of gridCfgs) {
-  // Plan Matching: If Macro is Risk-Off, halve the budget for non-BTC pairs to preserve capital
-  if (macroState.riskOff && gc.symbol !== "BTC_USDT") {
-    gc.budgetPct = gc.budgetPct * 0.5 
-  }
       try {
-        await new Promise(r => setTimeout(r, 200)); // 200ms delay to prevent MEXC rate limits
         const [candles, ticker] = await Promise.all([
-          exchange.fetchKlines(gc.symbol, gc.timeframe, 200),
-          tickerCache.get(gc.symbol) || exchange.fetchTicker(gc.symbol).then((t: any) => { tickerCache.set(gc.symbol, t); return t; })
+          exchange.fetchKlines(toExchangeSymbol(gc.symbol), gc.timeframe, 200),
+          tickerCache.get(gc.symbol) || fetchTickerWithRetry(exchange, gc.symbol, tickerCache),
         ])
         if (candles.length < 60) { await log("error", `Grid ${gc.symbol}: insufficient candles`); continue }
-        const snap = computeSnapshot(candles, { ...cfg, symbol: gc.symbol, timeframe: gc.timeframe })
+        const gridCfg = { ...cfg, symbol: gc.symbol, timeframe: gc.timeframe } as BotConfig;
+        const snap = computeSnapshot(candles, gridCfg);
         snap.price = ticker.lastPrice
         marks.set(gc.symbol, snap.price)
-        // Regime-aware auto-tuning: wider ATR in trending, tighter in ranging
-        const regime = detectRegime(snap, { ...cfg, symbol: gc.symbol, timeframe: gc.timeframe })
-// ── Bitsgap-style consensus: observability + pause tightening (never an entry trigger) ──
-let cons: ConsensusResult | null = null
-try { cons = computeConsensus(candles) } catch {}
-if (cons) {
-const __cl = ((globalThis as any).__consLog ?? {})
-if (Date.now() - (__cl[gc.symbol] ?? 0) > 6 * 3600 * 1000) {
-__cl[gc.symbol] = Date.now()
-;(globalThis as any).__consLog = __cl
-await log("info", `📊 CONSENSUS ${gc.symbol}: ${cons.bucket.toUpperCase()} | score ${cons.score.toFixed(2)} | ${cons.buy}B/${cons.sell}S/${cons.neutral}N`)
-}
-}
-const effectiveRegime = regime === "neutral" && cons && (cons.bucket === "strong-buy" || cons.bucket === "strong-sell") ? "trend" : regime
-        if (gc.direction.startsWith("auto")) {
-          // 1. Auto-Tune ATR Spacing
-          if (regime === "trend" && gc.rangeAtrMult < 2.0) {
-            await db.update(gridConfigs).set({ rangeAtrMult: Math.min(gc.rangeAtrMult * 1.3, 3.0) }).where(eq(gridConfigs.id, gc.id))
-            gc.rangeAtrMult = Math.min(gc.rangeAtrMult * 1.3, 3.0)
-          } else if (regime === "range" && gc.rangeAtrMult > 0.8) {
-            await db.update(gridConfigs).set({ rangeAtrMult: Math.max(gc.rangeAtrMult * 0.9, 0.5) }).where(eq(gridConfigs.id, gc.id))
-            gc.rangeAtrMult = Math.max(gc.rangeAtrMult * 0.9, 0.5)
-          }
-
-          // 2. Auto-Direction Detection (Macro Trend: EMA 50 vs EMA 200)
-          const closes = candles.map(c => c.close)
-          const getEma = (vals: number[], p: number) => {
-            const k = 2 / (p + 1); let prev = vals[0] || 0;
-            for (let i = 0; i < vals.length; i++) { prev = i === 0 ? vals[0] : vals[i] * k + prev * (1 - k); }
-            return prev;
-          }
-          const emaFast = getEma(closes, 50)
-          const emaSlow = getEma(closes, 200)
-          const newDir = emaFast > emaSlow ? "auto-long" : "auto-short"
-          
-          if (gc.direction !== newDir) {
-            try {
-              await db.update(gridConfigs).set({ direction: newDir }).where(eq(gridConfigs.id, gc.id))
-              gc.direction = newDir
-              await log("info", `Grid ${gc.symbol}: Auto-direction updated to ${newDir}`)
-            } catch (e) {}
-          }
-          (gc as any)._autoSide = newDir === "auto-long" ? "long" : "short"
-        }
-        await runGridTick(cfg, gc, snap, effectiveRegime, exchange)
+        const regimeConfig = { ...cfg, symbol: gc.symbol, timeframe: gc.timeframe } as BotConfig;
+        await runGridTick(cfg, gc, snap, detectRegime(snap, regimeConfig), exchange)
       } catch (err) {
         await log("error", `Grid ${gc.symbol} tick failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     }
 
+    // ── Flash Fade detection ──
+    for (const gc of gridCfgs) {
+      try {
+        const ffCandles = await exchange.fetchKlines(toExchangeSymbol(gc.symbol), "Min5", 50)
+        if (ffCandles.length >= 30) {
+          const ffSignal = detectFlashFade(ffCandles)
+          if (ffSignal.detected) {
+            await executeFlashFade(gc.symbol, gc.timeframe, ffSignal, {
+              enabled: true, minMovePct: 20, minVolumeMultiplier: 5,
+              positionSizeUsdt: 300, leverage: 3, maxPositions: 2,
+            })
+          }
+        }
+      } catch (err) { /* best-effort */ }
+    }
+
     for (const key of marketKeys) {
       const [symbol, timeframe] = key.split("|")
-      const marketCfg = { ...cfg, symbol, timeframe }
+      const marketCfg: BotConfig = { ...cfg, symbol, timeframe } as BotConfig;
       try {
         const isSelected = symbol === cfg.symbol && timeframe === cfg.timeframe
         const candleLimit = isSelected ? Math.max(200, cfg.lorentzianLookback + 40) : 200
-        await new Promise(r => setTimeout(r, 200)); // 200ms delay to prevent MEXC rate limits
-        const candles = await exchange.fetchKlines(symbol, timeframe, candleLimit)
-        // Use live WebSocket price if available, otherwise fall back to candle close
-        const livePrice = livePrices[symbol] || candles[candles.length - 1].close
-        const ticker = { lastPrice: livePrice }
-        
-        // WebSocket Staleness Check
-        const lastUpdate = livePriceTimestamps[symbol] || 0
-        if (Date.now() - lastUpdate > 30000 && livePrices[symbol]) {
-          console.error(`[Engine] Stale WebSocket price for ${symbol} (last update >30s ago). Forcing reconnect.`)
-          const manager = globalThis.__wsManagers?.[symbol]
-          if (manager) manager.disconnect() // Triggers automatic reconnect
-          continue // Skip this tick to avoid trading on frozen price
-        }
+        const [candles, ticker] = await Promise.all([
+          exchange.fetchKlines(toExchangeSymbol(symbol), timeframe, candleLimit),
+          fetchTickerWithRetry(exchange, symbol, tickerCache),
+        ])
         if (candles.length < 60) {
           await log("error", `${symbol} ${timeframe}: insufficient candle data (${candles.length})`)
           continue
@@ -561,56 +449,8 @@ const effectiveRegime = regime === "neutral" && cons && (cons.bucket === "strong
         }
 
         if (isSelected) await resolveClassifierOutcomes(symbol, timeframe, candles)
-        maybeScanExchange() // full-MEXC rotation sweep (background, every 5m)
-// ── Sniper Engine v1: event-driven dislocation scanner (observe-only) ──
-if (isSelected) {
-try {
-const realTicker = await exchange.fetchTicker(symbol)
-const sn = detectSniper(candles, snap, (realTicker as any)?.fundingRate ?? 0)
-// Sniper Heartbeat: Prove it's alive even when market is quiet
-const nowTs = Date.now()
-const lastHeartbeat = ((globalThis as any).__sniperHeartbeat ?? {})[symbol] ?? 0
-if (nowTs - lastHeartbeat > 6 * 3600 * 1000) {
-  ;(globalThis as any).__sniperHeartbeat = { ...((globalThis as any).__sniperHeartbeat ?? {}), [symbol]: nowTs }
-  await log("info", `👁️ SNIPER HEARTBEAT ${symbol}: Scanning... market is normal, no extreme dislocations. Standing by.`)
-}
-
-if (sn.direction) {
-const lastLog = ((globalThis as any).__sniperLast ?? {})[symbol] ?? 0
-if (nowTs - lastLog > 6 * 3600 * 1000) {
-;(globalThis as any).__sniperLast = { ...((globalThis as any).__sniperLast ?? {}), [symbol]: nowTs }
-await log("info", `🎯 SNIPER CANDIDATE ${symbol}: ${sn.direction.toUpperCase()} | ${sn.reason} | conf ${(sn.confidence * 100).toFixed(0)}% | SL ${sn.stopLoss.toFixed(6)} | TP ${sn.takeProfit.toFixed(6)}`)
-if (SNIPER_LIVE && (sn.direction === "long" ? marketCfg.allowLong : marketCfg.allowShort)) {
-await openPosition(marketCfg, sn.direction, snap, sn.confidence, { ...snap.features, sideLong: sn.direction === "long" ? 1 : -1 }, "sniper", { stopLoss: sn.stopLoss, takeProfit: sn.takeProfit })
-}
-}
-}
-} catch (err) {
-await log("error", `Sniper scan failed: ${err instanceof Error ? err.message : String(err)}`)
-}
-}
-// ── Sniper Engine v1: event-driven dislocation scanner (observe-only) ──
-if (isSelected) {
-try {
-const realTicker = await exchange.fetchTicker(symbol)
-const sn = detectSniper(candles, snap, (realTicker as any)?.fundingRate ?? 0)
-if (sn.direction) {
-const nowTs = Date.now()
-const lastLog = ((globalThis as any).__sniperLast ?? {})[symbol] ?? 0
-if (nowTs - lastLog > 6 * 3600 * 1000) {
-;(globalThis as any).__sniperLast = { ...((globalThis as any).__sniperLast ?? {}), [symbol]: nowTs }
-await log("info", `🎯 SNIPER CANDIDATE ${symbol}: ${sn.direction.toUpperCase()} | ${sn.reason} | conf ${(sn.confidence * 100).toFixed(0)}% | SL ${sn.stopLoss.toFixed(6)} | TP ${sn.takeProfit.toFixed(6)}`)
-if (SNIPER_LIVE && (sn.direction === "long" ? marketCfg.allowLong : marketCfg.allowShort)) {
-await openPosition(marketCfg, sn.direction, snap, sn.confidence, { ...snap.features, sideLong: sn.direction === "long" ? 1 : -1 }, "sniper", { stopLoss: sn.stopLoss, takeProfit: sn.takeProfit })
-}
-}
-}
-} catch (err) {
-await log("error", `Sniper scan failed: ${err instanceof Error ? err.message : String(err)}`)
-}
-}
-if (isSelected && !marketPosition) {
-          const signal = evaluateEntry(snap, candles, marketCfg, model)
+        if (isSelected && !marketPosition) {
+          const signal = evaluateEntry(snap, marketCfg, model)
           if (signal.baseTriggered && signal.candidateDirection && signal.features) {
             const lorentzian = classifyLorentzian(candles, lorentzianOptions(marketCfg))
             const confirmation = combineConfirmation(
@@ -646,18 +486,12 @@ if (isSelected && !marketPosition) {
               confirmationMode: marketCfg.confirmationMode,
             })
             if (confirmation.allowed) {
-              // Skip if this symbol has an active COMBO (neutral) grid - grid handles its own positions
-        const activeGridConfig = await db.select().from(gridConfigs).where(eq(gridConfigs.symbol, symbol)).limit(1)
-        if (activeGridConfig.length > 0 && activeGridConfig[0].direction === "neutral" && activeGridConfig[0].enabled) {
-          await log("info", `[Skip] ${symbol}: COMBO grid active, skipping main strategy entry`)
-          continue
-        }
-        await openPosition(marketCfg, signal.candidateDirection, snap, signal.confidence, signal.features, signal.strategy)
+              await openPosition(marketCfg, signal.candidateDirection, snap, signal.confidence, signal.features, signal.strategy)
             }
           }
         }
 
-      // Grid already handled by multi-pair loop above
+        // GRID-FIX: Grid symbols already processed in loop above with proper GridConfig
       } catch (err) {
         await log("error", `${symbol} ${timeframe} tick failed: ${err instanceof Error ? err.message : String(err)}`)
       }
@@ -670,6 +504,22 @@ if (isSelected && !marketPosition) {
       const mark = marks.get(position.symbol)
       if (mark != null) totalUnrealized += unrealizedPnl(position, mark)
     }
+    // ── Flash Fade detection ──
+    for (const gc of gridCfgs) {
+      try {
+        const ffCandles = await exchange.fetchKlines(toExchangeSymbol(gc.symbol), "Min5", 50)
+        if (ffCandles.length >= 30) {
+          const ffSignal = detectFlashFade(ffCandles)
+          if (ffSignal.detected) {
+            await executeFlashFade(gc.symbol, gc.timeframe, ffSignal, {
+              enabled: true, minMovePct: 20, minVolumeMultiplier: 5,
+              positionSizeUsdt: 300, leverage: 3, maxPositions: 2,
+            })
+          }
+        }
+      } catch (err) { /* best-effort */ }
+    }
+
     for (const key of marketKeys) {
       const [symbol, timeframe] = key.split("|")
       const mark = marks.get(symbol)
@@ -680,25 +530,35 @@ if (isSelected && !marketPosition) {
     if (cfg.aiAdvisorEnabled && cfg.aiAnalysisSchedule !== "manual") {
       const now = new Date()
       const lastAnalysis = cfg.aiLastAnalysis ? new Date(cfg.aiLastAnalysis) : null
-      let shouldRun = !lastAnalysis
-      if (!shouldRun && cfg.aiAnalysisSchedule === "daily") shouldRun = now.getTime() - lastAnalysis!.getTime() > 86400000
-      if (!shouldRun && cfg.aiAnalysisSchedule === "weekly") shouldRun = now.getTime() - lastAnalysis!.getTime() > 604800000
+      let shouldRun = false
+
+      if (!lastAnalysis) {
+        shouldRun = true
+      } else if (cfg.aiAnalysisSchedule === "daily") {
+        shouldRun = now.getTime() - lastAnalysis.getTime() > 24 * 60 * 60 * 1000
+      } else if (cfg.aiAnalysisSchedule === "weekly") {
+        shouldRun = now.getTime() - lastAnalysis.getTime() > 7 * 24 * 60 * 60 * 1000
+      }
+
       if (shouldRun) {
         try {
           const result = await analyzeTradesForMarket(cfg.symbol, cfg.timeframe)
           if (result?.recommendations.length) {
-            await log("info", `AI Advisor: ${result.recommendations.length} recommendations`)
-            const highConfidence = result.recommendations.filter((r: any) =>
+            await log("info", `AI Advisor: ${result.recommendations.length} recommendations for ${cfg.symbol}`)
+            // Auto-apply if confidence is high
+            const highConfidence = result.recommendations.filter(r =>
               typeof r.suggested === 'number' && typeof r.current === 'number' &&
               Math.abs(r.suggested - r.current) / Math.abs(r.current) < 0.5
             )
             if (highConfidence.length > 0) {
               await applyRecommendations(0, highConfidence)
-              await log("info", `AI Advisor: auto-applied ${highConfidence.length} recommendations`)
+              await log("info", `AI Advisor: auto-applied ${highConfidence.length} conservative recommendations`)
             }
           }
-          await db.update(botConfig).set({ aiLastAnalysis: now as any }).where(eq(botConfig.id, 1))
-        } catch (err) {}
+          await db.update(botConfig).set({ aiLastAnalysis: now }).where(eq(botConfig.id, 1))
+        } catch (err) {
+          // AI advisor is best-effort, don't block trading
+        }
       }
     }
 
@@ -712,45 +572,41 @@ if (isSelected && !marketPosition) {
     const message = err instanceof Error ? err.message : String(err)
     await log("error", `Tick failed: ${message}`)
     return { status: "error", detail: message }
-  } finally {
-    isTicking = false
   }
 }
 
-// --- Real-time WebSocket Engine ---
-declare global {
-  // eslint-disable-next-line no-var
-  var __wsManagers: Record<string, MexcWebSocketManager> | undefined
-}
 
+// --- Real-time WebSocket Engine ---
 export async function initRealtimeEngine(symbol: string, timeframe: string) {
-  if (!globalThis.__wsManagers) globalThis.__wsManagers = {}
+  if (!(globalThis as any).__wsManagers) (globalThis as any).__wsManagers = {}
   // If a WS already exists for this symbol, don't create a duplicate
-  if (globalThis.__wsManagers[symbol]) return
+  if ((globalThis as any).__wsManagers[symbol]) return
   
   console.log(`[Engine] Initializing real-time WebSocket engine for ${symbol}...`)
   const manager = new MexcWebSocketManager(symbol, timeframe, async (kline) => {
     if (kline.isClosed) {
       console.log(`[WS] ${symbol} candle closed. Triggering instant tick...`)
       try {
-        await (globalRunTick ? globalRunTick() : Promise.resolve())
+        await runTick()
       } catch (err) {
         console.error(`[WS] Error during ${symbol} WS-triggered tick:`, err)
       }
     }
   })
   
-  globalThis.__wsManagers[symbol] = manager
-  manager.connect()
+  // Connect the WebSocket
+  await manager.connect()
+  console.log(`[Engine] WebSocket connected for ${symbol}`)
+  
+  // Store the manager
+  ;(globalThis as any).__wsManagers[symbol] = manager
+  console.log(`[Engine] Manager stored for ${symbol}`)
 }
 
-export function stopRealtimeEngine(symbol: string) {
-  if (!globalThis.__wsManagers) return
-  const manager = globalThis.__wsManagers[symbol]
-  if (!manager) return
-  console.log(`[Engine] Stopping real-time WebSocket engine for ${symbol}...`)
-  manager.disconnect()
-  delete globalThis.__wsManagers[symbol]
+export async function stopRealtimeEngine(symbol: string) {
+  if ((globalThis as any).__wsManagers?.[symbol]) {
+    await (globalThis as any).__wsManagers[symbol].disconnect()
+    delete (globalThis as any).__wsManagers[symbol]
+    console.log(`[Engine] Stopped real-time engine for ${symbol}`)
+  }
 }
-
-

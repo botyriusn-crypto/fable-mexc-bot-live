@@ -51,7 +51,7 @@ export function TradesTable({ state }: { state: BotState }) {
                 <TableRow key={t.id}>
                   <TableCell>
                     <span className={`font-mono text-xs font-semibold ${t.side === "long" ? "text-success" : "text-danger"}`}>
-                      {t.side.toUpperCase()}
+                      {(t?.side || "unknown").toUpperCase()}
                     </span>
                   </TableCell>
                   <TableCell>

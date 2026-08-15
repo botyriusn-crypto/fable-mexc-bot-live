@@ -1,119 +1,44 @@
 import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
-import { botConfig, gridOrders, trades, gridConfigs } from "@/lib/db/schema"
-import { eq, sql, desc, and } from "drizzle-orm"
+import { botConfig, gridOrders, trades, positions } from "@/lib/db/schema"
+import { eq, desc } from "drizzle-orm"
 
 export const dynamic = "force-dynamic"
 
-export async function GET(request: Request) {
+export async function GET() {
   try {
-    // Get bot config
     const configs = await db.select().from(botConfig).where(eq(botConfig.id, 1))
-    const cfg = configs[0]
-    
-    if (!cfg) {
-      return NextResponse.json({ error: "Config not found" }, { status: 500 })
+    const config = configs[0]
+
+    if (!config) {
+      return NextResponse.json({ error: "Config not found" }, { status: 404 })
     }
-    
-    const isLive = cfg.mode === "live"
-    
-    // Get balance based on mode
-    let balance = { available: 0, total: 0, locked: 0, unrealized: 0 }
-    
-    if (isLive) {
-      try {
-        const { getAccountAssets } = await import("@/lib/mexc/private")
-        const assets = await getAccountAssets()
-        
-        if (Array.isArray(assets) && assets.length > 0) {
-          const usdt = assets.find((a: any) => a.currency === "USDT")
-          if (usdt) {
-            balance = {
-              available: Number(usdt.availableBalance) || 0,
-              total: Number(usdt.equity) || 0,
-              locked: Number(usdt.positionMargin) || 0,
-              unrealized: Number(usdt.unrealized) || 0,
-            }
-          }
-        }
-      } catch (err: any) {
-        console.error("Failed to fetch live balance:", err?.message || err)
-        balance = { available: Number(cfg.paperBalance) || 0, total: Number(cfg.paperBalance) || 0, locked: 0, unrealized: 0 }
-      }
-    } else {
-      balance = {
-        available: Number(cfg.paperBalance) || 0,
-        total: Number(cfg.paperBalance) || 0,
-        locked: 0,
-        unrealized: 0,
-      }
-    }
-    
-    // Get trades - ONLY live trades in live mode, ONLY paper trades in paper mode
-    const liveFlag = isLive ? true : false
-    const allTrades = await db.select().from(trades)
-      .where(eq(trades.live, liveFlag))
-      .orderBy(desc(trades.closedAt))
-    
-    const totalPnl = allTrades.reduce((sum, t) => sum + Number(t.pnl || 0), 0)
-    const wins = allTrades.filter(t => Number(t.pnl || 0) > 0).length
-    const winRate = allTrades.length > 0 ? Math.round((wins / allTrades.length) * 100) : 0
-    
-    // Get active positions (pending orders)
-    const positions = await db.select().from(gridOrders)
-      .where(eq(gridOrders.status, "pending"))
-      .orderBy(desc(gridOrders.id))
-      .limit(100)
-    
-    // Get enabled grids
-    const grids = await db.select({
-      symbol: gridConfigs.symbol,
-      enabled: gridConfigs.enabled,
-      paused: gridConfigs.paused,
-      direction: gridConfigs.direction,
-      levels: gridConfigs.levels,
-    }).from(gridConfigs)
-      .where(eq(gridConfigs.enabled, true))
-    
-    // Get pending orders count by symbol
-    const pendingBySymbol = await db.select({
-      symbol: gridOrders.symbol,
-      count: sql<number>`count(*)`,
-    })
-      .from(gridOrders)
-      .where(eq(gridOrders.status, "pending"))
-      .groupBy(gridOrders.symbol)
-    
+
+    const allTrades = await db.select().from(trades).orderBy(desc(trades.closedAt)).limit(100)
+    const allPositions = await db.select().from(positions)
+    const allGridOrders = await db.select().from(gridOrders)
+
     return NextResponse.json({
-      config: cfg,  // <-- THIS WAS MISSING!
-      status: cfg.status,
-      mode: cfg.mode,
-      balance,
-      trades: allTrades.slice(0, 20),
-      tradeStats: {
-        total: allTrades.length,
-        wins,
-        losses: allTrades.length - wins,
-        winRate,
-        totalPnl,
+      config,
+      trades: allTrades || [],
+      positions: allPositions || [],
+      gridOrders: allGridOrders || [],
+      openOrders: allGridOrders.filter(o => o.status === "active") || [],
+      balance: {
+        available: config.paperBalance || 0,
+        total: config.paperBalance || 0,
       },
-      positions: positions.map(p => ({
-        symbol: p.symbol,
-        side: p.side,
-        price: p.price,
-        quantity: p.quantity,
-        status: p.status,
-      })),
-      grids,
-      pendingOrders: pendingBySymbol,
+      pnl: {
+        total: allTrades.reduce((sum, t) => sum + (t.realizedPnl || 0), 0),
+        today: 0,
+        unrealized: 0,
+      },
+      equity: config.paperBalance || 0,
+      marketData: [],
+      logs: [],
     })
-  } catch (err: any) {
-    console.error("State endpoint error:", err)
-    return NextResponse.json({ 
-      error: err?.message || "Unknown",
-      status: "error",
-      mode: "paper",
-      balance: { available: 0, total: 0, locked: 0, unrealized: 0 }
-    }, { status: 500 })
+  } catch (error) {
+    console.error("State endpoint error:", error)
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
 }

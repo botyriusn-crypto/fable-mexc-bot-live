@@ -36,9 +36,9 @@ function AddPairControl({ existingSymbols, onAdded }: { existingSymbols: string[
 
   const filtered = useMemo(() => {
     if (!data?.markets) return []
-    const q = query.trim().toUpperCase()
+    const q = (query || "").trim().toUpperCase()
     const pool = data.markets.filter((m) => !existingSymbols.includes(m.symbol)) // Prevents adding duplicates
-    const matched = q ? pool.filter((m) => m.symbol.includes(q) || m.displayName.toUpperCase().includes(q)) : pool
+    const matched = q ? pool.filter((m) => m.symbol.includes(q) || (m?.displayName || "unknown").toUpperCase().includes(q)) : pool
     return matched.slice(0, 50)
   }, [data?.markets, query, existingSymbols])
 
@@ -213,7 +213,7 @@ try {
 await fetch("/api/bot/grid-config", {
 method: "PATCH",
 headers: { "Content-Type": "application/json" },
-body: JSON.stringify({ symbol: grid.symbol, timeframe: grid.timeframe, direction: isCombo ? "auto" : "neutral" }),
+body: JSON.stringify({ symbol: grid.symbol, timeframe: grid.timeframe, direction: isCombo ? "long" : "neutral" }),
 })
 onRefresh()
 } catch (err) {
@@ -420,7 +420,7 @@ setComboBusy(false)
             orders.map((o, i) => (
               <div key={i} className="flex items-center gap-3 font-mono">
                 <Badge variant="outline" className={o.side === "buy" ? "border-success/40 bg-success/10 text-success text-[10px]" : "border-danger/40 bg-danger/10 text-danger text-[10px]"}>
-                  {o.side.toUpperCase()}
+                  {(o?.side || "unknown").toUpperCase()}
                 </Badge>
                 <span>@{o.price.toFixed(o.price < 1 ? 6 : 2)}</span>
                 <span className="text-muted-foreground">×{o.quantity.toFixed(o.quantity < 1 ? 6 : 4)}</span>

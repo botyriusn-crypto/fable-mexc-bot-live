@@ -31,26 +31,27 @@ export class MexcWebSocketManager {
     this.symbol = symbol.toLowerCase()
     this.interval = interval.charAt(0).toUpperCase() + interval.slice(1)
     this.onKline = onKline
-    console.log(`[WS] Manager created for ${this.symbol}`);
   }
 
   public connect() {
     console.log(`[WS] connect() called for ${this.symbol}`);
+    log("info", `[WS] Connecting to MEXC Contract WebSocket for ${this.symbol.toUpperCase()}...`)
     this.ws = new WebSocket(this.url)
 
     this.ws.on("open", () => {
+      console.log(`[WS] OPEN event fired for ${this.symbol}`);
       this.reconnectDelay = 3000
-      console.log(`[WS] Connected. Subscribing to ${this.symbol.toUpperCase()} ${this.interval} klines...`)
+      log("info", `[WS] Connected. Subscribing to ${this.symbol.toUpperCase()} ${this.interval} klines...`)
       const subMsg = {
         method: "sub.kline",
         param: { symbol: this.symbol.toUpperCase(), interval: this.interval }
       }
       this.ws?.send(JSON.stringify(subMsg))
-      console.log(`[WS] Subscription sent: ${JSON.stringify(subMsg)}`);
 
       if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
       this.heartbeatInterval = setInterval(() => {
         if (this.ws?.readyState === WebSocket.OPEN) {
+          // Shotgun keep-alive: send BOTH documented MEXC ping formats
           this.ws.send("ping")
           this.ws.send(JSON.stringify({ method: "ping" }))
         }
@@ -58,8 +59,8 @@ export class MexcWebSocketManager {
     })
 
     this.ws.on("message", (data: WebSocket.RawData) => {
-      const msg = data.toString()
-      console.log(`[WS] Raw msg: ${msg.substring(0, 200)}`);
+      const msg = data.toString();
+      console.log(`[WS] Raw msg: ${msg.substring(0, 150)}`);
 
       // Text keep-alive
       if (msg === "ping") { this.ws?.send("pong"); return }
@@ -69,7 +70,7 @@ export class MexcWebSocketManager {
         const parsed = JSON.parse(msg)
         console.log(`[WS] Parsed: ${JSON.stringify(parsed).substring(0, 200)}`);
 
-        // JSON keep-alive
+        // JSON keep-alive (documented MEXC spot/contract format)
         if (parsed.method === "ping" || parsed.channel === "ping") {
           this.ws?.send(JSON.stringify({ method: "pong" }))
           this.ws?.send("pong")
@@ -77,57 +78,41 @@ export class MexcWebSocketManager {
         }
         if (parsed.method === "pong" || parsed.channel === "pong") return
 
-        // --- KLINE DETECTION ---
-        // Check for kline data in parsed.data (MEXC contract format)
-        if (parsed.data && typeof parsed.data === 'object' && parsed.data.t !== undefined && parsed.data.o !== undefined) {
-          const k = parsed.data;
-          const sym = (k.symbol || this.symbol).toUpperCase();
-          const currentTime = k.t;
-          
-          console.log(`[WS] 📊 Kline for ${sym}: t=${currentTime}, o=${k.o}, c=${k.c}, h=${k.h}, l=${k.l}`);
-          
-          // NEW CANDLE DETECTION: if timestamp changed, the previous candle is closed
-          if (this.lastKlineTime !== null && currentTime > this.lastKlineTime) {
-            console.log(`[WS] 🔥 NEW CANDLE for ${sym}! Previous: ${this.lastKlineTime}, Current: ${currentTime}`);
-            
-            // Trigger callback for the closed candle
+        if (parsed.channel && parsed.channel.startsWith("push.kline") && parsed.data) {
+          console.log(`[WS] Kline data: ${JSON.stringify(parsed.data).substring(0, 200)}`);
+          const k = parsed.data
+          const sym = (k.symbol || this.symbol).toUpperCase()
+          const __cp = parseFloat(k.close ?? k.c ?? k.kline?.c)
+          if (!isNaN(__cp)) livePrices[sym] = __cp
+// INSTANT FILL TRIGGER: Wake up the engine immediately on live price move
+if (typeof (globalThis as any).__triggerInstantTick === 'function') { (globalThis as any).__triggerInstantTick() }
+          livePriceTimestamps[sym] = Date.now()
+          const currentStartTime = k.t
+          const isClosed = k.isClosed === true || k.closed === true || k.kline?.isClosed === true;
+          console.log(`[WS] Kline ${k.symbol}: isClosed=${isClosed}, open=${k.open}, close=${k.close}`);
+          if (this.lastKlineTime !== null && currentStartTime > this.lastKlineTime) {
             const kline: KlineUpdate = {
-              symbol: sym,
-              open: parseFloat(k.o || 0),
-              close: parseFloat(k.c || 0),
-              high: parseFloat(k.h || 0),
-              low: parseFloat(k.l || 0),
-              volume: parseFloat(k.a || k.q || k.volume || 0),
-              startTime: this.lastKlineTime,
-              isClosed: true
-            };
-            console.log(`[WS] ✅ TRIGGERING callback for ${sym} at ${new Date().toISOString()}`);
-            this.onKline(kline);
+              symbol: k.symbol || this.symbol.toUpperCase(),
+              open: parseFloat(k.open), close: parseFloat(k.close),
+              high: parseFloat(k.high), low: parseFloat(k.low),
+              volume: parseFloat(k.vol), startTime: this.lastKlineTime, isClosed: true
+            }
+            this.onKline(kline)
+            console.log(`[WS] ✅ TRIGGERING callback for ${k.symbol} at ${new Date().toISOString()}`);
           }
-          
-          // Update last time
-          if (k.t) this.lastKlineTime = k.t;
-          
-          // Update live price
-          const closePrice = parseFloat(k.c || 0);
-          if (!isNaN(closePrice)) livePrices[sym] = closePrice;
-          livePriceTimestamps[sym] = Date.now();
-          
-          // REMOVED: Instant tick on every price update was causing rate limits
-          // Only trigger on closed candles (handled above)
+          this.lastKlineTime = currentStartTime
         }
-      } catch (err) {
-        console.error(`[WS] Error parsing message:`, err);
-      }
+      } catch (err) {}
     })
 
     this.ws.on("error", (err: Error) => {
-      console.error(`[WS] Error event: ${err.message}`)
+      console.error(`[WS] Error: ${err.message}`)
       log("error", `[WS] Error: ${err.message}`)
     })
 
     this.ws.on("close", (code: number, reason: Buffer) => {
       console.log(`[WS] CLOSED: code=${code} reason=${reason?.toString() || "none"}`)
+      // Only surface non-routine closes in the UI Activity Log
       if (code !== 1005 && code !== 1006) {
         log("info", `[WS] CLOSED: code=${code} reason=${reason?.toString() || "none"}`)
       }
