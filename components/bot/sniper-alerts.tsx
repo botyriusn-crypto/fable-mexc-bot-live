@@ -61,6 +61,7 @@ export function SniperAlertBubble() {
   const [threshold, setThreshold] = useState(0.55)
   const [open, setOpen] = useState(false)
   const [timeAgo, setTimeAgo] = useState("")
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [test, setTest] = useState<any>(null)
   const [dismissed, setDismissed] = useState<Record<string, number>>({})
 
@@ -82,9 +83,10 @@ export function SniperAlertBubble() {
   const inCooldown = Boolean(key && dismissed[key] && (Date.now() - dismissed[key] < COOLDOWN_MS))
   
   useEffect(() => {
-    if (!top?.createdAt) { setTimeAgo(""); return }
+    if (!top?.createdAt) { setTimeAgo(""); setElapsedSeconds(0); return }
     const update = () => {
       const diff = Math.floor((Date.now() - new Date(top.createdAt).getTime()) / 1000)
+      setElapsedSeconds(diff)
       if (diff < 60) setTimeAgo(`${diff}s`)
       else setTimeAgo(`${Math.floor(diff / 60)}:${String(diff % 60).padStart(2, "0")}`)
     }
@@ -102,17 +104,19 @@ export function SniperAlertBubble() {
     setOpen(false)
   }
 
+  const isStale = elapsedSeconds > 600 // dim after 10 minutes
+
   if (!active) return null
 
   return (
     <div className="fixed bottom-4 right-4 z-50">
       {!open ? (
         <button onClick={() => setOpen(true)}
-          className="animate-pulse rounded-full border-2 border-yellow-400 bg-yellow-400/20 px-4 py-3 text-sm font-bold text-yellow-300 shadow-[0_0_20px_rgba(250,204,21,0.5)] backdrop-blur">
+          className={`rounded-full border-2 border-yellow-400 bg-yellow-400/20 px-4 py-3 text-sm font-bold text-yellow-300 backdrop-blur transition-all duration-500 ${isStale ? "opacity-40 grayscale" : "animate-pulse shadow-[0_0_20px_rgba(250,204,21,0.5)]"}`}>
           🎯 {top.symbol} {(top?.direction || "unknown").toUpperCase()} {(top.confidence * 100).toFixed(0)}% · {top.source === "ml" ? "ML" : "SETUP"}{timeAgo ? ` · ${timeAgo}` : ""}
         </button>
       ) : (
-        <Card className="w-72 border-yellow-400/60 bg-black/90 shadow-[0_0_24px_rgba(250,204,21,0.4)]">
+        <Card className={`w-72 transition-all duration-500 ${isStale ? "border-yellow-400/20 bg-black/60 opacity-50 grayscale" : "border-yellow-400/60 bg-black/90 shadow-[0_0_24px_rgba(250,204,21,0.4)]"}`}>
           <CardContent className="flex flex-col gap-2 p-3">
             <span className="text-sm font-bold text-yellow-300">🎯 Sniper Candidate</span>
             <div className="font-mono text-lg text-yellow-200">{top.symbol} <span className={top.direction === "long" ? "text-success" : "text-danger"}>{(top?.direction || "unknown").toUpperCase()}</span></div>

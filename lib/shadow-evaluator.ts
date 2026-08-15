@@ -175,11 +175,49 @@ export async function getShadowStats() {
     return { symbol: d.symbol, direction: d.candidateDirection, confidence: Math.max(ml, setup), source, createdAt: d.createdAt?.toISOString?.() ?? new Date().toISOString() }
   }).sort((a, b) => Math.abs(b.confidence - 0.5) - Math.abs(a.confidence - 0.5))
   
+  // --- TIER 3 ANALYTICS ---
+  // 1. Confidence buckets
+  const highConf = resolved.filter(d => d.logisticConfidence >= 0.70)
+  const midConf = resolved.filter(d => d.logisticConfidence >= 0.55 && d.logisticConfidence < 0.70)
+  const lowConf = resolved.filter(d => d.logisticConfidence < 0.55)
+  
+  const highCorrect = highConf.filter(d => d.outcomeCorrectLogistic).length
+  const midCorrect = midConf.filter(d => d.outcomeCorrectLogistic).length
+  const lowCorrect = lowConf.filter(d => d.outcomeCorrectLogistic).length
+  
+  // 2. Side splits (Long vs Short)
+  const longDecisions = resolved.filter(d => d.candidateDirection === 'long')
+  const shortDecisions = resolved.filter(d => d.candidateDirection === 'short')
+  const longCorrect = longDecisions.filter(d => d.outcomeCorrectLogistic).length
+  const shortCorrect = shortDecisions.filter(d => d.outcomeCorrectLogistic).length
+  
+  // 3. Rolling accuracy (last 50 resolved, ordered by resolvedAt)
+  const recentResolved = resolved
+    .filter(d => d.resolvedAt)
+    .sort((a, b) => new Date(b.resolvedAt as any).getTime() - new Date(a.resolvedAt as any).getTime())
+    .slice(0, 50)
+  const recentCorrect = recentResolved.filter(d => d.outcomeCorrectLogistic).length
+
   return {
     totalEvaluations: rows.length,
     resolvedCount: resolved.length,
     correctCount: correct,
     accuracy: resolved.length > 0 ? correct / resolved.length : 0,
     topCandidate: scored[0] ?? null,
+    
+    // New Tier 3 Analytics payload
+    confidenceBuckets: {
+      high: { count: highConf.length, correct: highCorrect, accuracy: highConf.length > 0 ? highCorrect / highConf.length : 0 },
+      mid: { count: midConf.length, correct: midCorrect, accuracy: midConf.length > 0 ? midCorrect / midConf.length : 0 },
+      low: { count: lowConf.length, correct: lowCorrect, accuracy: lowConf.length > 0 ? lowCorrect / lowConf.length : 0 },
+    },
+    sideSplits: {
+      long: { count: longDecisions.length, correct: longCorrect, accuracy: longDecisions.length > 0 ? longCorrect / longDecisions.length : 0 },
+      short: { count: shortDecisions.length, correct: shortCorrect, accuracy: shortDecisions.length > 0 ? shortCorrect / shortDecisions.length : 0 },
+    },
+    rollingAccuracy: {
+      last50: recentResolved.length > 0 ? recentCorrect / recentResolved.length : 0,
+      allTime: resolved.length > 0 ? correct / resolved.length : 0,
+    },
   }
 }

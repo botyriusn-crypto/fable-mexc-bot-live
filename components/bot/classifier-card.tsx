@@ -46,6 +46,42 @@ export function ClassifierCard({ state }: { state: any }) {
           </div>
         </div>
 
+        {s?.confidenceBuckets && (
+          <div className="rounded-md border border-yellow-400/40 bg-yellow-400/10 p-3">
+            <div className="text-[10px] text-yellow-200/70 mb-1">ACCURACY BY CONFIDENCE BUCKET</div>
+            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
+              <span>HIGH ≥70%</span>
+              <span>{s.confidenceBuckets.high.count > 0 ? `${(s.confidenceBuckets.high.accuracy * 100).toFixed(0)}% (${s.confidenceBuckets.high.correct}/${s.confidenceBuckets.high.count})` : "—"}</span>
+            </div>
+            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
+              <span>MID 55–70%</span>
+              <span>{s.confidenceBuckets.mid.count > 0 ? `${(s.confidenceBuckets.mid.accuracy * 100).toFixed(0)}% (${s.confidenceBuckets.mid.correct}/${s.confidenceBuckets.mid.count})` : "—"}</span>
+            </div>
+            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
+              <span>LOW &lt;55%</span>
+              <span>{s.confidenceBuckets.low.count > 0 ? `${(s.confidenceBuckets.low.accuracy * 100).toFixed(0)}% (${s.confidenceBuckets.low.correct}/${s.confidenceBuckets.low.count})` : "—"}</span>
+            </div>
+            <div className="text-[10px] text-yellow-200/70 mt-2 mb-1">SIDE SPLITS</div>
+            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
+              <span className="text-success">LONG</span>
+              <span>{s.sideSplits.long.count > 0 ? `${(s.sideSplits.long.accuracy * 100).toFixed(0)}% (${s.sideSplits.long.correct}/${s.sideSplits.long.count})` : "—"}</span>
+            </div>
+            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
+              <span className="text-danger">SHORT</span>
+              <span>{s.sideSplits.short.count > 0 ? `${(s.sideSplits.short.accuracy * 100).toFixed(0)}% (${s.sideSplits.short.correct}/${s.sideSplits.short.count})` : "—"}</span>
+            </div>
+            <div className="text-[10px] text-yellow-200/70 mt-2 mb-1">REGIME DECAY CHECK</div>
+            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
+              <span>LAST 50 RESOLVED</span>
+              <span>{s.rollingAccuracy.last50 > 0 ? `${(s.rollingAccuracy.last50 * 100).toFixed(0)}%` : "—"}</span>
+            </div>
+            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
+              <span>ALL-TIME</span>
+              <span>{(s.rollingAccuracy.allTime * 100).toFixed(0)}%</span>
+            </div>
+          </div>
+        )}
+
         {top && (
           <div className="rounded-md border border-yellow-400/40 bg-yellow-400/10 p-3">
             <div className="text-[10px] text-yellow-200/70 mb-1">STRONGEST CURRENT READ</div>
