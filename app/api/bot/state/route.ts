@@ -49,7 +49,7 @@ export async function GET(request: Request) {
     const liveFlag = isLive ? true : false
     const allTrades = await db.select().from(trades)
       .where(eq(trades.live, liveFlag))
-      .orderBy(desc(trades.createdAt))
+      .orderBy(desc(trades.closedAt))
     
     const totalPnl = allTrades.reduce((sum, t) => sum + Number(t.pnl || 0), 0)
     const wins = allTrades.filter(t => Number(t.pnl || 0) > 0).length
