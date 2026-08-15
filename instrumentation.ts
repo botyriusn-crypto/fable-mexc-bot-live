@@ -52,6 +52,20 @@ export async function register() {
           console.error("[Risk Check] Scheduled check failed:", e)
         }
       }, 20 * 1000)
+
+      // Portfolio rebalance (volatility-inverse + correlation-aware budget
+      // allocation across enabled grid pairs) every 5 hours. Dampened (max
+      // +/-3pp change per pair per run) and circuit-breaker protected (skips
+      // applying if too much candle data failed to fetch this cycle) — see
+      // lib/portfolio-sizing.ts for the full logic.
+      const { autoRebalance } = await import("./lib/portfolio-sizing")
+      setInterval(async () => {
+        try {
+          await autoRebalance()
+        } catch (e) {
+          console.error("[Rebalance] Scheduled auto-rebalance failed:", e)
+        }
+      }, 5 * 60 * 60 * 1000)
     } catch (err) {
       console.error("[Startup] Failed to initialize WebSockets:", err)
       // Fallback to BTC/SOL if DB isn't ready yet

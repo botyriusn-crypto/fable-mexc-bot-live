@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm"
 import { getAccountAssets } from "./mexc/private"
 import { fetchKlines } from "./mexc/public"
 import type { Candle } from "./mexc/public"
+import { log } from "./grid"
 
 // ---- Portfolio-level sizing: volatility-inverse + correlation-aware ----
 // Replaces flat-equal-split budgetPct across enabled pairs with weights that
@@ -28,6 +29,16 @@ const CORRELATION_PENALTY_FACTOR = 1.5
 // / absurdly huge weight — it still gets favored, just not infinitely.
 const MIN_VOLATILITY = 0.001 // 0.1% — a very quiet pair
 
+// Dampening: no pair's budget can move more than this many percentage
+// points in a single rebalance run, regardless of what the raw math says.
+// Prevents one noisy volatility window from causing a large sudden swing.
+const MAX_DELTA_PCT_PER_RUN = 3
+
+// Circuit breaker: if candle fetches fail for more than this fraction of
+// enabled pairs, the run computes (for visibility) but does NOT auto-apply —
+// we don't want to reallocate real budget based on degraded data.
+const CIRCUIT_BREAKER_FAILURE_RATIO = 0.2
+
 export interface PairRisk {
   symbol: string
   timeframe: string
@@ -35,10 +46,18 @@ export interface PairRisk {
   avgCorrelation: number   // average |correlation| to every other enabled pair
   rawWeight: number        // 1 / volatility
   adjustedWeight: number   // rawWeight / (1 + avgCorrelation * penalty)
-  proposedBudgetPct: number
+  proposedBudgetPct: number // after dampening + min/max clamp
   currentBudgetPct: number
   viable: boolean          // false if proposed allocation can't clear MIN_NOTIONAL
   reason?: string
+  dataOk: boolean          // false if this pair's candle fetch failed
+}
+
+export interface RebalanceResult {
+  risks: PairRisk[]
+  failedSymbols: string[]
+  failureRatio: number
+  dataQualityOk: boolean   // false if failureRatio exceeds the circuit breaker threshold
 }
 
 function pctReturns(candles: Candle[]): number[] {
@@ -81,14 +100,18 @@ function correlation(a: number[], b: number[]): number {
   return cov / Math.sqrt(varA * varB)
 }
 
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v))
+}
+
 /**
- * Compute volatility-inverse, correlation-shrunk budget weights for all
- * currently enabled grid pairs. Does NOT write to the database — call
- * applyRebalance() separately once you've reviewed the proposal.
+ * Compute volatility-inverse, correlation-shrunk, dampened budget weights
+ * for all currently enabled grid pairs. Does NOT write to the database —
+ * call applyRebalance() or autoRebalance() separately.
  */
-export async function computePortfolioRebalance(timeframe = "Min15"): Promise<PairRisk[]> {
+export async function computePortfolioRebalance(timeframe = "Min15"): Promise<RebalanceResult> {
   const enabled = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
-  if (enabled.length === 0) return []
+  if (enabled.length === 0) return { risks: [], failedSymbols: [], failureRatio: 0, dataQualityOk: true }
 
   let availableBalance = 0
   try {
@@ -100,8 +123,8 @@ export async function computePortfolioRebalance(timeframe = "Min15"): Promise<Pa
   }
 
   // Fetch candles for every enabled pair in parallel. A single symbol's
-  // fetch failing shouldn't take down the whole rebalance — fall back to a
-  // penalized (higher, not lower) assumed volatility for it instead.
+  // fetch failing shouldn't take down the whole rebalance — it falls back to
+  // a penalized (higher, not lower) assumed volatility and gets flagged.
   const candleResults = await Promise.all(
     enabled.map(async (gc) => {
       try {
@@ -113,9 +136,15 @@ export async function computePortfolioRebalance(timeframe = "Min15"): Promise<Pa
     })
   )
 
+  const failedSymbols = candleResults.filter((r) => !r.ok).map((r) => r.symbol)
+  const failureRatio = failedSymbols.length / enabled.length
+  const dataQualityOk = failureRatio <= CIRCUIT_BREAKER_FAILURE_RATIO
+
   const returnsBySymbol = new Map<string, number[]>()
+  const okBySymbol = new Map<string, boolean>()
   for (const r of candleResults) {
     returnsBySymbol.set(r.symbol, r.ok ? pctReturns(r.candles) : [])
+    okBySymbol.set(r.symbol, r.ok)
   }
 
   const volBySymbol = new Map<string, number>()
@@ -152,20 +181,26 @@ export async function computePortfolioRebalance(timeframe = "Min15"): Promise<Pa
       proposedBudgetPct: 0, // filled in after normalization below
       currentBudgetPct: gc.budgetPct,
       viable: true,
+      dataOk: okBySymbol.get(gc.symbol) ?? false,
     }
   })
 
   const totalAdjustedWeight = risks.reduce((a, r) => a + r.adjustedWeight, 0)
 
   for (const r of risks) {
-    let pct = totalAdjustedWeight > 0
+    let target = totalAdjustedWeight > 0
       ? (r.adjustedWeight / totalAdjustedWeight) * totalBudgetCap
       : totalBudgetCap / risks.length
-    pct = Math.max(MIN_BUDGET_PCT, Math.min(MAX_BUDGET_PCT, pct))
-    r.proposedBudgetPct = Math.round(pct * 10) / 10
 
-    // Viability check: at this pair's current leverage/levels, can the new
-    // budget clear MIN_NOTIONAL per order? Uses live config, not assumptions.
+    // Dampen: clamp the move to +/- MAX_DELTA_PCT_PER_RUN from where it is now.
+    const dampedLo = r.currentBudgetPct - MAX_DELTA_PCT_PER_RUN
+    const dampedHi = r.currentBudgetPct + MAX_DELTA_PCT_PER_RUN
+    target = clamp(target, dampedLo, dampedHi)
+
+    // Then apply the absolute floor/ceiling.
+    target = clamp(target, MIN_BUDGET_PCT, MAX_BUDGET_PCT)
+    r.proposedBudgetPct = Math.round(target * 10) / 10
+
     const gc = enabled.find((g) => g.symbol === r.symbol)!
     const budget = (availableBalance * r.proposedBudgetPct) / 100
     const sidesPerLevel = gc.direction === "neutral" ? 2 : 1
@@ -177,13 +212,12 @@ export async function computePortfolioRebalance(timeframe = "Min15"): Promise<Pa
     }
   }
 
-  return risks
+  return { risks, failedSymbols, failureRatio, dataQualityOk }
 }
 
 /**
- * Actually writes the proposed budgetPct to every enabled pair. Call
- * computePortfolioRebalance() first and review the output — this does not
- * re-derive anything, it applies exactly what you pass it.
+ * Actually writes the proposed budgetPct to every viable, data-ok pair.
+ * Call computePortfolioRebalance() first and review the output.
  */
 export async function applyRebalance(risks: PairRisk[]): Promise<{ applied: number; skipped: string[] }> {
   let applied = 0
@@ -199,4 +233,27 @@ export async function applyRebalance(risks: PairRisk[]): Promise<{ applied: numb
     applied++
   }
   return { applied, skipped }
+}
+
+/**
+ * Scheduled entry point — called every 5 hours from instrumentation.ts.
+ * Computes the rebalance, and only applies it if the circuit breaker is
+ * satisfied (not too much missing candle data). Always logs the outcome to
+ * bot_logs so it's visible in the dashboard, whether it applied or skipped.
+ */
+export async function autoRebalance(timeframe = "Min15"): Promise<void> {
+  const result = await computePortfolioRebalance(timeframe)
+  if (result.risks.length === 0) {
+    return // nothing enabled, nothing to do
+  }
+  if (!result.dataQualityOk) {
+    await log("error", `[Rebalance] Skipped auto-apply: ${(result.failureRatio * 100).toFixed(0)}% of pairs had candle fetch failures (${result.failedSymbols.join(", ")}). Will retry next cycle.`)
+    return
+  }
+  const applyResult = await applyRebalance(result.risks)
+  const changes = result.risks
+    .filter((r) => r.viable && Math.abs(r.proposedBudgetPct - r.currentBudgetPct) >= 0.1)
+    .map((r) => `${r.symbol}: ${r.currentBudgetPct}%->${r.proposedBudgetPct}%`)
+    .join(", ")
+  await log("info", `[Rebalance] Auto-applied to ${applyResult.applied} pair(s), skipped ${applyResult.skipped.length} (${applyResult.skipped.join(", ") || "none"}) for insufficient notional. Changes: ${changes || "none significant"}`)
 }
