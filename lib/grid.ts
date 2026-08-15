@@ -24,6 +24,10 @@ const COOLDOWN_MS = 60000; // 60 seconds between setups
 
 
 const TAKER_FEE = 0.0002
+// Confirmed 0% maker fee tier on MEXC futures (Aug 2026), for resting/post-only
+// fills only. Market-order fills — stop-loss, max-hold, recenter closes —
+// always cross the book and pay TAKER_FEE regardless of maker mode.
+const MAKER_FEE = 0.0000
 // Maker mode risk controls: protect held inventory regardless of pause state.
 const MAKER_STOP_LOSS_PCT = 0.04   // close at market if price moves 4% against entry
 const MAKER_MAX_HOLD_MINUTES = 240 // force-close after 4 hours regardless of price
@@ -294,7 +298,12 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
 
   const center = snap.price
   const configuredHalf = snap.atr * gc.rangeAtrMult
-  const breakeven = center * 2 * TAKER_FEE
+  // Spacing must cover the worst-case fee mix: entry can be maker (post-only,
+  // 0% today) but an adverse exit (stop-loss/max-hold) always crosses as a
+  // taker market order. Using real entry-fee basis instead of assuming taker
+  // on both legs, which was needlessly widening every maker pair's grid.
+  const entryFeeRate = isMakerSymbol(gc) ? MAKER_FEE : TAKER_FEE
+  const breakeven = center * (entryFeeRate + TAKER_FEE)
   const feeBasedMin = breakeven * gc.feeMarginMult
   const pctBasedMin = center * 0.005 // 0.5% floor — prevents zero-movement TP at high price magnitudes
   const minSpacing = Math.max(feeBasedMin, pctBasedMin)
@@ -673,8 +682,9 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
   const buyPrice = order.buyPrice ?? order.price
   const sizeUsdt = (buyPrice * order.quantity) / order.leverage
   const grossPnl = (exitPrice - buyPrice) * order.quantity
-  const buyFee = buyPrice * order.quantity * TAKER_FEE
-  const sellFee = exitPrice * order.quantity * TAKER_FEE
+  // Both legs were resting post-only (maker) fills in this settlement path.
+  const buyFee = buyPrice * order.quantity * MAKER_FEE
+  const sellFee = exitPrice * order.quantity * MAKER_FEE
   const fees = buyFee + sellFee
   const netPnl = grossPnl - fees
 
@@ -747,7 +757,9 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
   const buyPrice = order.buyPrice ?? order.price
   const sizeUsdt = (buyPrice * order.quantity) / order.leverage
   const grossPnl = (exitPrice - buyPrice) * order.quantity
-  const buyFee = buyPrice * order.quantity * TAKER_FEE
+  // Entry was a resting post-only (maker) buy fill; this exit is a forced
+  // market order (stop-loss/max-hold), which always crosses as taker.
+  const buyFee = buyPrice * order.quantity * MAKER_FEE
   const sellFee = exitPrice * order.quantity * TAKER_FEE
   const fees = buyFee + sellFee
   const netPnl = grossPnl - fees
@@ -797,7 +809,9 @@ return
 const entryPrice = order.buyPrice ?? order.price
 const sizeUsdt = (entryPrice * order.quantity) / order.leverage
 const grossPnl = (entryPrice - exitPrice) * order.quantity
-const fees = (entryPrice + exitPrice) * order.quantity * TAKER_FEE
+// Entry was a resting post-only (maker) sell fill (short open); this exit is
+// a forced market order (stop-loss/max-hold), which always crosses as taker.
+const fees = (entryPrice * MAKER_FEE + exitPrice * TAKER_FEE) * order.quantity
 const netPnl = grossPnl - fees
 const [trade] = await db
 .insert(trades)
