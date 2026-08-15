@@ -340,8 +340,7 @@ setComboBusy(false)
           <Badge
             variant="outline"
             className={`shrink-0 cursor-pointer ${
-              grid.direction === "short" || grid.direction === "auto-short" ? "border-danger/40 bg-danger/15 text-danger" 
-              : grid.direction === "auto-long" ? "border-success/40 bg-success/15 text-success"
+              grid.direction === "short" ? "border-danger/40 bg-danger/15 text-danger"
               : grid.direction === "auto" ? "border-chart-3/40 bg-chart-3/15 text-chart-3"
 : grid.direction === "neutral" ? "border-chart-3/40 bg-chart-3/15 text-chart-3"
 : "border-success/40 bg-success/15 text-success"
@@ -351,8 +350,6 @@ setComboBusy(false)
           >
             {directionBusy ? "…" : 
               grid.direction === "short" ? "SHORT" 
-              : grid.direction === "auto-short" ? "AUTO (SHORT)" 
-              : grid.direction === "auto-long" ? "AUTO (LONG)" 
               : grid.direction === "auto" ? "AUTO" 
               : grid.direction === "neutral" ? "NEUTRAL" : "LONG"}
           </Badge>
@@ -496,7 +493,7 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
           leverage: pick.leverage,
           budgetPct: pick.budgetPct,
           makerMode: true,
-          direction: "auto"
+          direction: "neutral"
         })
       })
 
