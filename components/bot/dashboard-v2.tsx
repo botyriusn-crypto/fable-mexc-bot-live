@@ -175,8 +175,8 @@ export function DashboardV2() {
   const totalPnl = liveStats?.totalPnl ?? 0
   const winRate = liveStats?.winRate ?? 0
   const totalTrades = liveStats?.totalTrades ?? 0
-  const todayPnl = today?.pnl ?? 0
-  const todayTrades = today?.trades ?? 0
+  const todayPnl = todayStats?.pnl ?? 0
+  const todayTrades = todayStats?.trades ?? 0
 
   const grids = (state as any).gridConfigs || []
   const totalRealized = totalPnl
