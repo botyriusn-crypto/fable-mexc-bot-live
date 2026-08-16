@@ -863,7 +863,7 @@ export async function checkAllHeldPositionsRisk(): Promise<void> {
     if (o.side === "sell") {
       // Held long: loses when price falls below entry.
       const adverseMove = (currentPrice - entryPrice) / entryPrice
-      if (adverseMove <= -MAKER_STOP_LOSS_PCT) {
+      if (adverseMove <= -effectiveMakerStopPct(o.leverage)) {
         await log("info", `Grid ${o.symbol} (maker, fast-check): stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% below entry ${entryPrice.toFixed(6)}`)
         await settleMakerStopLoss(o, currentPrice, cfg, "stop-loss")
       } else if (heldMinutes >= MAKER_MAX_HOLD_MINUTES) {
@@ -873,7 +873,7 @@ export async function checkAllHeldPositionsRisk(): Promise<void> {
     } else if (o.side === "buy") {
       // Held short: loses when price rises above entry.
       const adverseMove = (currentPrice - entryPrice) / entryPrice
-      if (adverseMove >= MAKER_STOP_LOSS_PCT) {
+      if (adverseMove >= effectiveMakerStopPct(o.leverage)) {
         await log("info", `Grid ${o.symbol} (maker, fast-check): short stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% above entry ${entryPrice.toFixed(6)}`)
         await settleMakerShortStopLoss(o, currentPrice, cfg, "stop-loss")
       } else if (heldMinutes >= MAKER_MAX_HOLD_MINUTES) {
@@ -1053,7 +1053,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
         const buyPrice = o.buyPrice as number
         const adverseMove = (currentPrice - buyPrice) / buyPrice
         const heldMinutes = o.createdAt ? (Date.now() - new Date(o.createdAt as any).getTime()) / 60000 : 0
-        if (adverseMove <= -MAKER_STOP_LOSS_PCT) {
+        if (adverseMove <= -effectiveMakerStopPct(o.leverage)) {
           await log("info", `Grid ${o.symbol} (maker): stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% below entry ${buyPrice.toFixed(6)}`)
           await settleMakerStopLoss(o, currentPrice, cfg, "stop-loss")
         } else if (heldMinutes >= MAKER_MAX_HOLD_MINUTES) {
