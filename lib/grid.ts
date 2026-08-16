@@ -9,7 +9,7 @@ import { getExchangeClient, type ExchangeClient } from "./exchange"
 import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderStatus, cancelOrders, getAccountAssets } from "./mexc/private"
 import type { Candle } from "./mexc/public"
 import { fetchTicker } from "./mexc/public"
-import { roundMexcQuantity, roundMexcPrice, getMexcSpec, getMexcSpecAsync } from "./mexc/precision"
+import { roundMexcQuantity, roundMexcPrice, getMexcSpec, getMexcSpecAsync, getMexcFeeRates } from "./mexc/precision"
 import { livePrices } from "./mexc/ws"
 
 
@@ -193,9 +193,10 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
     if (adverse >= effectiveGridStopPct(o.leverage)) {
       if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 4, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
       const grossPnl = (price - o.buyPrice!) * o.quantity
-      const fees = (o.buyPrice! + price) * o.quantity * TAKER_FEE
+      const { takerFeeRate: rtf1 } = getMexcFeeRates(o.symbol)
+      const fees = (o.buyPrice! + price) * o.quantity * rtf1
       if (cfg.mode === "paper") {
-        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
+        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * rtf1)}` }).where(eq(botConfig.id, 1))
       }
       const claimedLongStop = await db.update(gridOrders).set({ status: "filled" }).where(and(eq(gridOrders.id, o.id), eq(gridOrders.status, "pending"))).returning({ id: gridOrders.id })
       if (claimedLongStop.length === 0) return false
@@ -211,9 +212,10 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
     if (adverse >= effectiveGridStopPct(o.leverage)) {
       if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
       const grossPnl = (o.buyPrice! - price) * o.quantity
-      const fees = (o.buyPrice! + price) * o.quantity * TAKER_FEE
+      const { takerFeeRate: rtf2 } = getMexcFeeRates(o.symbol)
+      const fees = (o.buyPrice! + price) * o.quantity * rtf2
       if (cfg.mode === "paper") {
-        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
+        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * rtf2)}` }).where(eq(botConfig.id, 1))
       }
       await cancelOtherPendingOrders(active, o.id)
       await db.update(gridOrders).set({ status: "filled" }).where(eq(gridOrders.id, o.id))
@@ -302,8 +304,9 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   // 0% today) but an adverse exit (stop-loss/max-hold) always crosses as a
   // taker market order. Using real entry-fee basis instead of assuming taker
   // on both legs, which was needlessly widening every maker pair's grid.
-  const entryFeeRate = isMakerSymbol(gc) ? MAKER_FEE : TAKER_FEE
-  const breakeven = center * (entryFeeRate + TAKER_FEE)
+  const { makerFeeRate: realMakerFeeRate, takerFeeRate: realTakerFeeRate } = getMexcFeeRates(gc.symbol)
+  const entryFeeRate = isMakerSymbol(gc) ? realMakerFeeRate : realTakerFeeRate
+  const breakeven = center * (entryFeeRate + realTakerFeeRate)
   const feeBasedMin = breakeven * gc.feeMarginMult
   const pctBasedMin = center * 0.005 // 0.5% floor — prevents zero-movement TP at high price magnitudes
   const minSpacing = Math.max(feeBasedMin, pctBasedMin)
@@ -611,8 +614,9 @@ async function settleGridSell(
   const buyPrice = order.buyPrice ?? order.price
   const sizeUsdt = (buyPrice * order.quantity) / order.leverage
   const grossPnl = (exitPrice - buyPrice) * order.quantity
-  const buyFee = buyPrice * order.quantity * TAKER_FEE
-  const sellFee = exitPrice * order.quantity * TAKER_FEE
+  const { takerFeeRate: sgsRate } = getMexcFeeRates(order.symbol)
+  const buyFee = buyPrice * order.quantity * sgsRate
+  const sellFee = exitPrice * order.quantity * sgsRate
   const fees = buyFee + sellFee
   const netPnl = grossPnl - fees
 
@@ -683,8 +687,9 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
   const sizeUsdt = (buyPrice * order.quantity) / order.leverage
   const grossPnl = (exitPrice - buyPrice) * order.quantity
   // Both legs were resting post-only (maker) fills in this settlement path.
-  const buyFee = buyPrice * order.quantity * MAKER_FEE
-  const sellFee = exitPrice * order.quantity * MAKER_FEE
+  const { makerFeeRate: smsRate } = getMexcFeeRates(order.symbol)
+  const buyFee = buyPrice * order.quantity * smsRate
+  const sellFee = exitPrice * order.quantity * smsRate
   const fees = buyFee + sellFee
   const netPnl = grossPnl - fees
 
@@ -759,8 +764,9 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
   const grossPnl = (exitPrice - buyPrice) * order.quantity
   // Entry was a resting post-only (maker) buy fill; this exit is a forced
   // market order (stop-loss/max-hold), which always crosses as taker.
-  const buyFee = buyPrice * order.quantity * MAKER_FEE
-  const sellFee = exitPrice * order.quantity * TAKER_FEE
+  const { makerFeeRate: mslMaker, takerFeeRate: mslTaker } = getMexcFeeRates(order.symbol)
+  const buyFee = buyPrice * order.quantity * mslMaker
+  const sellFee = exitPrice * order.quantity * mslTaker
   const fees = buyFee + sellFee
   const netPnl = grossPnl - fees
 
@@ -811,7 +817,8 @@ const sizeUsdt = (entryPrice * order.quantity) / order.leverage
 const grossPnl = (entryPrice - exitPrice) * order.quantity
 // Entry was a resting post-only (maker) sell fill (short open); this exit is
 // a forced market order (stop-loss/max-hold), which always crosses as taker.
-const fees = (entryPrice * MAKER_FEE + exitPrice * TAKER_FEE) * order.quantity
+const { makerFeeRate: mssMaker, takerFeeRate: mssTaker } = getMexcFeeRates(order.symbol)
+const fees = (entryPrice * mssMaker + exitPrice * mssTaker) * order.quantity
 const netPnl = grossPnl - fees
 const [trade] = await db
 .insert(trades)
@@ -823,7 +830,7 @@ exitReason: reason, strategy: "grid", live: cfg.mode === "live",
 .returning({ id: trades.id })
 await db.update(gridOrders).set({ status: "filled", exchangeStatus: "cancelled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, order.id))
 if (cfg.mode === "paper") {
-  await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (exitPrice * order.quantity * TAKER_FEE)}` }).where(eq(botConfig.id, 1))
+  await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (exitPrice * order.quantity * getMexcFeeRates(order.symbol).takerFeeRate)}` }).where(eq(botConfig.id, 1))
 }
 if (trade && order.entryFeatures) {
 try {
@@ -989,7 +996,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
         .update(gridOrders)
         .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
         .where(eq(gridOrders.id, o.id))
-      const buyFee = fillPrice * o.quantity * TAKER_FEE
+      const buyFee = fillPrice * o.quantity * getMexcFeeRates(o.symbol).makerFeeRate
       await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance}` /* MARGIN DEDUCTION REMOVED FOR PAPER TRADING */ }).where(eq(botConfig.id, 1))
 
       const sellPrice = fillPrice + (snap.atr * gc.rangeAtrMult)
@@ -1239,7 +1246,7 @@ if (o.buyPrice != null && (gc as any).direction === "neutral") {
   
   const entry = o.buyPrice
   const grossPnl = (entry - o.price) * o.quantity
-  const fees = (entry + o.price) * o.quantity * TAKER_FEE
+  const fees = (entry + o.price) * o.quantity * getMexcFeeRates(o.symbol).makerFeeRate
   const netPnl = grossPnl - fees
   await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
 await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
@@ -1248,18 +1255,8 @@ await log("trade", `Grid ${o.symbol} COMBO short closed @ ${o.price.toFixed(4)} 
 await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: entry, quantity: o.quantity, status: "pending" })
 continue
 }
-if (o.buyPrice != null && gc.direction === "neutral") {
-const entry = o.buyPrice
-const grossPnl = (entry - o.price) * o.quantity
-const fees = (entry + o.price) * o.quantity * TAKER_FEE
-const netPnl = grossPnl - fees
-await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
-await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: (entry * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
-await log("trade", `Grid ${o.symbol} COMBO short closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
-await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: entry, quantity: o.quantity, status: "pending" })
-continue
-}
+// (dead/unreachable duplicate block removed -- identical condition to the
+// block above, which already `continue`s on match, so this could never run)
 if (cfg.mode === "live") {
         try {
           if (exchange) { const r = roundForMexc(o.symbol, o.price, o.quantity); await log("info", `LIVE buy: ${o.symbol} price=${r.price} qty=${r.quantity} lev=${o.leverage}`); await exchange.placeMarketOrder({ symbol: o.symbol, side: 1 as any, volume: r.quantity, leverage: o.leverage }) }
@@ -1270,7 +1267,7 @@ if (cfg.mode === "live") {
       }
 
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      const buyFee = o.price * o.quantity * TAKER_FEE
+      const buyFee = o.price * o.quantity * getMexcFeeRates(o.symbol).takerFeeRate
       await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance}` /* MARGIN DEDUCTION REMOVED FOR PAPER TRADING */ }).where(eq(botConfig.id, 1))
 
       // Check the DATABASE for existing sells to prevent duplicates
@@ -1334,7 +1331,7 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
       const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
       const sellPrice = exitPrice + (snap.atr * gc.rangeAtrMult)
       const grossPnl = sellPrice - exitPrice
-      const fees = (sellPrice + exitPrice) * o.quantity * TAKER_FEE
+      const fees = (sellPrice + exitPrice) * o.quantity * getMexcFeeRates(o.symbol).makerFeeRate
       const netPnl = grossPnl - fees
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
       if (cfg.mode === "paper") {
@@ -1404,7 +1401,7 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
         const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
         const sellPrice = exitPrice + (snap.atr * gc.rangeAtrMult)
         const grossPnl = sellPrice - exitPrice
-        const fees = (sellPrice + exitPrice) * o.quantity * TAKER_FEE
+        const fees = (sellPrice + exitPrice) * o.quantity * getMexcFeeRates(o.symbol).makerFeeRate
         const netPnl = grossPnl - fees
         await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
         if (cfg.mode === "paper") {
@@ -1429,7 +1426,11 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
         try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (err) { await log("error", `Short close failed: ${dbErr(err)}`) }
       }
       const grossPnl = sellPrice - o.price
-      const fees = (sellPrice + o.price) * o.quantity * TAKER_FEE
+      const { makerFeeRate: mixedMaker, takerFeeRate: mixedTaker } = getMexcFeeRates(o.symbol)
+      // Mixed fill: o.price leg closed via a real market order (taker),
+      // sellPrice leg is the newly re-armed resting order (maker, not
+      // yet filled -- charged at maker rate as an estimate).
+      const fees = (sellPrice * mixedMaker + o.price * mixedTaker) * o.quantity
       const netPnl = grossPnl - fees
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
       if (cfg.mode === "paper") {
