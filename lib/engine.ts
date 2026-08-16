@@ -22,6 +22,7 @@ import { loadModel, trainOnTrade, gateEntry } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs, type GridConfig } from "./grid"
 import { detectFlashFade, executeFlashFade } from "./flash-fade"
+import { maybeRunGridAiAdvisorAuto } from "./ai-grid-advisor"
 import { analyzeTradesForMarket, applyRecommendations } from "./ai-advisor"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager } from './mexc/ws';
@@ -525,6 +526,10 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       const mark = marks.get(symbol)
       if (mark != null) totalUnrealized += await gridUnrealizedPnl(mark, symbol, timeframe)
     }
+
+    try {
+      await maybeRunGridAiAdvisorAuto()
+    } catch (err) { /* best-effort */ }
 
     // ── AI Advisor: run analysis on schedule ──
     if (cfg.aiAdvisorEnabled && cfg.aiAnalysisSchedule !== "manual") {
