@@ -4,7 +4,7 @@ import {
   botConfig, gridConfigs, positions, trades, equitySnapshots,
   botLogs, mlModel, gridOrders, classifierDecisions,
 } from "@/lib/db/schema"
-import { eq, desc, inArray } from "drizzle-orm"
+import { eq, desc, inArray, sql, and } from "drizzle-orm"
 import { fetchTicker, fetchKlines } from "@/lib/mexc/public"
 import { getAccountAssets } from "@/lib/mexc/private"
 import { ema, computeSnapshot } from "@/lib/indicators"
@@ -50,7 +50,7 @@ export async function GET() {
     shadowStats = { totalEvaluations: 0, resolvedCount: 0, correctCount: 0, accuracy: 0, topCandidate: null }
   }
   try {
-    const [cfgRows, openPosRows, recentTrades, equity, logs, modelRows, activeGridOrders, decisions, gridConfigRows, lifetimeTradesRaw] = await Promise.all([
+    const [cfgRows, openPosRows, recentTrades, equity, logs, modelRows, activeGridOrders, decisions, gridConfigRows, lifetimeTradesRaw, gridRealizedRows] = await Promise.all([
       db.select().from(botConfig).where(eq(botConfig.id, 1)),
       db.select().from(positions).where(eq(positions.status, "open")),
       db.select().from(trades).orderBy(desc(trades.closedAt)).limit(50),
@@ -61,7 +61,24 @@ export async function GET() {
       db.select().from(classifierDecisions).orderBy(desc(classifierDecisions.createdAt)).limit(100),
       db.select().from(gridConfigs).orderBy(gridConfigs.symbol),
       db.select({ pnl: trades.pnl, live: trades.live }).from(trades),
+      // True all-time realized PnL per symbol, computed in the DB — not
+      // filtered from a capped "recent" list. The old approach filtered a
+      // shared, account-wide LIMIT 50 trades query down by symbol, which
+      // silently zeroed out every lower-frequency pair once a handful of
+      // high-frequency pairs filled all 50 slots.
+      db.select({
+        symbol: trades.symbol,
+        live: trades.live,
+        totalPnl: sql<number>`COALESCE(SUM(${trades.pnl}), 0)`,
+      }).from(trades).where(eq(trades.strategy, "grid")).groupBy(trades.symbol, trades.live),
     ])
+
+    // Map keyed "symbol|isLive" -> true all-time realized PnL for that
+    // symbol, computed by the DB (see gridRealizedRows query above).
+    const gridRealizedMap = new Map<string, number>()
+    for (const r of gridRealizedRows) {
+      gridRealizedMap.set(`${r.symbol}|${r.live}`, Number(r.totalPnl) || 0)
+    }
 
     // True all-time stats for LIVE trades only (paper/backtest excluded).
     const liveOnly = lifetimeTradesRaw.filter((t) => t.live)
@@ -157,7 +174,7 @@ export async function GET() {
         }
       }
     }
-    const gridRealized = recentTrades.filter(t => t.strategy === "grid" && t.symbol === cfg.symbol).reduce((t, trade) => t + trade.pnl, 0)
+    const gridRealized = gridRealizedMap.get(`${cfg.symbol}|${cfg.mode === "live"}`) ?? 0
 
     // Multi-pair grid configs with live state
     const gridConfigsState = await Promise.all(gridConfigRows.map(async (gc) => {
@@ -174,7 +191,7 @@ export async function GET() {
           unrealized += (o.buyPrice - mark) * o.quantity
         }
       }
-      const realized = recentTrades.filter(t => t.strategy === "grid" && t.symbol === gc.symbol && (cfg.mode === "live" ? (t.live === true) : (t.live !== true))).reduce((t, trade) => t + trade.pnl, 0)
+      const realized = gridRealizedMap.get(`${gc.symbol}|${cfg.mode === "live"}`) ?? 0
       return {
         symbol: gc.symbol,
         timeframe: gc.timeframe,
