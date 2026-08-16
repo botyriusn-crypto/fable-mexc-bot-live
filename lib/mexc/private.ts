@@ -145,6 +145,7 @@ export async function fetchOrderStatus(orderId: string): Promise<any | null> {
 export async function fetchOpenOrders(symbol: string): Promise<any[]> {
   try {
     const res: any = await privateRequest("GET", `/order/list/open_orders/${symbol}`)
+    console.log(`[fetchOpenOrders] ${symbol} raw response:`, JSON.stringify(res).slice(0, 500))
     const data = res?.data
     return Array.isArray(data) ? data : []
   } catch (err) {

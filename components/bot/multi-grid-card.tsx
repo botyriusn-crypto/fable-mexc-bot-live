@@ -539,16 +539,34 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
           </Button>
           <Button 
             onClick={async () => {
-              if (!window.confirm(`Cancel ALL live orders for ${grid.symbol} on MEXC (including orphans)?`)) return
-              const res = await fetch("/api/bot/clear-orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol: grid.symbol }) })
-              const data = await res.json().catch(() => ({}))
-              alert(data.success ? `✅ ${grid.symbol}: cancelled ${data.cancelledOnMexc} on MEXC, ${data.cancelledInDb} in DB` : "❌ " + (data.error || "failed"))
+              if (!window.confirm(`Cancel ALL live orders for ALL ${grids.length} pairs on MEXC (including orphans)?`)) return
+              let totalMexc = 0
+              let totalDb = 0
+              const failures: string[] = []
+              for (const g of grids) {
+                try {
+                  const res = await fetch("/api/bot/clear-orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol: g.symbol }) })
+                  const data = await res.json().catch(() => ({}))
+                  if (data.success) {
+                    totalMexc += data.cancelledOnMexc || 0
+                    totalDb += data.cancelledInDb || 0
+                  } else {
+                    failures.push(g.symbol)
+                  }
+                } catch {
+                  failures.push(g.symbol)
+                }
+                await new Promise(r => setTimeout(r, 250))
+              }
+              alert(failures.length === 0
+                ? `✅ Cancelled ${totalMexc} on MEXC, ${totalDb} in DB across ${grids.length} pairs`
+                : `⚠️ Cancelled ${totalMexc} on MEXC, ${totalDb} in DB. Failed for: ${failures.join(", ")}`)
               setTimeout(() => window.location.reload(), 500)
             }} 
             size="sm" 
             variant="outline" 
             className="text-xs h-7 px-3 transition-all hover:bg-danger/10 hover:border-danger/40"
-            title="Cancel ALL orders for this pair on MEXC, including orphans"
+            title="Cancel ALL orders for ALL pairs on MEXC, including orphans"
           >
             🧹 Cancel MEXC Orders
           </Button>
