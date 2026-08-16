@@ -16,6 +16,13 @@ import { livePrices } from "./mexc/ws"
 // Global cooldown to prevent duplicate setups
 const GRID_SETUP_COOLDOWN = new Map<string, number>(); // symbol -> timestamp
 const COOLDOWN_MS = 60000; // 60 seconds between setups
+// Separate, much longer backoff for a STRUCTURAL failure (budget cannot
+// clear minimum notional at current leverage/allocation) as opposed to a
+// transient one. Without this, a pair that mathematically cannot afford
+// even 1 order retries every 60s forever, wasting cycles and flooding
+// logs until the account balance or config changes.
+const BUDGET_TOO_SMALL_COOLDOWN = new Map<string, number>(); // symbol -> timestamp
+const BUDGET_TOO_SMALL_BACKOFF_MS = 30 * 60 * 1000; // 30 minutes
 
 // Grid trading engine: a ladder of buy levels below price with paired sell
 // targets one spacing above. Profits from oscillation inside a range.
@@ -237,6 +244,13 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
     return;
   }
   
+  const lastBudgetFail = BUDGET_TOO_SMALL_COOLDOWN.get(gc.symbol) || 0;
+  const timeSinceBudgetFail = Date.now() - lastBudgetFail;
+  if (timeSinceBudgetFail < BUDGET_TOO_SMALL_BACKOFF_MS) {
+    await log("info", `Grid ${gc.symbol}: Budget too small for current allocation, backing off - ${Math.floor((BUDGET_TOO_SMALL_BACKOFF_MS - timeSinceBudgetFail)/60000)}m remaining, skipping setup`);
+    return;
+  }
+  
   // Mark this setup as starting
   GRID_SETUP_COOLDOWN.set(gc.symbol, Date.now());
 
@@ -362,7 +376,8 @@ if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, 
   const effectiveLevelsPerSide = Math.max(0, Math.min(totalLevels, MAX_ORDERS, maxLevelsByBudget))
 
   if (effectiveLevelsPerSide < 1) {
-    await log("error", `Grid ${gc.symbol}: Budget ${budget.toFixed(2)} USDT too small for even 1 order per side at $${MIN_NOTIONAL} minimum notional. Need at least $${((MIN_NOTIONAL * sidesPerLevel) / gc.leverage).toFixed(2)} margin.`)
+    await log("error", `Grid ${gc.symbol}: Budget ${budget.toFixed(2)} USDT too small for even 1 order per side at $${MIN_NOTIONAL} minimum notional. Need at least $${((MIN_NOTIONAL * sidesPerLevel) / gc.leverage).toFixed(2)} margin. Backing off ${BUDGET_TOO_SMALL_BACKOFF_MS/60000}m.`)
+    BUDGET_TOO_SMALL_COOLDOWN.set(gc.symbol, Date.now())
     return
   }
   if (effectiveLevelsPerSide < totalLevels) {
