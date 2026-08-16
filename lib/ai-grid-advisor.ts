@@ -74,11 +74,17 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
       .slice(0, 100)
 
     try {
+      // Only re-add already-tracked pairs if they still pass the SAME
+      // safety filters as any new candidate — a symbol added before the
+      // denylist/volume-floor existed (e.g. SOXL_USDT) must not get a
+      // permanent bypass just because it's already in the table.
       const activePairs = await db.select({ symbol: gridConfigs.symbol }).from(gridConfigs)
       for (const pair of activePairs) {
+        if (LEVERAGED_ETF_DENYLIST.has(pair.symbol)) continue
+        if (pair.symbol.includes("STOCK") || pair.symbol.includes("3L") || pair.symbol.includes("3S")) continue
         if (!candidates.find((c: any) => c.symbol === pair.symbol)) {
           const ticker = (tickerJson.data as any[]).find((t: any) => t.symbol === pair.symbol)
-          if (ticker) candidates.push(ticker)
+          if (ticker && ticker.amount24 > MIN_VOLUME_24H) candidates.push(ticker)
         }
       }
     } catch (e) { console.error("Watchlist override error:", e) }
