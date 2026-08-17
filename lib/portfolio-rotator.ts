@@ -2,6 +2,7 @@ import { db } from "./db"
 import { gridConfigs, gridOrders, trades } from "./db/schema"
 import { eq, and, sql } from "drizzle-orm"
 import { log } from "./logger"
+import { recordGridOutcome } from "./ai-grid-advisor"
 
 const ROTATION_INTERVAL_MS = 4 * 60 * 60 * 1000 // 4 hours
 const MIN_AGE_HOURS = 6 // Don't kill grids younger than 6h
@@ -113,7 +114,11 @@ export async function checkAndRotate(exchange: any): Promise<void> {
       
       try {
         await log("trade", `🔄 Rotating: ${deadGrid.config.symbol} (${deadGrid.ageHours.toFixed(1)}h old, $${deadGrid.pnl} PnL) → ${candidate.symbol}`)
-        
+
+        // 1.1 Feedback loop: record this dead grid's outcome so the AI advisor
+        // won't re-pick a symbol that just lost money (48h cool-off).
+        recordGridOutcome(deadGrid.config.symbol, deadGrid.pnl)
+
         // Pause old grid
         await db.update(gridConfigs)
           .set({ enabled: false, paused: true })
