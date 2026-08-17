@@ -4,7 +4,7 @@ import { and, eq, isNull, sql } from "drizzle-orm"
 import { db } from "./db"
 import { classifierDecisions, gridConfigs } from "./db/schema"
 import { loadModelById, predict, trainShadowOnDecision, MODEL_IDS } from "./ml"
-import { recordOutcome, heuristicScore } from "./advisor"
+import { heuristicScore } from "./advisor"
 import { fetchTicker, fetchKlines } from "./mexc/public"
 import { ema, rsi, macdHistogram, atr, rateOfChange, adx, volumeSurge } from "./indicators"
 import type { FeatureVector } from "./indicators"
@@ -143,7 +143,6 @@ export async function runShadowCycle(): Promise<void> {
 
     const f = d.lorentzianFilters as any as FeatureVector
     if (f) {
-      await recordOutcome(f, d.candidateDirection, d.logisticConfidence, correct, ret).catch(() => {})
       const feat = { ...f, sideLong: d.candidateDirection === "long" ? 1 : 0 } as FeatureVector
       model = await trainShadowOnDecision(model, feat, d.candidateDirection as any, actual, ret, 0.02, d.id, MODEL_IDS.shadow)
     }

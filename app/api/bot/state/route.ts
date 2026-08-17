@@ -13,7 +13,7 @@ import { getGridConfigs, gridUnrealizedPnl } from "@/lib/grid"
 import { isRotationEnabled, getLastRotationTime } from "@/lib/portfolio-rotator"
 import { getShadowStats, runShadowCycle } from "@/lib/shadow-evaluator"
 import { getWatchdogReport } from "@/lib/watchdog"
-import { loadModel } from "@/lib/ml"
+import { getSniperStats } from "@/lib/sniper"
 import { evaluatePortfolioRisk, getRiskState } from "@/lib/risk-manager"
 
 interface MexcAsset {
@@ -43,8 +43,8 @@ export async function GET() {
     runShadowCycle().catch(() => {})
   }
   let shadowStats: any = null
-  let sniperModel: any = null
-  try { sniperModel = await loadModel() } catch { sniperModel = null }
+  let sniperStats: any = null
+  try { sniperStats = await getSniperStats() } catch { sniperStats = null }
   try {
     shadowStats = await getShadowStats()
   } catch {
@@ -230,7 +230,7 @@ export async function GET() {
       lastRotationTime: getLastRotationTime(),
       shadowStats,
       risk,
-      sniperModel,
+      sniperStats,
       watchdog: getWatchdogReport(),
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,
       markPrice, unrealizedPnl: totalGridUnrealized,
