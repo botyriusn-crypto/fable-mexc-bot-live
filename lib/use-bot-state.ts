@@ -97,7 +97,24 @@ export interface BotState {
       [key: string]: unknown
     } | null
   } | null
-  sniperModel?: unknown
+  sniperStats?: {
+    params: Record<string, number>
+    totalEvaluations: number
+    resolvedCount: number
+    correctCount: number
+    accuracy: number
+    bySignalType: { sweep: { count: number; correct: number; accuracy: number }; sigma: { count: number; correct: number; accuracy: number } }
+    byDirection: { long: { count: number; correct: number; accuracy: number }; short: { count: number; correct: number; accuracy: number } }
+    confidenceBuckets: { high: { count: number; correct: number; accuracy: number }; mid: { count: number; correct: number; accuracy: number }; low: { count: number; correct: number; accuracy: number } }
+    rollingAccuracy: { last50: number; allTime: number }
+    topCandidate: {
+      symbol: string
+      direction: string
+      confidence: number
+      createdAt: string
+      source: string
+    } | null
+  } | null
   watchdog?: unknown
   liveStats?: unknown
   todayStats?: unknown

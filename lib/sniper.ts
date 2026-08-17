@@ -1,9 +1,9 @@
 import type { Candle } from "./mexc/public"
 import type { IndicatorSnapshot } from "./indicators"
 import { db } from "./db"
-import { classifierDecisions } from "./db/schema"
+import { classifierDecisions, gridConfigs } from "./db/schema"
 import { and, eq, isNull, sql } from "drizzle-orm"
-import { fetchTicker } from "./mexc/public"
+import { fetchTicker, fetchKlines } from "./mexc/public"
 import { recordOutcome, type SniperFeatures } from "./advisor"
 
 export const SNIPER_LIVE = false // Stage 2: flip to true after observe baseline proves hit-rate
@@ -191,8 +191,19 @@ export async function getSniperStats() {
     .slice(0, 50)
   const recentCorrect = recent.filter(d => d.outcomeCorrectLogistic).length
 
+  const pending = rows.filter(d => !d.resolvedAt)
+  const topRow = pending[0] ?? rows[0] ?? null
+  const topCandidate = topRow ? {
+    symbol: topRow.symbol,
+    direction: topRow.candidateDirection,
+    confidence: topRow.logisticConfidence,
+    createdAt: topRow.createdAt,
+    source: "sniper",
+  } : null
+
   return {
     params: SNIPER_PARAMS,
+    topCandidate,
     totalEvaluations: rows.length,
     resolvedCount: resolved.length,
     correctCount: correct,
@@ -220,4 +231,43 @@ export async function getSniperStats() {
 // Stub to satisfy engine.ts import from Qwen Coder update
 export async function maybeScanExchange(...args: any[]): Promise<any> {
   return null;
+}
+
+// Sniper scan cycle — mirrors runShadowCycle: iterates enabled grid configs,
+// detects dislocations, records candidates, then resolves old decisions.
+export async function runSniperCycle(): Promise<void> {
+  const configs = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
+  const seen = new Set<string>()
+
+  for (const cfg of configs) {
+    const key = `${cfg.symbol}|${cfg.timeframe}`
+    if (seen.has(key)) continue
+    seen.add(key)
+
+    const tfSec = tfSeconds(cfg.timeframe)
+    const bucket = Math.floor(Date.now() / 1000 / tfSec)
+
+    const dup = await db.select({ id: classifierDecisions.id }).from(classifierDecisions).where(
+      and(
+        eq(classifierDecisions.strategy, "sniper"),
+        eq(classifierDecisions.symbol, cfg.symbol),
+        eq(classifierDecisions.timeframe, cfg.timeframe),
+        eq(classifierDecisions.candleTime, bucket),
+      )
+    )
+    if (dup.length > 0) continue
+
+    const [ticker, candles] = await Promise.all([
+      fetchTicker(cfg.symbol).catch(() => null),
+      fetchKlines(cfg.symbol, cfg.timeframe, 200).catch(() => null),
+    ])
+    if (!ticker?.lastPrice || !candles || candles.length < 60) continue
+
+    const sig = detectSniper(candles as Candle[], {} as IndicatorSnapshot, 0)
+    if (!sig.direction) continue
+
+    await recordSniperCandidate(cfg.symbol, cfg.timeframe, bucket, ticker.lastPrice, sig)
+  }
+
+  await resolveSniperDecisions()
 }
