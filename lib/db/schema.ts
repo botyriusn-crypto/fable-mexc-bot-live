@@ -119,6 +119,7 @@ export const equitySnapshots = pgTable("equity_snapshots", {
   balance: doublePrecision("balance").notNull(),
   equity: doublePrecision("equity").notNull(),
   unrealizedPnl: doublePrecision("unrealized_pnl").notNull().default(0),
+  live: boolean("live").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })
 
