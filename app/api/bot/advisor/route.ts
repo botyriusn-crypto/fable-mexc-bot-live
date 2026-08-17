@@ -2,8 +2,7 @@ import { NextResponse } from "next/server"
 import { and, eq, isNotNull, sql } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { classifierDecisions } from "@/lib/db/schema"
-import { getVariants, scoreVariant, recordOutcome } from "@/lib/advisor"
-import type { FeatureVector } from "@/lib/indicators"
+import { getVariants, scoreVariant, recordOutcome, type SniperFeatures } from "@/lib/advisor"
 
 export const dynamic = "force-dynamic"
 
@@ -28,9 +27,9 @@ export async function POST() {
   try {
     await db.execute(sql`UPDATE advisor_variants SET stats = '{"allowed":0,"correct":0,"sumReturn":0}'::jsonb`)
     const resolved = await db.select().from(classifierDecisions)
-      .where(and(eq(classifierDecisions.strategy, "shadow"), isNotNull(classifierDecisions.resolvedAt)))
+      .where(and(eq(classifierDecisions.strategy, "sniper"), isNotNull(classifierDecisions.resolvedAt)))
     for (const d of resolved) {
-      const f = (d.lorentzianFilters ?? null) as any as FeatureVector | null
+      const f = (d.lorentzianFilters ?? null) as any as SniperFeatures | null
       if (!f) continue
       await recordOutcome(f, d.candidateDirection, d.logisticConfidence, Boolean(d.outcomeCorrectLogistic), d.outcomeReturn ?? 0)
     }

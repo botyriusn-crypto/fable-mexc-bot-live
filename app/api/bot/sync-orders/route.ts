@@ -36,6 +36,7 @@ export async function POST() {
               side,
               price,
               quantity,
+              levelIndex: -1, // -1 marks an order imported from the exchange (not part of a computed grid ladder)
               status: "pending",
               mexcOrderId: orderId,
               exchangeStatus: "open",

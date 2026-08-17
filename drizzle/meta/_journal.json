@@ -8,6 +8,13 @@
       "when": 1785880389927,
       "tag": "0000_little_dreaming_celestial",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1786927056240,
+      "tag": "0001_quant_upgrades_columns",
+      "breakpoints": true
     }
   ]
 }

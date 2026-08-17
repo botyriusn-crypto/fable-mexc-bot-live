@@ -20,10 +20,7 @@ export async function GET(request: Request) {
     if (forceSync) {
       try {
         const { syncExchangeState } = await import("@/lib/grid")
-        const [cfg] = await db.select().from(botConfig).where(eq(botConfig.id, 1))
-        if (cfg) {
-          await syncExchangeState(cfg)
-        }
+        await syncExchangeState()
       } catch (err) {
         console.error("Sync failed:", err)
       }

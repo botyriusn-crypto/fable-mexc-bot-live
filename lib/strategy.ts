@@ -1,8 +1,8 @@
-import { ema, vwap, marketStructure, volumeConfirmation, type Candle, type IndicatorSnapshot } from "./indicators"
 // Signal evaluation: indicator triggers gated by ML confidence.
-
-import type { BotConfig } from "./db/schema"
+import { ema, vwap, marketStructure, volumeConfirmation } from "./indicators"
 import type { IndicatorSnapshot, FeatureVector } from "./indicators"
+import type { Candle } from "./mexc/public"
+import type { BotConfig } from "./db/schema"
 import { gateEntry, type MlState } from "./ml"
 
 export type Regime = "trend" | "range" | "neutral"
@@ -177,6 +177,7 @@ export function evaluateEntry(
     features,
     strategy,
     regime,
+    dynamicSize,
     reason: allowed
       ? `${base.direction.toUpperCase()} entry [${strategy}]: ML confidence ${(confidence * 100).toFixed(1)}%`
       : `${base.direction.toUpperCase()} [${strategy}] signal rejected by ML gate (confidence ${(confidence * 100).toFixed(1)}%)`,
@@ -196,9 +197,9 @@ export function detectFlip(snap: IndicatorSnapshot, candles: Candle[], cfg: { em
   let bearishScore = 0
   
   if (candles.length >= 5) {
-    const recentCandles = candles.slice(-3)
-    const emaFastRecent = ema(recentCandles, cfg.emaFast)
-    const emaSlowRecent = ema(recentCandles, cfg.emaSlow)
+    const recentCloses = candles.slice(-3).map((c) => c.close)
+    const emaFastRecent = ema(recentCloses, cfg.emaFast)
+    const emaSlowRecent = ema(recentCloses, cfg.emaSlow)
     if (emaFastRecent > emaSlowRecent) bullishScore += 2
     else bearishScore += 2
   }

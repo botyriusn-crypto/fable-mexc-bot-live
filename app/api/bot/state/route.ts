@@ -13,7 +13,8 @@ import { getGridConfigs, gridUnrealizedPnl } from "@/lib/grid"
 import { isRotationEnabled, getLastRotationTime } from "@/lib/portfolio-rotator"
 import { getShadowStats, runShadowCycle } from "@/lib/shadow-evaluator"
 import { getWatchdogReport } from "@/lib/watchdog"
-import { loadModel } from "@/lib/ml"
+import { getSniperStats } from "@/lib/sniper"
+import { evaluatePortfolioRisk, getRiskState } from "@/lib/risk-manager"
 
 interface MexcAsset {
   currency: string; availableBalance: number; equity: number;
@@ -42,8 +43,8 @@ export async function GET() {
     runShadowCycle().catch(() => {})
   }
   let shadowStats: any = null
-  let sniperModel: any = null
-  try { sniperModel = await loadModel() } catch { sniperModel = null }
+  let sniperStats: any = null
+  try { sniperStats = await getSniperStats() } catch { sniperStats = null }
   try {
     shadowStats = await getShadowStats()
   } catch {
@@ -110,9 +111,9 @@ export async function GET() {
     try {
       const [t, candles] = await Promise.all([fetchTicker(cfg.symbol), fetchKlines(cfg.symbol, cfg.timeframe, 200)])
       ticker = t
-      const closes = candles.map((c) => c.close)
+      const closes = candles.map((c: any) => c.close)
       const emaF = ema(closes, cfg.emaFast), emaS = ema(closes, cfg.emaSlow)
-      chart = candles.slice(-100).map((c, i) => {
+      chart = candles.slice(-100).map((c: any, i: number) => {
         const j = candles.length - 100 + i
         return { time: c.time, close: c.close, emaFast: emaF[j], emaSlow: emaS[j] }
       })
@@ -234,16 +235,24 @@ export async function GET() {
       latest: marketDecisions[0] ?? null,
     }
 
+    // Portfolio risk snapshot: prefer the cached state from the last tick;
+    // if the bot hasn't ticked yet, compute a fresh one so the UI isn't blank.
+    let risk = getRiskState()
+    if (!risk) {
+      try { risk = await evaluatePortfolioRisk(cfg, totalGridUnrealized) } catch { risk = null }
+    }
+
     return NextResponse.json({
       rotationEnabled: isRotationEnabled(),
       lastRotationTime: getLastRotationTime(),
       shadowStats,
-      sniperModel,
+      risk,
+      sniperStats,
       watchdog: getWatchdogReport(),
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,
       markPrice, unrealizedPnl: totalGridUnrealized,
       equity: cfg.paperBalance + totalGridUnrealized,
-      trades: recentTrades, winRate, liveStats, todayStats, equityCurve: equity.reverse(), logs,
+      trades: recentTrades, winRate, liveStats, todayStats, equityCurve: equity.filter((e: any) => e.live === (cfg.mode === "live")).reverse(), logs,
       model: modelRows[0] ?? null, classifierAnalytics, ticker, chart, liveAccount, regime, adxValue,
       grid: { orders: selectedGridOrders, allOrders: activeGridOrders, holdingCount: gridHolding.length, unrealizedPnl: gridUnrealized, realizedPnl: gridRealized },
       gridConfigs: gridConfigsState,

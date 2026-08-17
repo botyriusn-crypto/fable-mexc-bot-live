@@ -18,14 +18,24 @@ import { type Candle } from "./mexc/public"
 import { getExchangeClient, type Exchange } from "./exchange"
 import { classifyLorentzian, combineConfirmation } from "./lorentzian"
 import { computeSnapshot, type FeatureVector, type IndicatorSnapshot } from "./indicators"
-import { loadModel, trainOnTrade, gateEntry } from "./ml"
+import { loadModelFor, trainOnTrade, gateEntry, MODEL_IDS } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs, type GridConfig } from "./grid"
 import { detectFlashFade, executeFlashFade } from "./flash-fade"
 import { maybeRunGridAiAdvisorAuto } from "./ai-grid-advisor"
+import { runSniperCycle, SNIPER_LIVE } from "./sniper"
 import { analyzeTradesForMarket, applyRecommendations } from "./ai-advisor"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager } from './mexc/ws';
+import { getAccountAssets } from './mexc/private';
+import {
+  evaluatePortfolioRisk,
+  isTradingHalted,
+  canOpenNewPosition,
+  marginBudgetRemaining,
+  getRiskState,
+} from "./risk-manager"
+import { evaluateScalpSignal } from "./trend-scalper"
 
 const TAKER_FEE = 0.0002 // 0.02%
 
@@ -115,17 +125,50 @@ async function openPosition(
   snap: IndicatorSnapshot,
   confidence: number,
   features: FeatureVector,
-  strategy: "trend" | "range" | "webhook" = "trend",
+  strategy: "trend" | "range" | "webhook" | "scalp" | "sniper" = "trend",
+  opts?: { sizeUsdtOverride?: number; stopLoss?: number; takeProfit?: number },
 ): Promise<void> {
-  const price = snap.price
-  const quantity = (cfg.positionSizeUsdt * cfg.leverage) / price
+  // ── Portfolio risk gate ── never ADD risk while halted / over caps.
+  if (isTradingHalted() || !canOpenNewPosition()) {
+    const rs = getRiskState()
+    await log(
+      "info",
+      `Entry blocked by risk layer (${direction} ${cfg.symbol}): ${rs?.reasons.join("; ") || "max open positions reached"}`,
+    )
+    return
+  }
 
-  // Range strategy: mean-reversion targets — TP at the middle of the range,
-  // tight SL just beyond the range boundary (breakout = premise dead).
+  // Effective margin for this position: honor a risk-based size override when
+  // provided (trend scalper), but never below a small floor or above the
+  // configured size AND the remaining margin budget.
+  const MIN_MARGIN_USDT = 5
+  const budget = marginBudgetRemaining()
+  let sizeUsdt = cfg.positionSizeUsdt
+  if (opts?.sizeUsdtOverride != null && opts.sizeUsdtOverride > 0) {
+    sizeUsdt = Math.min(opts.sizeUsdtOverride, cfg.positionSizeUsdt)
+  }
+  sizeUsdt = Math.min(sizeUsdt, budget)
+  if (sizeUsdt < MIN_MARGIN_USDT) {
+    await log(
+      "info",
+      `Entry blocked by margin cap (${direction} ${cfg.symbol}): only ${budget.toFixed(2)} USDT margin budget remaining`,
+    )
+    return
+  }
+
+  const price = snap.price
+  const quantity = (sizeUsdt * cfg.leverage) / price
+
+  // Determine SL/TP: explicit overrides (scalper) win; otherwise strategy default.
   let stopLoss: number
   let takeProfit: number
   let rangeTarget: number | null = null
-  if (strategy === "range") {
+  if (opts?.stopLoss != null && opts?.takeProfit != null) {
+    stopLoss = opts.stopLoss
+    takeProfit = opts.takeProfit
+  } else if (strategy === "range") {
+    // Mean-reversion targets — TP at the middle of the range, tight SL just
+    // beyond the range boundary (breakout = premise dead).
     rangeTarget = snap.bbMiddle
     takeProfit = snap.bbMiddle
     stopLoss = direction === "long" ? price - snap.atr * 1.0 : price + snap.atr * 1.0
@@ -151,14 +194,14 @@ async function openPosition(
     }
   }
 
-  const openFee = cfg.positionSizeUsdt * cfg.leverage * TAKER_FEE
+  const openFee = sizeUsdt * cfg.leverage * TAKER_FEE
 
   await db.insert(positions).values({
     symbol: cfg.symbol,
     timeframe: cfg.timeframe,
     side: direction,
     entryPrice: price,
-    sizeUsdt: cfg.positionSizeUsdt,
+    sizeUsdt,
     quantity,
     leverage: cfg.leverage,
     stopLoss,
@@ -179,7 +222,7 @@ async function openPosition(
 
   await log(
     "trade",
-    `Opened ${direction.toUpperCase()} [${strategy}] @ ${price.toFixed(2)} | size ${cfg.positionSizeUsdt} USDT x${cfg.leverage} | SL ${stopLoss.toFixed(2)} TP ${takeProfit.toFixed(2)} | ML confidence ${(confidence * 100).toFixed(1)}%`,
+    `Opened ${direction.toUpperCase()} [${strategy}] @ ${price.toFixed(2)} | size ${sizeUsdt.toFixed(2)} USDT x${cfg.leverage} | SL ${stopLoss.toFixed(2)} TP ${takeProfit.toFixed(2)} | confidence ${(confidence * 100).toFixed(1)}%`,
   )
 }
 
@@ -244,10 +287,14 @@ export async function closePosition(
     `Closed ${position.side.toUpperCase()} @ ${exitPrice.toFixed(2)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT (${pnlPct.toFixed(2)}%) | reason: ${reason.toUpperCase()}`,
   )
 
-  // Learning loop: every closed trade trains the model
+  // Learning loop: every closed trade trains the model dedicated to its strategy
+  // (scalp → scalp model, everything else on this engine path → trend model), so
+  // trend and scalp each learn their own edge instead of poisoning a shared model.
   if (position.entryFeatures) {
     try {
-      const model = await loadModel()
+      const learnStrategy = position.strategy === "scalp" ? "scalp" : "trend"
+      const modelId = learnStrategy === "scalp" ? MODEL_IDS.scalp : MODEL_IDS.trend
+      const model = await loadModelFor(learnStrategy)
       await trainOnTrade(
         model,
         position.entryFeatures as unknown as FeatureVector,
@@ -256,8 +303,9 @@ export async function closePosition(
         cfg.mlLearningRate,
         trade.id,
         position.id,
+        modelId,
       )
-      await log("info", `Model updated from trade #${trade.id} (${netPnl > 0 ? "win" : "loss"})`)
+      await log("info", `Model[${learnStrategy}] updated from trade #${trade.id} (${netPnl > 0 ? "win" : "loss"})`)
     } catch (err) {
       await log("error", `Model training failed: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -315,7 +363,8 @@ export async function runWebhookSignal(
       await closePosition(openPos, snap.price, "signal", cfg)
     }
 
-    const model = await loadModel()
+    // Webhook signals are discretionary trend entries → use the trend model.
+    const model = await loadModelFor("trend")
     const features: FeatureVector = {
       ...snap.features,
       sideLong: action === "long" ? 1 : -1,
@@ -375,7 +424,23 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     for (const pos of openPositions) marketKeys.add(`${pos.symbol}|${pos.timeframe}`)
     for (const order of activeGrid) marketKeys.add(`${order.symbol}|${order.timeframe}`)
 
-    const model = await loadModel()
+    // ── Portfolio risk assessment (before any new capital is deployed) ──
+    // Uses realized PnL + last-known unrealized; refreshed at tick end. When
+    // halted, openPosition() and setupGrid() will refuse to open NEW risk, but
+    // exits / stop-losses / teardowns below still run normally.
+    const risk = await evaluatePortfolioRisk(cfg)
+    if (risk.tradingHalted) {
+      await log(
+        "info",
+        `⚠️ Risk layer HALTED new trades — ${risk.reasons.join("; ")} | equity ${risk.equity.toFixed(2)} day ${risk.dailyPnlPct >= 0 ? "+" : ""}${(risk.dailyPnlPct * 100).toFixed(1)}% dd ${(risk.drawdownPct * 100).toFixed(1)}%`,
+      )
+    }
+
+    // Separate models per entry style so each learns its own edge (see MODEL_IDS):
+    // the automated trend/momentum entry uses the trend model, the pullback
+    // scalper uses the scalp model. Grid trains its own model inside grid.ts.
+    const trendModel = await loadModelFor("trend")
+    const scalpModel = await loadModelFor("scalp")
     const marks = new Map<string, number>()
 
     const tickerCache = new Map()
@@ -439,7 +504,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         const marketPosition = openPositions.find((p) => p.symbol === symbol && p.timeframe === timeframe)
         if (marketPosition) {
           const opposite =
-            marketPosition.strategy === "trend" &&
+            (marketPosition.strategy === "trend" || marketPosition.strategy === "scalp") &&
             isOppositeSignal(snap, marketPosition.side as "long" | "short")
           const decision = evaluateExit(marketPosition, snap, marketCfg, opposite)
           if (decision.action === "close") {
@@ -451,7 +516,71 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
 
         if (isSelected) await resolveClassifierOutcomes(symbol, timeframe, candles)
         if (isSelected && !marketPosition) {
-          const signal = evaluateEntry(snap, marketCfg, model)
+          // ── Trend-scalper path (priority) ──
+          // Higher-quality pullback-in-trend entries with risk-based sizing and
+          // ATR R-multiple targets. Still gated by ML + Lorentzian + risk layer.
+          let scalpHandled = false
+          if (process.env.SCALPER_ENABLED !== "0") {
+            const scalp = evaluateScalpSignal(snap, candles, marketCfg, cfg.paperBalance ?? 10000)
+            if (scalp.triggered && scalp.direction) {
+              const scalpFeatures: FeatureVector = {
+                ...snap.features,
+                sideLong: scalp.direction === "long" ? 1 : -1,
+              }
+              const { allowed: mlAllowed, confidence: mlConf } = gateEntry(
+                scalpModel,
+                scalpFeatures,
+                marketCfg.mlConfidenceThreshold,
+              )
+              const lorentzian = classifyLorentzian(candles, lorentzianOptions(marketCfg))
+              const confirmation = combineConfirmation(
+                marketCfg.confirmationMode,
+                scalp.direction,
+                mlAllowed,
+                lorentzian,
+              )
+              // Blend the scalp confluence with the ML confidence so sizing and
+              // the learning signal reflect BOTH the setup quality and the model.
+              const blended = Math.max(0, Math.min(1, scalp.confidence * (mlConf || 0.5) * 2))
+              const reason = `SCALP: ${scalp.reason}; ${confirmation.reason}; ${lorentzian.reason}`
+              await db.insert(classifierDecisions).values({
+                symbol,
+                timeframe,
+                candleTime: candles[candles.length - 1].time,
+                candidateDirection: scalp.direction,
+                strategy: "scalp",
+                regime: detectRegime(snap, marketCfg),
+                entryPrice: snap.price,
+                confirmationMode: marketCfg.confirmationMode,
+                logisticAllowed: mlAllowed,
+                logisticConfidence: mlConf,
+                lorentzianDirection: lorentzian.direction,
+                lorentzianVote: lorentzian.vote,
+                lorentzianConfidence: lorentzian.confidence,
+                lorentzianAllowed: lorentzian.allowed,
+                lorentzianFilters: lorentzian.filters,
+                finalAllowed: confirmation.allowed,
+                reason,
+              }).onConflictDoNothing()
+              await log("info", `SCALP ${scalp.direction.toUpperCase()} candidate: ${reason}`, {
+                scalpConfluence: scalp.confidence,
+                mlConfidence: mlConf,
+                lorentzianConfidence: lorentzian.confidence,
+                rMultiple: scalp.rMultiple,
+              })
+              if (confirmation.allowed) {
+                await openPosition(marketCfg, scalp.direction, snap, blended, scalpFeatures, "scalp", {
+                  sizeUsdtOverride: scalp.suggestedSizeUsdt ?? undefined,
+                  stopLoss: scalp.stopLoss ?? undefined,
+                  takeProfit: scalp.takeProfit ?? undefined,
+                })
+                scalpHandled = true
+              }
+            }
+          }
+
+          if (!scalpHandled) {
+          const signal = evaluateEntry(snap, candles, marketCfg, trendModel, cfg.paperBalance ?? 10000)
           if (signal.baseTriggered && signal.candidateDirection && signal.features) {
             const lorentzian = classifyLorentzian(candles, lorentzianOptions(marketCfg))
             const confirmation = combineConfirmation(
@@ -490,6 +619,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
               await openPosition(marketCfg, signal.candidateDirection, snap, signal.confidence, signal.features, signal.strategy)
             }
           }
+          }
         }
 
         // GRID-FIX: Grid symbols already processed in loop above with proper GridConfig
@@ -505,22 +635,6 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       const mark = marks.get(position.symbol)
       if (mark != null) totalUnrealized += unrealizedPnl(position, mark)
     }
-    // ── Flash Fade detection ──
-    for (const gc of gridCfgs) {
-      try {
-        const ffCandles = await exchange.fetchKlines(toExchangeSymbol(gc.symbol), "Min5", 50)
-        if (ffCandles.length >= 30) {
-          const ffSignal = detectFlashFade(ffCandles)
-          if (ffSignal.detected) {
-            await executeFlashFade(gc.symbol, gc.timeframe, ffSignal, {
-              enabled: true, minMovePct: 20, minVolumeMultiplier: 5,
-              positionSizeUsdt: 300, leverage: 3, maxPositions: 2,
-            })
-          }
-        }
-      } catch (err) { /* best-effort */ }
-    }
-
     for (const key of marketKeys) {
       const [symbol, timeframe] = key.split("|")
       const mark = marks.get(symbol)
@@ -567,11 +681,67 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       }
     }
 
+    // Record equity snapshot
+    const isLive = cfgAfter.mode === "live"
+    let recordBalance = cfgAfter.paperBalance
+    let recordEquity = cfgAfter.paperBalance + totalUnrealized
+    let recordUnrealized = totalUnrealized
+    
+    if (isLive) {
+      // In live mode, fetch actual account equity from MEXC
+      try {
+        const assets = await getAccountAssets()
+        const usdt = Array.isArray(assets) ? assets.find((a: any) => a.currency === "USDT") : null
+        if (usdt) {
+          recordBalance = usdt.availableBalance || 0
+          recordEquity = usdt.equity || 0
+          recordUnrealized = usdt.unrealized || 0
+        }
+      } catch (err) {
+        // If live fetch fails, fall back to paper values
+        console.error("Live equity fetch failed, using paper values:", err)
+      }
+    }
+    
     await db.insert(equitySnapshots).values({
-      balance: cfgAfter.paperBalance,
-      equity: cfgAfter.paperBalance + totalUnrealized,
-      unrealizedPnl: totalUnrealized,
+      balance: recordBalance,
+      equity: recordEquity,
+      unrealizedPnl: recordUnrealized,
+      live: isLive,
     })
+
+    // Refresh cached risk state with the exact freshly-computed unrealized PnL,
+    // so the /api/bot/state route and the next tick see up-to-date numbers.
+    try {
+      await evaluatePortfolioRisk(cfgAfter, totalUnrealized)
+    } catch { /* best-effort */ }
+
+    // Sniper scan: rule-based liquidity-sweep / sigma-exhaustion signal.
+    // Best-effort — must never throw and break the live trading loop.
+    try {
+      const fresh = await runSniperCycle()
+      if (SNIPER_LIVE && fresh.length > 0) {
+        for (const c of fresh) {
+          try {
+            const marketCfg: BotConfig = { ...cfg, symbol: c.symbol, timeframe: c.timeframe } as BotConfig
+            const candles = await exchange.fetchKlines(toExchangeSymbol(c.symbol), c.timeframe, 200)
+            if (candles.length < 60) continue
+            const snap = computeSnapshot(candles, marketCfg)
+            snap.price = c.entry
+            const features: FeatureVector = { ...snap.features, sideLong: c.direction === "long" ? 1 : -1 }
+            await openPosition(marketCfg, c.direction, snap, c.confidence, features, "sniper", {
+              stopLoss: c.stopLoss,
+              takeProfit: c.takeProfit,
+            })
+          } catch (err) {
+            console.error("[Sniper] live entry failed:", err)
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[Sniper] cycle error:", err)
+    }
+
     return { status: "ok" }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

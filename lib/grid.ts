@@ -4,13 +4,14 @@ import { eq, sql, and, inArray, desc, isNotNull } from 'drizzle-orm'
 import type { FeatureVector, IndicatorSnapshot } from "./indicators"
 import { detectVolatilitySurge, adaptiveSpacing, type VolatilityState } from "./volatility-guard"
 import type { Regime } from "./strategy"
-import { loadModel, trainOnTrade } from "./ml"
-import { getExchangeClient, type ExchangeClient } from "./exchange"
+import { loadModelFor, trainOnTrade, MODEL_IDS } from "./ml"
+import { getExchangeClient, type ExchangeClient, type Exchange } from "./exchange"
 import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderStatus, cancelOrders, getAccountAssets } from "./mexc/private"
 import type { Candle } from "./mexc/public"
 import { fetchTicker } from "./mexc/public"
 import { roundMexcQuantity, roundMexcPrice, getMexcSpec, getMexcSpecAsync, getMexcFeeRates } from "./mexc/precision"
 import { livePrices } from "./mexc/ws"
+import { isTradingHalted, marginBudgetRemaining, getRiskState } from "./risk-manager"
 
 
 // Global cooldown to prevent duplicate setups
@@ -88,7 +89,7 @@ async function placeRoundedMakerOrder(symbol: string, side: number, price: numbe
   const rounded = roundForMexc(symbol, price, volume)
   return placePostOnlyOrder({
     symbol,
-    side,
+    side: side as 1 | 2 | 3 | 4,
     price: rounded.price,
     volume: rounded.quantity,
     leverage,
@@ -107,7 +108,8 @@ export interface GridConfig {
   feeMarginMult: number
   autoPause: boolean
   makerMode: boolean
-  direction: "long" | "short"
+  // "neutral" = COMBO / Bitsgap-style two-sided grid (buys below + sells above).
+  direction: "long" | "short" | "neutral"
 }
 // Returns ALL grid configs, not just enabled ones. Disabling a pair should
 // stop new buy ladders but must not abandon existing held inventory (a
@@ -130,7 +132,7 @@ export async function getGridConfigs(): Promise<GridConfig[]> {
     feeMarginMult: r.feeMarginMult,
     autoPause: r.autoPause,
     makerMode: r.makerMode,
-    direction: (r.direction as "long" | "short") || "long",
+    direction: (r.direction as "long" | "short" | "neutral") || "long",
   }))
 }
 
@@ -171,6 +173,17 @@ const GRID_LIQUIDATION_SAFETY_FACTOR = 0.75
 function effectiveGridStopPct(leverage: number): number {
   const liquidationDistApprox = 1 / leverage
   return Math.min(GRID_STOP_LOSS_PCT, liquidationDistApprox * GRID_LIQUIDATION_SAFETY_FACTOR)
+}
+
+// Maker-mode held inventory uses the same liquidation-aware clamp so the coded
+// stop always fires BEFORE the exchange force-liquidates at high leverage.
+// Previously this helper was referenced in checkAllHeldPositionsRisk (the 20s
+// fast risk-check) and runGridTickMaker but never defined — a ReferenceError
+// that crashed the maker stop-loss path, leaving held positions unprotected.
+function effectiveMakerStopPct(leverage: number): number {
+  const lev = leverage && leverage > 0 ? leverage : 1
+  const liquidationDistApprox = 1 / lev
+  return Math.min(MAKER_STOP_LOSS_PCT, liquidationDistApprox * GRID_LIQUIDATION_SAFETY_FACTOR)
 }
 
 // Cancels other pending orders for this pair on the REAL exchange (not just
@@ -235,6 +248,20 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
 
 // Pre-fetch MEXC specs before grid setup
 export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, volatility?: VolatilityState, exchange?: ExchangeClient, startAtPrice = false): Promise<void> {
+  // ── Portfolio risk gate ── do not deploy NEW grid capital while the
+  // portfolio-level risk layer is halted (daily loss / drawdown / margin cap).
+  // Fill detection, stop-losses and teardown live in runGridTick and are
+  // unaffected — this only prevents placing fresh grid orders.
+  if (isTradingHalted()) {
+    const rs = getRiskState()
+    await log("info", `Grid ${gc.symbol}: setup skipped — risk layer halted (${rs?.reasons.join("; ") || "risk limit"})`)
+    return
+  }
+  if (marginBudgetRemaining() <= 0) {
+    await log("info", `Grid ${gc.symbol}: setup skipped — total margin cap reached, no budget for new orders`)
+    return
+  }
+
   // COOLDOWN LOCK: Prevent duplicate setups
   const lastSetup = GRID_SETUP_COOLDOWN.get(gc.symbol) || 0;
   const timeSinceLastSetup = Date.now() - lastSetup;
@@ -293,7 +320,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
     try {
       const existingOrders = await getActiveOrders(gc.symbol, gc.timeframe)
       if (existingOrders.length > 0) {
-        const orderIds = existingOrders.filter(o => o.mexcOrderId).map(o => o.mexcOrderId)
+        const orderIds = existingOrders.map(o => o.mexcOrderId).filter((id): id is string => !!id)
         if (orderIds.length > 0) {
           await cancelOrders(orderIds)
           await log("info", `Grid ${gc.symbol}: Cancelled ${orderIds.length} existing orders before rebuild`)
@@ -550,6 +577,13 @@ if (cfg.mode === "live") {
 export async function teardownGrid(cfg: BotConfig, currentPrice: number | null): Promise<void> {
   const active = await getActiveOrders(cfg.symbol, cfg.timeframe)
 
+  // Resolve a real exchange client only in live mode so held inventory is
+  // liquidated on MEXC during a manual Stop. Previously `exchange` was
+  // referenced here but never defined — a ReferenceError that made Stop throw
+  // and leave real positions open.
+  const exchange: ExchangeClient | undefined =
+    cfg.mode === "live" ? getExchangeClient(cfg.exchange as Exchange) : undefined
+
   // Maker: cancel real resting orders on the exchange first so we never leave
   // orphaned post-only orders behind after a manual stop.
   const makerIds = active.filter((o) => o.mexcOrderId).map((o) => o.mexcOrderId!) as string[]
@@ -665,7 +699,7 @@ async function settleGridSell(
 
   if (trade && order.entryFeatures) {
     try {
-      const model = await loadModel()
+      const model = await loadModelFor("grid")
       await trainOnTrade(
         model,
         order.entryFeatures as unknown as FeatureVector,
@@ -674,6 +708,7 @@ async function settleGridSell(
         cfg.mlLearningRate,
         trade.id,
         null,
+        MODEL_IDS.grid,
       )
     } catch (err) {
       await log("error", `Grid ML update failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -736,7 +771,7 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
 
   if (trade && order.entryFeatures) {
     try {
-      const model = await loadModel()
+      const model = await loadModelFor("grid")
       await trainOnTrade(
         model,
         order.entryFeatures as unknown as FeatureVector,
@@ -745,6 +780,7 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
         cfg.mlLearningRate,
         trade.id,
         null,
+        MODEL_IDS.grid,
       )
     } catch (err) {
       await log("error", `Grid ML update failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -802,8 +838,20 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
 
   if (trade && order.entryFeatures) {
     try {
-      const model = await loadModel()
-      // [non-grid ML] grid fills no longer train the model
+      // CRITICAL for self-learning: previously loss closes (stop-loss/max-hold)
+      // did NOT train, so the grid model only ever saw winning TP fills and could
+      // never learn to avoid bad entries. Train the grid model on this outcome.
+      const model = await loadModelFor("grid")
+      await trainOnTrade(
+        model,
+        order.entryFeatures as unknown as FeatureVector,
+        netPnl > 0,
+        sizeUsdt > 0 ? (netPnl / sizeUsdt) * 100 : 0,
+        cfg.mlLearningRate,
+        trade.id,
+        null,
+        MODEL_IDS.grid,
+      )
     } catch (err) {
       await log("error", `Grid ML update failed: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -849,8 +897,20 @@ if (cfg.mode === "paper") {
 }
 if (trade && order.entryFeatures) {
 try {
-const model = await loadModel()
-// [non-grid ML] grid fills no longer train the model
+// Train the grid model on this short loss/close too (see long path above):
+// learning only from wins was starving the model of the losses it most
+// needs to learn from.
+const model = await loadModelFor("grid")
+await trainOnTrade(
+  model,
+  order.entryFeatures as unknown as FeatureVector,
+  netPnl > 0,
+  sizeUsdt > 0 ? (netPnl / sizeUsdt) * 100 : 0,
+  cfg.mlLearningRate,
+  trade.id,
+  null,
+  MODEL_IDS.grid,
+)
 } catch (err) {
 await log("error", `Grid ${order.symbol} (maker short) ML update failed: ${dbErr(err)}`)
 }
@@ -1253,7 +1313,7 @@ const sold = await settleGridSell(o, o.price, cfg, "tp", exchange)
 for (const o of buys) {
 if (o.buyPrice != null && (gc as any).direction === "neutral") {
   // COMBO: Create corresponding SELL order after buy fills
-  const sellPrice = o.price + o.spacing * gc.leverage; // TP at spacing distance
+  const sellPrice = o.price + (o.spacing ?? 0) * gc.leverage; // TP at spacing distance
   await log("info", `Grid ${o.symbol}: COMBO buy filled, creating SELL @ ${sellPrice.toFixed(6)}`);
   // RACE-FIX: Re-check order status before processing (prevents double-fill)
   const fresh = await db.select({ status: gridOrders.status }).from(gridOrders).where(eq(gridOrders.id, o.id))

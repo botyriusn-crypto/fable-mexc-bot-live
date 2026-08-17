@@ -19,6 +19,38 @@ const LEVERAGED_ETF_DENYLIST = new Set([
   "TMF_USDT", "TMV_USDT", "UVXY_USDT", "SVXY_USDT",
 ])
 
+// ============================================================================
+// 1.1 FEEDBACK LOOP — stop re-picking symbols that just lost money.
+// A module-level store of recent grid outcomes. The bot runs as a long-lived
+// Next.js server, so this survives across advisor runs. If the server
+// restarts it resets, which is acceptable (the cool-off is only 48h anyway).
+// ============================================================================
+interface GridOutcome { pnl: number; ts: number }
+const recentGridOutcomes = new Map<string, GridOutcome>()
+const LOSER_COOLOFF_MS = 48 * 60 * 60 * 1000 // 48 hours
+
+/**
+ * Record a grid's realized P&L when it is torn down / rotated out. Called by
+ * the portfolio rotator when it kills a dead grid.
+ */
+export function recordGridOutcome(symbol: string, pnl: number): void {
+  recentGridOutcomes.set(symbol, { pnl, ts: Date.now() })
+}
+
+/**
+ * True if this symbol lost money within the last 48h (cool-off blacklist).
+ * Expired entries are cleaned up lazily on read.
+ */
+export function isRecentLoser(symbol: string): boolean {
+  const o = recentGridOutcomes.get(symbol)
+  if (!o) return false
+  if (Date.now() - o.ts > LOSER_COOLOFF_MS) {
+    recentGridOutcomes.delete(symbol)
+    return false
+  }
+  return o.pnl < 0
+}
+
 function calcChop(candles: Candle[], period: number = 14): number {
   if (candles.length < period) return 50
   const atrArr = atr(candles, period)
@@ -90,21 +122,26 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
     } catch (e) { console.error("Watchlist override error:", e) }
 
     const scoredMarkets: any[] = []
+    const gateStats = { total: candidates.length, recentLoser: 0, feeGate: 0, klineFail: 0, tooFewCandles: 0, momentumGate: 0, dnaRejected: 0, scored: 0 }
 
     for (const t of candidates) {
       try {
+        // 1.1 Feedback loop: skip any symbol that lost money in a grid within
+        // the last 48h (cool-off blacklist to avoid re-picking repeat losers).
+        if (isRecentLoser(t.symbol)) { gateStats.recentLoser++; continue }
+
         const end = Math.floor(Date.now() / 1000)
         const start = end - (3 * 24 * 3600)
         const klineRes = await fetch(`https://contract.mexc.com/api/v1/contract/kline/${t.symbol}?interval=Min15&start=${start}&end=${end}`, { cache: "no-store" })
         const klineJson = await klineRes.json() as any
-        if (!klineJson.success || !klineJson.data?.time?.length) continue
+        if (!klineJson.success || !klineJson.data?.time?.length) { gateStats.klineFail++; continue }
 
         const { time, open, high, low, close, vol } = klineJson.data
         const candles: Candle[] = []
         for (let i = 0; i < time.length; i++) {
           candles.push({ time: time[i], open: open[i], high: high[i], low: low[i], close: close[i], volume: vol[i] ?? 0 })
         }
-        if (candles.length < 50) continue
+        if (candles.length < 50) { gateStats.tooFewCandles++; continue }
 
         const closes = candles.map(c => c.close)
         const lastClose = closes[closes.length - 1]
@@ -113,6 +150,12 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         const lastAtr = atrArr[atrArr.length - 1]
         const lastAdx = adxArr[adxArr.length - 1]
         const atrPct = (lastAtr / lastClose) * 100
+
+        // 1.2 Fee-adjusted profitability gate: a COMBO grid only profits when
+        // per-level spacing clears the round-trip fee (~0.06% on MEXC). With
+        // ~10 levels, average spacing ≈ atrPct/10; if that's below 0.08% the
+        // grid can't reliably beat fees, so skip it.
+        if (atrPct / 10 < 0.03) { gateStats.feeGate++; continue }
 
         const chop = calcChop(candles, 14)
 
@@ -128,7 +171,9 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         }
 
         const momentum3h = closes.length >= 13 ? ((closes[closes.length - 1] - closes[closes.length - 13]) / closes[closes.length - 13]) * 100 : 0
-        if (momentum3h < -3.0) continue
+        // 1.3 Symmetric momentum filter: a neutral COMBO grid is hurt by strong
+        // moves in EITHER direction, so reject both pumps and dumps (>2.5%).
+        if (Math.abs(momentum3h) > 2.5) { gateStats.momentumGate++; continue }
 
         let score = 0
         score += (chop - 50) * 2
@@ -138,7 +183,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
 
         const dna = comboDna(candles, 0.6, lastAdx)
         const params = comboParams(dna, lastClose)
-        if (dna.rejected) continue
+        if (dna.rejected) { gateStats.dnaRejected++; continue }
         const blendedScore = Math.round(Math.min(score, 100) * 0.35 + dna.score * 0.65)
 
         scoredMarkets.push({
@@ -159,11 +204,17 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
           suggestedLevels: params.levels,
           blendedScore,
         })
+        gateStats.scored++
 
         await new Promise(r => setTimeout(r, 100))
       } catch (err) { continue }
     }
 
+    console.log("[AI Advisor Gate Stats]", JSON.stringify(gateStats))
+    await db.insert(botLogs).values({
+      level: "info",
+      message: `AI Advisor gate stats: ${JSON.stringify(gateStats)}`,
+    }).catch(() => {})
     const shortlist = scoredMarkets.sort((a, b) => b.blendedScore - a.blendedScore).slice(0, 8)
     const safeSizingPreview = await computeSafeGridSettings(3)
     const depthChecked: typeof shortlist = []

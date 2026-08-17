@@ -29,7 +29,7 @@ const originalQuery = pool.query.bind(pool)
 pool.query = async (...args: any[]) => {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await originalQuery(...args)
+      return await (originalQuery as any)(...args)
     } catch (err: any) {
       console.error('[DB] Query error:', err.message, 'Code:', err.code)
       try {

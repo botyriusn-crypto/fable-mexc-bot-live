@@ -23,7 +23,7 @@ function writeLS(key: string, val: string) {
 export function SniperCommand({ state }: { state: any }) {
   const [enabled, setEnabled] = useState(readLS(LS_ENABLED, "true") === "true")
   const [threshold, setThreshold] = useState(Number(readLS(LS_THRESHOLD, "0.55")))
-  const top = state?.shadowStats?.topCandidate
+  const top = state?.sniperStats?.topCandidate
 
   useEffect(() => { writeLS(LS_ENABLED, String(enabled)); window.dispatchEvent(new Event("sniper-config")) }, [enabled])
   useEffect(() => { writeLS(LS_THRESHOLD, String(threshold)); window.dispatchEvent(new Event("sniper-config")) }, [threshold])
@@ -78,7 +78,7 @@ export function SniperAlertBubble() {
     return () => { window.removeEventListener("sniper-config", sync); window.removeEventListener("sniper-test", onTest) }
   }, [])
 
-  const top = test ?? state?.shadowStats?.topCandidate
+  const top = test ?? state?.sniperStats?.topCandidate
   const key = top ? `${top.symbol}-${top.direction}` : ""
   const inCooldown = Boolean(key && dismissed[key] && (Date.now() - dismissed[key] < COOLDOWN_MS))
   
@@ -113,16 +113,16 @@ export function SniperAlertBubble() {
       {!open ? (
         <button onClick={() => setOpen(true)}
           className={`rounded-full border-2 border-yellow-400 bg-yellow-400/20 px-4 py-3 text-sm font-bold text-yellow-300 backdrop-blur transition-all duration-500 ${isStale ? "opacity-40 grayscale" : "animate-pulse shadow-[0_0_20px_rgba(250,204,21,0.5)]"}`}>
-          🎯 {top.symbol} {(top?.direction || "unknown").toUpperCase()} {(top.confidence * 100).toFixed(0)}% · {top.source === "ml" ? "ML" : "SETUP"}{timeAgo ? ` · ${timeAgo}` : ""}
+          🎯 {top.symbol} {(top?.direction || "unknown").toUpperCase()} {(top.confidence * 100).toFixed(0)}% · SNIPER{timeAgo ? ` · ${timeAgo}` : ""}
         </button>
       ) : (
         <Card className={`w-72 transition-all duration-500 ${isStale ? "border-yellow-400/20 bg-black/60 opacity-50 grayscale" : "border-yellow-400/60 bg-black/90 shadow-[0_0_24px_rgba(250,204,21,0.4)]"}`}>
           <CardContent className="flex flex-col gap-2 p-3">
             <span className="text-sm font-bold text-yellow-300">🎯 Sniper Candidate</span>
             <div className="font-mono text-lg text-yellow-200">{top.symbol} <span className={top.direction === "long" ? "text-success" : "text-danger"}>{(top?.direction || "unknown").toUpperCase()}</span></div>
-            <div className="text-xs text-yellow-200/80">Confidence: {(top.confidence * 100).toFixed(0)}% · Source: {top.source === "ml" ? "Learned ML" : "Momentum setup"}</div>
+            <div className="text-xs text-yellow-200/80">Confidence: {(top.confidence * 100).toFixed(0)}% · Source: Sniper rule</div>
             {timeAgo && <div className="text-[10px] font-mono text-yellow-200/60">⏱ Detected {timeAgo} ago</div>}
-            <div className="text-[10px] text-yellow-200/60">Shadow ML flagged this setup. Review the pair before entering manually.</div>
+            <div className="text-[10px] text-yellow-200/60">Sniper rule flagged this setup. Review the pair before entering manually.</div>
             <div className="flex gap-2">
               <Button size="sm" variant="outline" className="flex-1 text-xs" onClick={() => setOpen(false)}>Keep watching</Button>
               <Button size="sm" className="flex-1 bg-yellow-400 text-black text-xs" onClick={acknowledge}>Acknowledge</Button>

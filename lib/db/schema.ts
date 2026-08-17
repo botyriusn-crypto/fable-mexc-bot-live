@@ -61,8 +61,7 @@ export const botConfig = pgTable("bot_config", {
   exchange: text("exchange").notNull().default("mexc"),
   aiAdvisorEnabled: boolean("ai_advisor_enabled").notNull().default(false),
   aiAnalysisSchedule: text("ai_analysis_schedule").notNull().default("manual"),
-  aiAdvisorEnabled: boolean("ai_advisor_enabled").notNull().default(false),
-  aiAnalysisSchedule: text("ai_analysis_schedule").notNull().default("manual"), // 'mexc' | 'gate' | 'bybit'
+  aiLastAnalysis: timestamp("ai_last_analysis", { withTimezone: true }),
   mode: text("mode").notNull().default("paper"),
   status: text("status").notNull().default("stopped"),
   paperBalance: doublePrecision("paper_balance").notNull().default(10000),
@@ -120,6 +119,7 @@ export const equitySnapshots = pgTable("equity_snapshots", {
   balance: doublePrecision("balance").notNull(),
   equity: doublePrecision("equity").notNull(),
   unrealizedPnl: doublePrecision("unrealized_pnl").notNull().default(0),
+  live: boolean("live").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })
 
@@ -209,6 +209,7 @@ export const gridOrders = pgTable("grid_orders", {
   exchangeStatus: text("exchange_status"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   filledAt: timestamp("filled_at", { withTimezone: true }),
+  syncedAt: timestamp("synced_at", { withTimezone: true }),
 })
 
 
@@ -231,6 +232,8 @@ export const gridConfigs = pgTable("grid_configs", {
   upper: doublePrecision("upper"),
   spacing: doublePrecision("spacing"),
   effectiveLevels: integer("effective_levels"),
+  // Free-form metadata (e.g. new-listing tracking: isNewListing, detectedAt, ttlHours).
+  metadata: jsonb("metadata"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 })
