@@ -12,7 +12,7 @@ export const SNIPER_LIVE = false // Stage 2: flip to true after observe baseline
 export const SNIPER_PARAMS = {
   sweepLookback: 20,
   volumeSurgeMult: 2.0,
-  sigmaExtreme: 5.0,
+  sigmaExtreme: 2.5,
   fundingThreshold: 0.0005,
   tpSlRatio: 3,
   resolveAfterBuckets: 6,
@@ -235,9 +235,20 @@ export async function maybeScanExchange(...args: any[]): Promise<any> {
 
 // Sniper scan cycle — mirrors runShadowCycle: iterates enabled grid configs,
 // detects dislocations, records candidates, then resolves old decisions.
-export async function runSniperCycle(): Promise<void> {
+export interface SniperCandidate {
+  symbol: string
+  timeframe: string
+  direction: "long" | "short"
+  entry: number
+  stopLoss: number
+  takeProfit: number
+  confidence: number
+}
+
+export async function runSniperCycle(): Promise<SniperCandidate[]> {
   const configs = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
   const seen = new Set<string>()
+  const fresh: SniperCandidate[] = []
 
   for (const cfg of configs) {
     const key = `${cfg.symbol}|${cfg.timeframe}`
@@ -267,7 +278,9 @@ export async function runSniperCycle(): Promise<void> {
     if (!sig.direction) continue
 
     await recordSniperCandidate(cfg.symbol, cfg.timeframe, bucket, ticker.lastPrice, sig)
+    fresh.push({ symbol: cfg.symbol, timeframe: cfg.timeframe, direction: sig.direction, entry: ticker.lastPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence })
   }
 
   await resolveSniperDecisions()
+  return fresh
 }

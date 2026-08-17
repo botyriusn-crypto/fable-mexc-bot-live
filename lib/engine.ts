@@ -23,6 +23,7 @@ import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs, type GridConfig } from "./grid"
 import { detectFlashFade, executeFlashFade } from "./flash-fade"
 import { maybeRunGridAiAdvisorAuto } from "./ai-grid-advisor"
+import { runSniperCycle, SNIPER_LIVE } from "./sniper"
 import { analyzeTradesForMarket, applyRecommendations } from "./ai-advisor"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager } from './mexc/ws';
@@ -124,7 +125,7 @@ async function openPosition(
   snap: IndicatorSnapshot,
   confidence: number,
   features: FeatureVector,
-  strategy: "trend" | "range" | "webhook" | "scalp" = "trend",
+  strategy: "trend" | "range" | "webhook" | "scalp" | "sniper" = "trend",
   opts?: { sizeUsdtOverride?: number; stopLoss?: number; takeProfit?: number },
 ): Promise<void> {
   // ── Portfolio risk gate ── never ADD risk while halted / over caps.
@@ -714,6 +715,32 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     try {
       await evaluatePortfolioRisk(cfgAfter, totalUnrealized)
     } catch { /* best-effort */ }
+
+    // Sniper scan: rule-based liquidity-sweep / sigma-exhaustion signal.
+    // Best-effort — must never throw and break the live trading loop.
+    try {
+      const fresh = await runSniperCycle()
+      if (SNIPER_LIVE && fresh.length > 0) {
+        for (const c of fresh) {
+          try {
+            const marketCfg: BotConfig = { ...cfg, symbol: c.symbol, timeframe: c.timeframe } as BotConfig
+            const candles = await exchange.fetchKlines(toExchangeSymbol(c.symbol), c.timeframe, 200)
+            if (candles.length < 60) continue
+            const snap = computeSnapshot(candles, marketCfg)
+            snap.price = c.entry
+            const features: FeatureVector = { ...snap.features, sideLong: c.direction === "long" ? 1 : -1 }
+            await openPosition(marketCfg, c.direction, snap, c.confidence, features, "sniper", {
+              stopLoss: c.stopLoss,
+              takeProfit: c.takeProfit,
+            })
+          } catch (err) {
+            console.error("[Sniper] live entry failed:", err)
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[Sniper] cycle error:", err)
+    }
 
     return { status: "ok" }
   } catch (err) {
