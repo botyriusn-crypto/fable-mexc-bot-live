@@ -63,6 +63,44 @@ export interface BotState {
     unrealizedPnl: number
     realizedPnl: number
   }
+  // Multi-grid / rotation / shadow fields returned by /api/bot/state (optional; absent in fallback)
+  gridConfigs?: Array<{
+    symbol: string
+    timeframe: string
+    enabled: boolean
+    paused: boolean
+    levels: number
+    effectiveLevels: number
+    spacing: number | null
+    buyCount: number
+    sellCount: number
+    unrealizedPnl: number
+    realizedPnl: number
+    budgetPct: number
+    leverage: number
+    gridLeverage?: number
+    atrMult?: number
+    makerMode?: boolean
+    direction: string
+  }>
+  rotationEnabled?: boolean
+  lastRotationTime?: number
+  shadowStats?: {
+    totalEvaluations: number
+    resolvedCount: number
+    correctCount: number
+    accuracy: number
+    topCandidate: {
+      symbol: string
+      direction: string
+      createdAt: string
+      [key: string]: unknown
+    } | null
+  } | null
+  sniperModel?: unknown
+  watchdog?: unknown
+  liveStats?: unknown
+  todayStats?: unknown
 }
 
 const fetcher = async (url: string) => {
@@ -113,7 +151,7 @@ export function useBotState() {
         unrealizedPnl: 0,
         realizedPnl: 0
       }
-    }
+    } as unknown as BotState,
   })
 }
 

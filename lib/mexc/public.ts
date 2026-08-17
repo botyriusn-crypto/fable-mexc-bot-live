@@ -172,13 +172,3 @@ export function getTicker(symbol: string): Promise<any> {
 export function getCandles(symbol: string, timeframe: string, limit: number): Promise<any> {
   return fetchKlines(symbol, timeframe, limit);
 }
-
-export interface Candle {
-  timestamp: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-  quoteAssetVolume?: number;
-}

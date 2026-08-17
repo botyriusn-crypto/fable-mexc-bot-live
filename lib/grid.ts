@@ -5,7 +5,7 @@ import type { FeatureVector, IndicatorSnapshot } from "./indicators"
 import { detectVolatilitySurge, adaptiveSpacing, type VolatilityState } from "./volatility-guard"
 import type { Regime } from "./strategy"
 import { loadModel, trainOnTrade } from "./ml"
-import { getExchangeClient, type ExchangeClient } from "./exchange"
+import { getExchangeClient, type ExchangeClient, type Exchange } from "./exchange"
 import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderStatus, cancelOrders, getAccountAssets } from "./mexc/private"
 import type { Candle } from "./mexc/public"
 import { fetchTicker } from "./mexc/public"
@@ -88,7 +88,7 @@ async function placeRoundedMakerOrder(symbol: string, side: number, price: numbe
   const rounded = roundForMexc(symbol, price, volume)
   return placePostOnlyOrder({
     symbol,
-    side,
+    side: side as 1 | 2 | 3 | 4,
     price: rounded.price,
     volume: rounded.quantity,
     leverage,
@@ -107,7 +107,8 @@ export interface GridConfig {
   feeMarginMult: number
   autoPause: boolean
   makerMode: boolean
-  direction: "long" | "short"
+  // "neutral" = COMBO / Bitsgap-style two-sided grid (buys below + sells above).
+  direction: "long" | "short" | "neutral"
 }
 // Returns ALL grid configs, not just enabled ones. Disabling a pair should
 // stop new buy ladders but must not abandon existing held inventory (a
@@ -130,7 +131,7 @@ export async function getGridConfigs(): Promise<GridConfig[]> {
     feeMarginMult: r.feeMarginMult,
     autoPause: r.autoPause,
     makerMode: r.makerMode,
-    direction: (r.direction as "long" | "short") || "long",
+    direction: (r.direction as "long" | "short" | "neutral") || "long",
   }))
 }
 
@@ -171,6 +172,17 @@ const GRID_LIQUIDATION_SAFETY_FACTOR = 0.75
 function effectiveGridStopPct(leverage: number): number {
   const liquidationDistApprox = 1 / leverage
   return Math.min(GRID_STOP_LOSS_PCT, liquidationDistApprox * GRID_LIQUIDATION_SAFETY_FACTOR)
+}
+
+// Maker-mode held inventory uses the same liquidation-aware clamp so the coded
+// stop always fires BEFORE the exchange force-liquidates at high leverage.
+// Previously this helper was referenced in checkAllHeldPositionsRisk (the 20s
+// fast risk-check) and runGridTickMaker but never defined — a ReferenceError
+// that crashed the maker stop-loss path, leaving held positions unprotected.
+function effectiveMakerStopPct(leverage: number): number {
+  const lev = leverage && leverage > 0 ? leverage : 1
+  const liquidationDistApprox = 1 / lev
+  return Math.min(MAKER_STOP_LOSS_PCT, liquidationDistApprox * GRID_LIQUIDATION_SAFETY_FACTOR)
 }
 
 // Cancels other pending orders for this pair on the REAL exchange (not just
@@ -293,7 +305,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
     try {
       const existingOrders = await getActiveOrders(gc.symbol, gc.timeframe)
       if (existingOrders.length > 0) {
-        const orderIds = existingOrders.filter(o => o.mexcOrderId).map(o => o.mexcOrderId)
+        const orderIds = existingOrders.map(o => o.mexcOrderId).filter((id): id is string => !!id)
         if (orderIds.length > 0) {
           await cancelOrders(orderIds)
           await log("info", `Grid ${gc.symbol}: Cancelled ${orderIds.length} existing orders before rebuild`)
@@ -549,6 +561,13 @@ if (cfg.mode === "live") {
 
 export async function teardownGrid(cfg: BotConfig, currentPrice: number | null): Promise<void> {
   const active = await getActiveOrders(cfg.symbol, cfg.timeframe)
+
+  // Resolve a real exchange client only in live mode so held inventory is
+  // liquidated on MEXC during a manual Stop. Previously `exchange` was
+  // referenced here but never defined — a ReferenceError that made Stop throw
+  // and leave real positions open.
+  const exchange: ExchangeClient | undefined =
+    cfg.mode === "live" ? getExchangeClient(cfg.exchange as Exchange) : undefined
 
   // Maker: cancel real resting orders on the exchange first so we never leave
   // orphaned post-only orders behind after a manual stop.
@@ -1253,7 +1272,7 @@ const sold = await settleGridSell(o, o.price, cfg, "tp", exchange)
 for (const o of buys) {
 if (o.buyPrice != null && (gc as any).direction === "neutral") {
   // COMBO: Create corresponding SELL order after buy fills
-  const sellPrice = o.price + o.spacing * gc.leverage; // TP at spacing distance
+  const sellPrice = o.price + (o.spacing ?? 0) * gc.leverage; // TP at spacing distance
   await log("info", `Grid ${o.symbol}: COMBO buy filled, creating SELL @ ${sellPrice.toFixed(6)}`);
   // RACE-FIX: Re-check order status before processing (prevents double-fill)
   const fresh = await db.select({ status: gridOrders.status }).from(gridOrders).where(eq(gridOrders.id, o.id))

@@ -451,7 +451,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
 
         if (isSelected) await resolveClassifierOutcomes(symbol, timeframe, candles)
         if (isSelected && !marketPosition) {
-          const signal = evaluateEntry(snap, marketCfg, model)
+          const signal = evaluateEntry(snap, candles, marketCfg, model, cfg.paperBalance ?? 10000)
           if (signal.baseTriggered && signal.candidateDirection && signal.features) {
             const lorentzian = classifyLorentzian(candles, lorentzianOptions(marketCfg))
             const confirmation = combineConfirmation(

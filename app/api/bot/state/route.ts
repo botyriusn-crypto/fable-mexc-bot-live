@@ -93,9 +93,9 @@ export async function GET() {
     try {
       const [t, candles] = await Promise.all([fetchTicker(cfg.symbol), fetchKlines(cfg.symbol, cfg.timeframe, 200)])
       ticker = t
-      const closes = candles.map((c) => c.close)
+      const closes = candles.map((c: any) => c.close)
       const emaF = ema(closes, cfg.emaFast), emaS = ema(closes, cfg.emaSlow)
-      chart = candles.slice(-100).map((c, i) => {
+      chart = candles.slice(-100).map((c: any, i: number) => {
         const j = candles.length - 100 + i
         return { time: c.time, close: c.close, emaFast: emaF[j], emaSlow: emaS[j] }
       })

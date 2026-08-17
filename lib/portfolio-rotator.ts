@@ -98,7 +98,7 @@ export async function checkAndRotate(exchange: any): Promise<void> {
       }
       
       // Find first candidate not already in portfolio
-      const candidate = candidates.find(c => !existingSymbols.has(c.symbol))
+      const candidate = candidates.find((c: any) => !existingSymbols.has(c.symbol))
       if (!candidate) {
         await log("info", "No more new candidates available - stopping rotation")
         break
