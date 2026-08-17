@@ -155,7 +155,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         // per-level spacing clears the round-trip fee (~0.06% on MEXC). With
         // ~10 levels, average spacing ≈ atrPct/10; if that's below 0.08% the
         // grid can't reliably beat fees, so skip it.
-        if (atrPct / 10 < 0.06) { gateStats.feeGate++; continue }
+        if (atrPct / 10 < 0.03) { gateStats.feeGate++; continue }
 
         const chop = calcChop(candles, 14)
 
