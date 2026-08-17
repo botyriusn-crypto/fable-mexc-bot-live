@@ -1,0 +1,33 @@
+name: Backup Fly Postgres to Neon
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # daily 03:00 UTC
+  workflow_dispatch:        # manual trigger for testing
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Install PostgreSQL 18 client
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /etc/apt/trusted.gpg.d/pgdg.asc > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-18
+
+      - name: Dump Fly Postgres and restore into Neon
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          PGPASSWORD: ${{ secrets.FLY_PG_PASSWORD }}
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+        run: |
+          flyctl proxy 5433:5432 -a fable-mexc-bot-db &
+          PROXY_PID=$!
+          sleep 8
+          pg_dump -h localhost -p 5433 -U postgres -d fable_mexc_bot \
+            --clean --if-exists --no-owner --no-privileges \
+            | psql "$NEON_DATABASE_URL"
+          kill $PROXY_PID
