@@ -33,6 +33,7 @@ import {
   marginBudgetRemaining,
   getRiskState,
 } from "./risk-manager"
+import { evaluateScalpSignal } from "./trend-scalper"
 
 const TAKER_FEE = 0.0002 // 0.02%
 
@@ -122,7 +123,8 @@ async function openPosition(
   snap: IndicatorSnapshot,
   confidence: number,
   features: FeatureVector,
-  strategy: "trend" | "range" | "webhook" = "trend",
+  strategy: "trend" | "range" | "webhook" | "scalp" = "trend",
+  opts?: { sizeUsdtOverride?: number; stopLoss?: number; takeProfit?: number },
 ): Promise<void> {
   // ── Portfolio risk gate ── never ADD risk while halted / over caps.
   if (isTradingHalted() || !canOpenNewPosition()) {
@@ -133,24 +135,38 @@ async function openPosition(
     )
     return
   }
-  // Reject if this position's margin would breach the total-margin cap.
-  if (cfg.positionSizeUsdt > marginBudgetRemaining()) {
+
+  // Effective margin for this position: honor a risk-based size override when
+  // provided (trend scalper), but never below a small floor or above the
+  // configured size AND the remaining margin budget.
+  const MIN_MARGIN_USDT = 5
+  const budget = marginBudgetRemaining()
+  let sizeUsdt = cfg.positionSizeUsdt
+  if (opts?.sizeUsdtOverride != null && opts.sizeUsdtOverride > 0) {
+    sizeUsdt = Math.min(opts.sizeUsdtOverride, cfg.positionSizeUsdt)
+  }
+  sizeUsdt = Math.min(sizeUsdt, budget)
+  if (sizeUsdt < MIN_MARGIN_USDT) {
     await log(
       "info",
-      `Entry blocked by margin cap (${direction} ${cfg.symbol}): need ${cfg.positionSizeUsdt} USDT margin, only ${marginBudgetRemaining().toFixed(2)} remaining`,
+      `Entry blocked by margin cap (${direction} ${cfg.symbol}): only ${budget.toFixed(2)} USDT margin budget remaining`,
     )
     return
   }
 
   const price = snap.price
-  const quantity = (cfg.positionSizeUsdt * cfg.leverage) / price
+  const quantity = (sizeUsdt * cfg.leverage) / price
 
-  // Range strategy: mean-reversion targets — TP at the middle of the range,
-  // tight SL just beyond the range boundary (breakout = premise dead).
+  // Determine SL/TP: explicit overrides (scalper) win; otherwise strategy default.
   let stopLoss: number
   let takeProfit: number
   let rangeTarget: number | null = null
-  if (strategy === "range") {
+  if (opts?.stopLoss != null && opts?.takeProfit != null) {
+    stopLoss = opts.stopLoss
+    takeProfit = opts.takeProfit
+  } else if (strategy === "range") {
+    // Mean-reversion targets — TP at the middle of the range, tight SL just
+    // beyond the range boundary (breakout = premise dead).
     rangeTarget = snap.bbMiddle
     takeProfit = snap.bbMiddle
     stopLoss = direction === "long" ? price - snap.atr * 1.0 : price + snap.atr * 1.0
@@ -176,14 +192,14 @@ async function openPosition(
     }
   }
 
-  const openFee = cfg.positionSizeUsdt * cfg.leverage * TAKER_FEE
+  const openFee = sizeUsdt * cfg.leverage * TAKER_FEE
 
   await db.insert(positions).values({
     symbol: cfg.symbol,
     timeframe: cfg.timeframe,
     side: direction,
     entryPrice: price,
-    sizeUsdt: cfg.positionSizeUsdt,
+    sizeUsdt,
     quantity,
     leverage: cfg.leverage,
     stopLoss,
@@ -204,7 +220,7 @@ async function openPosition(
 
   await log(
     "trade",
-    `Opened ${direction.toUpperCase()} [${strategy}] @ ${price.toFixed(2)} | size ${cfg.positionSizeUsdt} USDT x${cfg.leverage} | SL ${stopLoss.toFixed(2)} TP ${takeProfit.toFixed(2)} | ML confidence ${(confidence * 100).toFixed(1)}%`,
+    `Opened ${direction.toUpperCase()} [${strategy}] @ ${price.toFixed(2)} | size ${sizeUsdt.toFixed(2)} USDT x${cfg.leverage} | SL ${stopLoss.toFixed(2)} TP ${takeProfit.toFixed(2)} | confidence ${(confidence * 100).toFixed(1)}%`,
   )
 }
 
@@ -476,7 +492,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         const marketPosition = openPositions.find((p) => p.symbol === symbol && p.timeframe === timeframe)
         if (marketPosition) {
           const opposite =
-            marketPosition.strategy === "trend" &&
+            (marketPosition.strategy === "trend" || marketPosition.strategy === "scalp") &&
             isOppositeSignal(snap, marketPosition.side as "long" | "short")
           const decision = evaluateExit(marketPosition, snap, marketCfg, opposite)
           if (decision.action === "close") {
@@ -488,6 +504,70 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
 
         if (isSelected) await resolveClassifierOutcomes(symbol, timeframe, candles)
         if (isSelected && !marketPosition) {
+          // ── Trend-scalper path (priority) ──
+          // Higher-quality pullback-in-trend entries with risk-based sizing and
+          // ATR R-multiple targets. Still gated by ML + Lorentzian + risk layer.
+          let scalpHandled = false
+          if (process.env.SCALPER_ENABLED !== "0") {
+            const scalp = evaluateScalpSignal(snap, candles, marketCfg, cfg.paperBalance ?? 10000)
+            if (scalp.triggered && scalp.direction) {
+              const scalpFeatures: FeatureVector = {
+                ...snap.features,
+                sideLong: scalp.direction === "long" ? 1 : -1,
+              }
+              const { allowed: mlAllowed, confidence: mlConf } = gateEntry(
+                model,
+                scalpFeatures,
+                marketCfg.mlConfidenceThreshold,
+              )
+              const lorentzian = classifyLorentzian(candles, lorentzianOptions(marketCfg))
+              const confirmation = combineConfirmation(
+                marketCfg.confirmationMode,
+                scalp.direction,
+                mlAllowed,
+                lorentzian,
+              )
+              // Blend the scalp confluence with the ML confidence so sizing and
+              // the learning signal reflect BOTH the setup quality and the model.
+              const blended = Math.max(0, Math.min(1, scalp.confidence * (mlConf || 0.5) * 2))
+              const reason = `SCALP: ${scalp.reason}; ${confirmation.reason}; ${lorentzian.reason}`
+              await db.insert(classifierDecisions).values({
+                symbol,
+                timeframe,
+                candleTime: candles[candles.length - 1].time,
+                candidateDirection: scalp.direction,
+                strategy: "scalp",
+                regime: detectRegime(snap, marketCfg),
+                entryPrice: snap.price,
+                confirmationMode: marketCfg.confirmationMode,
+                logisticAllowed: mlAllowed,
+                logisticConfidence: mlConf,
+                lorentzianDirection: lorentzian.direction,
+                lorentzianVote: lorentzian.vote,
+                lorentzianConfidence: lorentzian.confidence,
+                lorentzianAllowed: lorentzian.allowed,
+                lorentzianFilters: lorentzian.filters,
+                finalAllowed: confirmation.allowed,
+                reason,
+              }).onConflictDoNothing()
+              await log("info", `SCALP ${scalp.direction.toUpperCase()} candidate: ${reason}`, {
+                scalpConfluence: scalp.confidence,
+                mlConfidence: mlConf,
+                lorentzianConfidence: lorentzian.confidence,
+                rMultiple: scalp.rMultiple,
+              })
+              if (confirmation.allowed) {
+                await openPosition(marketCfg, scalp.direction, snap, blended, scalpFeatures, "scalp", {
+                  sizeUsdtOverride: scalp.suggestedSizeUsdt ?? undefined,
+                  stopLoss: scalp.stopLoss ?? undefined,
+                  takeProfit: scalp.takeProfit ?? undefined,
+                })
+                scalpHandled = true
+              }
+            }
+          }
+
+          if (!scalpHandled) {
           const signal = evaluateEntry(snap, candles, marketCfg, model, cfg.paperBalance ?? 10000)
           if (signal.baseTriggered && signal.candidateDirection && signal.features) {
             const lorentzian = classifyLorentzian(candles, lorentzianOptions(marketCfg))
@@ -526,6 +606,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
             if (confirmation.allowed) {
               await openPosition(marketCfg, signal.candidateDirection, snap, signal.confidence, signal.features, signal.strategy)
             }
+          }
           }
         }
 
