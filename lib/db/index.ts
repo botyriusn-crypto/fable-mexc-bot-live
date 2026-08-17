@@ -11,16 +11,20 @@ if (dbUrl.includes("sslmode=require") && !dbUrl.includes("uselibpqcompat")) {
 // Debug: Log sanitized connection string (hides password)
 console.log('[DB] Connecting to:', dbUrl.replace(/:[^:@]+@/, ':****@'))
 
-// Configure pool for Neon with proper settings
+// Fly Postgres (primary) is reached over the private .flycast/.internal network
+// and does not terminate TLS the same way Neon does, so disable SSL for Fly.
+// Neon (backup only) still requires SSL, so keep it there.
+const isFlyInternal = /\.(flycast|internal)(:|$)/.test(dbUrl)
+
 export const pool = new Pool({
   connectionString: dbUrl,
-  ssl: { rejectUnauthorized: false },
+  ssl: isFlyInternal ? false : { rejectUnauthorized: false },
   max: 2, // Keep pool small for serverless
   idleTimeoutMillis: 10000, // Shorter idle timeout
   connectionTimeoutMillis: 10000,
 })
 
-// Retry wrapper for Neon cold starts
+// Retry wrapper for transient network errors
 const originalQuery = pool.query.bind(pool)
 pool.query = async (...args: any[]) => {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -37,7 +41,7 @@ pool.query = async (...args: any[]) => {
       } catch (logErr) {
         console.error('[DB] Could not log failing query:', logErr)
       }
-      // Retry on common transient network errors (Neon cold starts, DNS drops, etc.)
+      // Retry on common transient network errors
       if (['ETIMEDOUT', 'ENETUNREACH', 'ECONNRESET', 'EAI_AGAIN'].includes(err?.code) && attempt < 2) {
         console.log(`[DB] Connection issue, retry ${attempt + 1}/3...`)
         await new Promise(r => setTimeout(r, 5000))
