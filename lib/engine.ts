@@ -26,6 +26,7 @@ import { maybeRunGridAiAdvisorAuto } from "./ai-grid-advisor"
 import { analyzeTradesForMarket, applyRecommendations } from "./ai-advisor"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager } from './mexc/ws';
+import { getAccountAssets } from './mexc/private';
 import {
   evaluatePortfolioRisk,
   isTradingHalted,
@@ -695,10 +696,33 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       }
     }
 
+    // Record equity snapshot
+    const isLive = cfgAfter.mode === "live"
+    let recordBalance = cfgAfter.paperBalance
+    let recordEquity = cfgAfter.paperBalance + totalUnrealized
+    let recordUnrealized = totalUnrealized
+    
+    if (isLive) {
+      // In live mode, fetch actual account equity from MEXC
+      try {
+        const assets = await getAccountAssets()
+        const usdt = Array.isArray(assets) ? assets.find((a: any) => a.currency === "USDT") : null
+        if (usdt) {
+          recordBalance = usdt.availableBalance || 0
+          recordEquity = usdt.equity || 0
+          recordUnrealized = usdt.unrealized || 0
+        }
+      } catch (err) {
+        // If live fetch fails, fall back to paper values
+        console.error("Live equity fetch failed, using paper values:", err)
+      }
+    }
+    
     await db.insert(equitySnapshots).values({
-      balance: cfgAfter.paperBalance,
-      equity: cfgAfter.paperBalance + totalUnrealized,
-      unrealizedPnl: totalUnrealized,
+      balance: recordBalance,
+      equity: recordEquity,
+      unrealizedPnl: recordUnrealized,
+      live: isLive,
     })
 
     // Refresh cached risk state with the exact freshly-computed unrealized PnL,
