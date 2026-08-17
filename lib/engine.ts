@@ -634,22 +634,6 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       const mark = marks.get(position.symbol)
       if (mark != null) totalUnrealized += unrealizedPnl(position, mark)
     }
-    // ── Flash Fade detection ──
-    for (const gc of gridCfgs) {
-      try {
-        const ffCandles = await exchange.fetchKlines(toExchangeSymbol(gc.symbol), "Min5", 50)
-        if (ffCandles.length >= 30) {
-          const ffSignal = detectFlashFade(ffCandles)
-          if (ffSignal.detected) {
-            await executeFlashFade(gc.symbol, gc.timeframe, ffSignal, {
-              enabled: true, minMovePct: 20, minVolumeMultiplier: 5,
-              positionSizeUsdt: 300, leverage: 3, maxPositions: 2,
-            })
-          }
-        }
-      } catch (err) { /* best-effort */ }
-    }
-
     for (const key of marketKeys) {
       const [symbol, timeframe] = key.split("|")
       const mark = marks.get(symbol)
