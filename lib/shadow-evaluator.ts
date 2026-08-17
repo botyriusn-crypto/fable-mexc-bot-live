@@ -3,7 +3,7 @@
 import { and, eq, isNull, sql } from "drizzle-orm"
 import { db } from "./db"
 import { classifierDecisions, gridConfigs } from "./db/schema"
-import { loadModelById, loadModel, predict, trainShadowOnDecision } from "./ml"
+import { loadModelById, predict, trainShadowOnDecision, MODEL_IDS } from "./ml"
 import { recordOutcome, heuristicScore } from "./advisor"
 import { fetchTicker, fetchKlines } from "./mexc/public"
 import { ema, rsi, macdHistogram, atr, rateOfChange, adx, volumeSurge } from "./indicators"
@@ -65,7 +65,9 @@ async function computeLiveFeatures(symbol: string, timeframe: string): Promise<{
 }
 
 export async function runShadowCycle(): Promise<void> {
-  let model = await loadModelById(1)
+  // Shadow uses its OWN model row so its timing experiments never overwrite the
+  // live grid model (id=1).
+  let model = await loadModelById(MODEL_IDS.shadow)
 
   // 1) Iterate enabled grid configs (one evaluation per symbol per candle bucket)
   const configs = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
@@ -143,7 +145,7 @@ export async function runShadowCycle(): Promise<void> {
     if (f) {
       await recordOutcome(f, d.candidateDirection, d.logisticConfidence, correct, ret).catch(() => {})
       const feat = { ...f, sideLong: d.candidateDirection === "long" ? 1 : 0 } as FeatureVector
-      model = await trainShadowOnDecision(model, feat, d.candidateDirection as any, actual, ret, 0.02, d.id)
+      model = await trainShadowOnDecision(model, feat, d.candidateDirection as any, actual, ret, 0.02, d.id, MODEL_IDS.shadow)
     }
   }
 }
@@ -157,8 +159,8 @@ export async function getShadowStats() {
   const correct = resolved.filter(d => d.outcomeCorrectLogistic).length
   const unresolved = rows.filter(d => !d.resolvedAt)
   
-  // Load current model to recompute honest real-time confidence
-  const model = await loadModel()
+  // Load current shadow model to recompute honest real-time confidence
+  const model = await loadModelById(MODEL_IDS.shadow)
   
   const scored = unresolved.map(d => {
     const f = (d.lorentzianFilters ?? {}) as any as FeatureVector

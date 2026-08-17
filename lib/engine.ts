@@ -18,7 +18,7 @@ import { type Candle } from "./mexc/public"
 import { getExchangeClient, type Exchange } from "./exchange"
 import { classifyLorentzian, combineConfirmation } from "./lorentzian"
 import { computeSnapshot, type FeatureVector, type IndicatorSnapshot } from "./indicators"
-import { loadModel, trainOnTrade, gateEntry } from "./ml"
+import { loadModelFor, trainOnTrade, gateEntry, MODEL_IDS } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs, type GridConfig } from "./grid"
 import { detectFlashFade, executeFlashFade } from "./flash-fade"
@@ -285,10 +285,14 @@ export async function closePosition(
     `Closed ${position.side.toUpperCase()} @ ${exitPrice.toFixed(2)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT (${pnlPct.toFixed(2)}%) | reason: ${reason.toUpperCase()}`,
   )
 
-  // Learning loop: every closed trade trains the model
+  // Learning loop: every closed trade trains the model dedicated to its strategy
+  // (scalp → scalp model, everything else on this engine path → trend model), so
+  // trend and scalp each learn their own edge instead of poisoning a shared model.
   if (position.entryFeatures) {
     try {
-      const model = await loadModel()
+      const learnStrategy = position.strategy === "scalp" ? "scalp" : "trend"
+      const modelId = learnStrategy === "scalp" ? MODEL_IDS.scalp : MODEL_IDS.trend
+      const model = await loadModelFor(learnStrategy)
       await trainOnTrade(
         model,
         position.entryFeatures as unknown as FeatureVector,
@@ -297,8 +301,9 @@ export async function closePosition(
         cfg.mlLearningRate,
         trade.id,
         position.id,
+        modelId,
       )
-      await log("info", `Model updated from trade #${trade.id} (${netPnl > 0 ? "win" : "loss"})`)
+      await log("info", `Model[${learnStrategy}] updated from trade #${trade.id} (${netPnl > 0 ? "win" : "loss"})`)
     } catch (err) {
       await log("error", `Model training failed: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -356,7 +361,8 @@ export async function runWebhookSignal(
       await closePosition(openPos, snap.price, "signal", cfg)
     }
 
-    const model = await loadModel()
+    // Webhook signals are discretionary trend entries → use the trend model.
+    const model = await loadModelFor("trend")
     const features: FeatureVector = {
       ...snap.features,
       sideLong: action === "long" ? 1 : -1,
@@ -428,7 +434,11 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       )
     }
 
-    const model = await loadModel()
+    // Separate models per entry style so each learns its own edge (see MODEL_IDS):
+    // the automated trend/momentum entry uses the trend model, the pullback
+    // scalper uses the scalp model. Grid trains its own model inside grid.ts.
+    const trendModel = await loadModelFor("trend")
+    const scalpModel = await loadModelFor("scalp")
     const marks = new Map<string, number>()
 
     const tickerCache = new Map()
@@ -516,7 +526,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
                 sideLong: scalp.direction === "long" ? 1 : -1,
               }
               const { allowed: mlAllowed, confidence: mlConf } = gateEntry(
-                model,
+                scalpModel,
                 scalpFeatures,
                 marketCfg.mlConfidenceThreshold,
               )
@@ -568,7 +578,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
           }
 
           if (!scalpHandled) {
-          const signal = evaluateEntry(snap, candles, marketCfg, model, cfg.paperBalance ?? 10000)
+          const signal = evaluateEntry(snap, candles, marketCfg, trendModel, cfg.paperBalance ?? 10000)
           if (signal.baseTriggered && signal.candidateDirection && signal.features) {
             const lorentzian = classifyLorentzian(candles, lorentzianOptions(marketCfg))
             const confirmation = combineConfirmation(

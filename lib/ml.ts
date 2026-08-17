@@ -19,6 +19,23 @@ export const FEATURE_KEYS: (keyof FeatureVector)[] = [
 ]
 const MODEL_GEN = 2
 
+// Separate model rows per learner so each learns its OWN edge. Grid trading is
+// mean-reverting (buy dips, sell rips) while trend/scalp entries are momentum
+// (buy strength, sell weakness) — their feature→outcome relationships are often
+// OPPOSITE, so training them into one shared model (the previous behaviour) had
+// each half constantly undoing the other's learning ("data poisoning"). Keeping
+// id=1 as the grid model preserves whatever the currently-working grid has
+// already learned; the others start cold and ramp up via gateEntry's cold-start
+// relaxation. All ids are env-overridable.
+export const MODEL_IDS = {
+  grid: Number(process.env.ML_MODEL_ID_GRID) || 1,
+  trend: Number(process.env.ML_MODEL_ID_TREND) || 2,
+  scalp: Number(process.env.ML_MODEL_ID_SCALP) || 3,
+  shadow: Number(process.env.ML_MODEL_ID_SHADOW) || 4,
+} as const
+
+export type ModelStrategy = keyof typeof MODEL_IDS
+
 export interface MlState {
   weights: Record<string, number>
   bias: number
@@ -128,6 +145,11 @@ export async function loadModelById(id: number): Promise<MlState> {
   }
 }
 
+// Load the dedicated model for a given strategy ("grid" | "trend" | "scalp" | "shadow").
+export async function loadModelFor(strategy: ModelStrategy): Promise<MlState> {
+  return loadModelById(MODEL_IDS[strategy])
+}
+
 // Shadow evaluation: predict without placing orders
 export function shadowPredict(model: MlState, features: FeatureVector): number {
   return predict(model, features)
@@ -141,7 +163,8 @@ export async function trainShadowOnDecision(
   actualDirection: "long" | "short" | "neutral",
   outcomeReturn: number,
   learningRate: number,
-  decisionId: number
+  decisionId: number,
+  modelId: number = MODEL_IDS.shadow,
 ): Promise<MlState> {
   const label = predictedDirection === actualDirection ? 1 : 0
   
@@ -176,7 +199,7 @@ export async function trainShadowOnDecision(
       rollingAccuracy: newRollingAccuracy,
       updatedAt: sql`NOW()`,
     })
-    .where(eq(mlModel.id, 1))
+    .where(eq(mlModel.id, modelId))
   
   return {
     weights: newWeights,
@@ -195,16 +218,13 @@ export async function trainOnTrade(
   learningRate: number,
   tradeId: number,
   positionId: number | null,
-  tradeMode?: "grid" | "trend",
+  modelId: number = MODEL_IDS.grid,
 ): Promise<MlState> {
   const label = won ? 1 : 0
-  
-  // Mode gating: if specified, only train on matching mode to prevent data poisoning.
-  // ML_MODE from env: if GRID_MAKER=1, we're in trend mode; otherwise grid mode.
-  const ML_MODE = process.env.GRID_MAKER === "1" ? "trend" : "grid"
-  if (tradeMode && tradeMode !== ML_MODE) {
-    return model // Skip training, return unchanged state
-  }
+  // Data-poisoning is now prevented structurally: each strategy trains its OWN
+  // model row (see MODEL_IDS), so there is no need to DROP off-mode trades — a
+  // drop would just throw away hard-won, real outcome data. The caller selects
+  // the correct model via `modelId`.
 
   const prediction = predict(model, features)
   const error = prediction - label
@@ -248,7 +268,7 @@ export async function trainOnTrade(
       rollingAccuracy: newRollingAccuracy,
       updatedAt: sql`NOW()`,
     })
-    .where(eq(mlModel.id, 1))
+    .where(eq(mlModel.id, modelId))
 
   await db.insert(tradeFeatures).values({
     tradeId,

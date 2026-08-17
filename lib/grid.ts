@@ -4,7 +4,7 @@ import { eq, sql, and, inArray, desc, isNotNull } from 'drizzle-orm'
 import type { FeatureVector, IndicatorSnapshot } from "./indicators"
 import { detectVolatilitySurge, adaptiveSpacing, type VolatilityState } from "./volatility-guard"
 import type { Regime } from "./strategy"
-import { loadModel, trainOnTrade } from "./ml"
+import { loadModelFor, trainOnTrade, MODEL_IDS } from "./ml"
 import { getExchangeClient, type ExchangeClient, type Exchange } from "./exchange"
 import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderStatus, cancelOrders, getAccountAssets } from "./mexc/private"
 import type { Candle } from "./mexc/public"
@@ -699,7 +699,7 @@ async function settleGridSell(
 
   if (trade && order.entryFeatures) {
     try {
-      const model = await loadModel()
+      const model = await loadModelFor("grid")
       await trainOnTrade(
         model,
         order.entryFeatures as unknown as FeatureVector,
@@ -708,6 +708,7 @@ async function settleGridSell(
         cfg.mlLearningRate,
         trade.id,
         null,
+        MODEL_IDS.grid,
       )
     } catch (err) {
       await log("error", `Grid ML update failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -770,7 +771,7 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
 
   if (trade && order.entryFeatures) {
     try {
-      const model = await loadModel()
+      const model = await loadModelFor("grid")
       await trainOnTrade(
         model,
         order.entryFeatures as unknown as FeatureVector,
@@ -779,6 +780,7 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
         cfg.mlLearningRate,
         trade.id,
         null,
+        MODEL_IDS.grid,
       )
     } catch (err) {
       await log("error", `Grid ML update failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -836,8 +838,20 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
 
   if (trade && order.entryFeatures) {
     try {
-      const model = await loadModel()
-      // [non-grid ML] grid fills no longer train the model
+      // CRITICAL for self-learning: previously loss closes (stop-loss/max-hold)
+      // did NOT train, so the grid model only ever saw winning TP fills and could
+      // never learn to avoid bad entries. Train the grid model on this outcome.
+      const model = await loadModelFor("grid")
+      await trainOnTrade(
+        model,
+        order.entryFeatures as unknown as FeatureVector,
+        netPnl > 0,
+        sizeUsdt > 0 ? (netPnl / sizeUsdt) * 100 : 0,
+        cfg.mlLearningRate,
+        trade.id,
+        null,
+        MODEL_IDS.grid,
+      )
     } catch (err) {
       await log("error", `Grid ML update failed: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -883,8 +897,20 @@ if (cfg.mode === "paper") {
 }
 if (trade && order.entryFeatures) {
 try {
-const model = await loadModel()
-// [non-grid ML] grid fills no longer train the model
+// Train the grid model on this short loss/close too (see long path above):
+// learning only from wins was starving the model of the losses it most
+// needs to learn from.
+const model = await loadModelFor("grid")
+await trainOnTrade(
+  model,
+  order.entryFeatures as unknown as FeatureVector,
+  netPnl > 0,
+  sizeUsdt > 0 ? (netPnl / sizeUsdt) * 100 : 0,
+  cfg.mlLearningRate,
+  trade.id,
+  null,
+  MODEL_IDS.grid,
+)
 } catch (err) {
 await log("error", `Grid ${order.symbol} (maker short) ML update failed: ${dbErr(err)}`)
 }
