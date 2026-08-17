@@ -11,6 +11,7 @@ import type { Candle } from "./mexc/public"
 import { fetchTicker } from "./mexc/public"
 import { roundMexcQuantity, roundMexcPrice, getMexcSpec, getMexcSpecAsync, getMexcFeeRates } from "./mexc/precision"
 import { livePrices } from "./mexc/ws"
+import { isTradingHalted, marginBudgetRemaining, getRiskState } from "./risk-manager"
 
 
 // Global cooldown to prevent duplicate setups
@@ -247,6 +248,20 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
 
 // Pre-fetch MEXC specs before grid setup
 export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, volatility?: VolatilityState, exchange?: ExchangeClient, startAtPrice = false): Promise<void> {
+  // ── Portfolio risk gate ── do not deploy NEW grid capital while the
+  // portfolio-level risk layer is halted (daily loss / drawdown / margin cap).
+  // Fill detection, stop-losses and teardown live in runGridTick and are
+  // unaffected — this only prevents placing fresh grid orders.
+  if (isTradingHalted()) {
+    const rs = getRiskState()
+    await log("info", `Grid ${gc.symbol}: setup skipped — risk layer halted (${rs?.reasons.join("; ") || "risk limit"})`)
+    return
+  }
+  if (marginBudgetRemaining() <= 0) {
+    await log("info", `Grid ${gc.symbol}: setup skipped — total margin cap reached, no budget for new orders`)
+    return
+  }
+
   // COOLDOWN LOCK: Prevent duplicate setups
   const lastSetup = GRID_SETUP_COOLDOWN.get(gc.symbol) || 0;
   const timeSinceLastSetup = Date.now() - lastSetup;

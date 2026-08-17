@@ -101,6 +101,23 @@ export interface BotState {
   watchdog?: unknown
   liveStats?: unknown
   todayStats?: unknown
+  risk?: {
+    tradingHalted: boolean
+    killSwitch: boolean
+    reasons: string[]
+    equity: number
+    dayStartEquity: number
+    peakEquity: number
+    dailyRealizedPnl: number
+    dailyPnl: number
+    dailyPnlPct: number
+    drawdownPct: number
+    usedMargin: number
+    usedMarginPct: number
+    marginBudgetRemaining: number
+    openPositionCount: number
+    updatedAt: number
+  } | null
 }
 
 const fetcher = async (url: string) => {

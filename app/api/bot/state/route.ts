@@ -14,6 +14,7 @@ import { isRotationEnabled, getLastRotationTime } from "@/lib/portfolio-rotator"
 import { getShadowStats, runShadowCycle } from "@/lib/shadow-evaluator"
 import { getWatchdogReport } from "@/lib/watchdog"
 import { loadModel } from "@/lib/ml"
+import { evaluatePortfolioRisk, getRiskState } from "@/lib/risk-manager"
 
 interface MexcAsset {
   currency: string; availableBalance: number; equity: number;
@@ -217,10 +218,18 @@ export async function GET() {
       latest: marketDecisions[0] ?? null,
     }
 
+    // Portfolio risk snapshot: prefer the cached state from the last tick;
+    // if the bot hasn't ticked yet, compute a fresh one so the UI isn't blank.
+    let risk = getRiskState()
+    if (!risk) {
+      try { risk = await evaluatePortfolioRisk(cfg, totalGridUnrealized) } catch { risk = null }
+    }
+
     return NextResponse.json({
       rotationEnabled: isRotationEnabled(),
       lastRotationTime: getLastRotationTime(),
       shadowStats,
+      risk,
       sniperModel,
       watchdog: getWatchdogReport(),
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,

@@ -26,6 +26,13 @@ import { maybeRunGridAiAdvisorAuto } from "./ai-grid-advisor"
 import { analyzeTradesForMarket, applyRecommendations } from "./ai-advisor"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager } from './mexc/ws';
+import {
+  evaluatePortfolioRisk,
+  isTradingHalted,
+  canOpenNewPosition,
+  marginBudgetRemaining,
+  getRiskState,
+} from "./risk-manager"
 
 const TAKER_FEE = 0.0002 // 0.02%
 
@@ -117,6 +124,24 @@ async function openPosition(
   features: FeatureVector,
   strategy: "trend" | "range" | "webhook" = "trend",
 ): Promise<void> {
+  // ── Portfolio risk gate ── never ADD risk while halted / over caps.
+  if (isTradingHalted() || !canOpenNewPosition()) {
+    const rs = getRiskState()
+    await log(
+      "info",
+      `Entry blocked by risk layer (${direction} ${cfg.symbol}): ${rs?.reasons.join("; ") || "max open positions reached"}`,
+    )
+    return
+  }
+  // Reject if this position's margin would breach the total-margin cap.
+  if (cfg.positionSizeUsdt > marginBudgetRemaining()) {
+    await log(
+      "info",
+      `Entry blocked by margin cap (${direction} ${cfg.symbol}): need ${cfg.positionSizeUsdt} USDT margin, only ${marginBudgetRemaining().toFixed(2)} remaining`,
+    )
+    return
+  }
+
   const price = snap.price
   const quantity = (cfg.positionSizeUsdt * cfg.leverage) / price
 
@@ -375,6 +400,18 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     for (const pos of openPositions) marketKeys.add(`${pos.symbol}|${pos.timeframe}`)
     for (const order of activeGrid) marketKeys.add(`${order.symbol}|${order.timeframe}`)
 
+    // ── Portfolio risk assessment (before any new capital is deployed) ──
+    // Uses realized PnL + last-known unrealized; refreshed at tick end. When
+    // halted, openPosition() and setupGrid() will refuse to open NEW risk, but
+    // exits / stop-losses / teardowns below still run normally.
+    const risk = await evaluatePortfolioRisk(cfg)
+    if (risk.tradingHalted) {
+      await log(
+        "info",
+        `⚠️ Risk layer HALTED new trades — ${risk.reasons.join("; ")} | equity ${risk.equity.toFixed(2)} day ${risk.dailyPnlPct >= 0 ? "+" : ""}${(risk.dailyPnlPct * 100).toFixed(1)}% dd ${(risk.drawdownPct * 100).toFixed(1)}%`,
+      )
+    }
+
     const model = await loadModel()
     const marks = new Map<string, number>()
 
@@ -572,6 +609,13 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       equity: cfgAfter.paperBalance + totalUnrealized,
       unrealizedPnl: totalUnrealized,
     })
+
+    // Refresh cached risk state with the exact freshly-computed unrealized PnL,
+    // so the /api/bot/state route and the next tick see up-to-date numbers.
+    try {
+      await evaluatePortfolioRisk(cfgAfter, totalUnrealized)
+    } catch { /* best-effort */ }
+
     return { status: "ok" }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
