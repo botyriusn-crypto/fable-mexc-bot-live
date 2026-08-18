@@ -14,8 +14,7 @@ export async function POST() {
     const config = cfg[0]
     const result = await analyzeTradesForMarket(config.symbol, config.timeframe)
 
-    // Apply the recommendations through the levers (guardrails) so a manual
-    // "run analysis" actually tunes the bot — not just preview it.
+    // Apply through the levers so "run analysis" actually tunes the bot.
     let applied = false
     if (result?.recommendations?.length) {
       applied = await applyRecommendations(0, result.recommendations)
