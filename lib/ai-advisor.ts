@@ -1,6 +1,7 @@
 import { db } from "./db"
 import { trades, botConfig, aiRecommendations } from "./db/schema"
 import { eq, desc, and } from "drizzle-orm"
+import { clampRecommendations } from "./ai-levers"
 
 export interface TradeAnalysis {
   tradeCount: number
@@ -164,10 +165,24 @@ export async function applyRecommendations(
       positionSizeUsdt: "position_size_usdt",
     }
 
+    // Route every suggestion through the levers (guardrails) before writing.
+    const { applied, skipped } = clampRecommendations(
+      recommendations as Array<{ field: string; current: string | number | boolean; suggested: string | number | boolean; reason: string; impact: string }>,
+    )
+
+    for (const rec of skipped) {
+      console.warn(`[AI Advisor] Skipped ${rec.field}: ${rec.skipReason}`)
+    }
+    for (const rec of applied) {
+      if (rec.wasClamped) {
+        console.warn(`[AI Advisor] Clamped ${rec.field}: ${rec.current} -> ${rec.suggested} -> ${rec.clamped}`)
+      }
+    }
+
     const updates: Record<string, unknown> = {}
-    for (const rec of recommendations) {
+    for (const rec of applied) {
       const dbField = fieldMap[rec.field]
-      if (dbField) updates[rec.field] = rec.suggested
+      if (dbField) updates[dbField] = rec.clamped
     }
     if (Object.keys(updates).length === 0) return false
 
