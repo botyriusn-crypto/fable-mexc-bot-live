@@ -244,12 +244,12 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
 
     // CAP PAIR COUNT TO FREE BALANCE: greedily take the highest-scoring picks
     // until the free USDT can no longer fund another pair's minimum margin
-    // (one order per side). Mirrors grid.ts's backoff condition
+    // (one-sided, since auto grids trend). Mirrors grid.ts.s backoff condition
     // (budget * leverage >= MIN_NOTIONAL * sidesPerLevel) and reserves the
     // same SAFETY_FACTOR headroom computeSafeGridSettings uses, so the
     // advisor never recommends more pairs than the account can actually place.
     const MIN_NOTIONAL = 1.0
-    const COMBO_SIDES = 2
+    const COMBO_SIDES = 1
     const SAFETY_FACTOR = 0.7
     const cappedPicks: typeof topPicks = []
     let remaining = safeSizingPreview.availableBalance * SAFETY_FACTOR

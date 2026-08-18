@@ -15,7 +15,7 @@ export interface SafeGridSettings {
 // of the notional formula — it scales position size, not margin used). So
 // building both ladders at full size commits roughly 2x `budget` in real
 // margin per pair, not 1x. Every budgetPct must be sized with this in mind.
-const COMBO_MARGIN_MULTIPLIER = 2
+const COMBO_MARGIN_MULTIPLIER = 1.5
 
 // Never let all enabled pairs collectively plan to use more than this
 // fraction of available margin. Leaves headroom for price movement,
@@ -68,7 +68,7 @@ export async function computeSafeGridSettings(
   const levels = availableBalance < 100 ? 4 : availableBalance < 500 ? 6 : 10
 
   // Evenly split the safe margin budget across every pair that will be
-  // competing for it, then account for COMBO needing 2x per pair.
+  // competing for it, then account for the 1.5x safety buffer per pair.
   let budgetPct = (SAFETY_FACTOR * 100) / (COMBO_MARGIN_MULTIPLIER * totalPairs)
 
   // MINIMUM-NOTIONAL FLOOR: a budgetPct that can't place even ONE order at
@@ -81,7 +81,7 @@ export async function computeSafeGridSettings(
   const MIN_NOTIONAL = 1.0
   // grid.ts backoff: budget * leverage < MIN_NOTIONAL * sidesPerLevel.
   // So minimum budget = MIN_NOTIONAL * sidesPerLevel / leverage (leverage
-  // DOES reduce the margin needed). COMBO = 2 sides.
+  // DOES reduce the margin needed). 1.5x safety buffer (auto grids are one-sided in trends).
   //   budgetPct >= MIN_NOTIONAL * COMBO_MARGIN_MULTIPLIER * 100 / (availableBalance * leverage)
   const minBudgetPctForNotional = availableBalance > 0
     ? (MIN_NOTIONAL * COMBO_MARGIN_MULTIPLIER * 100) / (availableBalance * leverage)
