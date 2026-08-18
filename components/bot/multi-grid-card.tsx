@@ -639,10 +639,12 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
 </select>
         <div className="flex items-center gap-1 mr-2" title="Available budget to deploy">
           {(() => {
+            const live = state.liveAccount && !("error" in state.liveAccount) ? state.liveAccount : null
+            const available = live ? live.availableBalance : state.config.paperBalance
             const totalDeployed = grids.reduce((s, g) => s + (g.budgetPct || 0), 0)
-            const avail = Math.max(0, Math.round(100 - totalDeployed))
-            const color = avail >= 40 ? "text-success border-success/40 bg-success/10" : avail >= 20 ? "text-chart-3 border-chart-3/40 bg-chart-3/10" : "text-danger border-danger/40 bg-danger/10"
-            return <span className={`shrink-0 font-mono text-[10px] px-1.5 py-0.5 rounded border ${color}`}>💰 {avail}% free</span>
+            const availPct = Math.max(0, Math.round(100 - totalDeployed))
+            const color = availPct >= 40 ? "text-success border-success/40 bg-success/10" : availPct >= 20 ? "text-chart-3 border-chart-3/40 bg-chart-3/10" : "text-danger border-danger/40 bg-danger/10"
+            return <span className={`shrink-0 font-mono text-[10px] px-1.5 py-0.5 rounded border ${color}`}>💰 {fmt(available, 2)} USDT · {availPct}% free</span>
           })()}
         </div>
         </div>
