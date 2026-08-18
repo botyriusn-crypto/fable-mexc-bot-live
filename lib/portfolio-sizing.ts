@@ -209,7 +209,7 @@ export async function computePortfolioRebalance(timeframe = "Min15"): Promise<Re
     //   availableBalance * budgetPct/100 * leverage >= MIN_NOTIONAL * levels * sidesPerLevel
     //   budgetPct >= MIN_NOTIONAL * levels * sidesPerLevel * 100 / (availableBalance * leverage)
     const minBudgetPctForNotional = availableBalance > 0
-      ? (MIN_NOTIONAL * levels * sidesPerLevel * 100) / (availableBalance * gc.leverage)
+      ? (MIN_NOTIONAL * sidesPerLevel * 100) / availableBalance
       : MIN_BUDGET_PCT
 
     // Then apply the absolute floor/ceiling (floor is now notional-aware).

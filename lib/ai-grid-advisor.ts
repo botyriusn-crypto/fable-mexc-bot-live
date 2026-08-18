@@ -242,14 +242,39 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
     }
     const topPicks = depthChecked
 
-    const finalSizing = await computeSafeGridSettings(topPicks.length)
+    // CAP PAIR COUNT TO FREE BALANCE: greedily take the highest-scoring picks
+    // until the free USDT can no longer fund another pair's minimum margin
+    // (one order per side). Mirrors grid.ts's backoff condition
+    // (budget * leverage >= MIN_NOTIONAL * sidesPerLevel) and reserves the
+    // same SAFETY_FACTOR headroom computeSafeGridSettings uses, so the
+    // advisor never recommends more pairs than the account can actually place.
+    const MIN_NOTIONAL = 1.0
+    const COMBO_SIDES = 2
+    const SAFETY_FACTOR = 0.7
+    const cappedPicks: typeof topPicks = []
+    let remaining = safeSizingPreview.availableBalance * SAFETY_FACTOR
+    for (const m of topPicks) {
+      const minMargin = (MIN_NOTIONAL * COMBO_SIDES) / Math.max(1, m.suggestedLeverage)
+      if (remaining >= minMargin) {
+        cappedPicks.push(m)
+        remaining -= minMargin
+      }
+    }
+    if (cappedPicks.length < topPicks.length) {
+      await db.insert(botLogs).values({
+        level: "info",
+        message: `AI Advisor: capped ${topPicks.length} picks to ${cappedPicks.length} — free balance $${safeSizingPreview.availableBalance.toFixed(2)} funds at most ${cappedPicks.length} pair(s)`,
+      }).catch(() => {})
+    }
+
+    const finalSizing = await computeSafeGridSettings(cappedPicks.length)
 
     // Budget-aware guard: drop any pick whose ACTUAL order notional (using
     // its own suggested levels/leverage, not the sizing defaults) would fall
     // below MEXC's minimum. Prevents auto-rotating into a pair that
     // immediately hits "budget too small" backoffs.
     const MIN_ORDER_NOTIONAL = 1.0
-    const viablePicks = topPicks.filter(m => {
+    const viablePicks = cappedPicks.filter(m => {
       const leverage = m.suggestedLeverage
       // Only drop picks that can't fund even ONE level (one order per side).
       // grid.ts already reduces levels at setup when the full suggested count
@@ -258,10 +283,10 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
       const notionalPerOrder = finalSizing.availableBalance * finalSizing.budgetPct / 100 * leverage / 2
       return notionalPerOrder >= MIN_ORDER_NOTIONAL
     })
-    if (viablePicks.length < topPicks.length) {
+    if (viablePicks.length < cappedPicks.length) {
       await db.insert(botLogs).values({
         level: "info",
-        message: `AI Advisor: dropped ${topPicks.length - viablePicks.length} pick(s) — notional below $${MIN_ORDER_NOTIONAL} per order after budget sizing`,
+        message: `AI Advisor: dropped ${cappedPicks.length - viablePicks.length} pick(s) — notional below $${MIN_ORDER_NOTIONAL} per order after budget sizing`,
       }).catch(() => {})
     }
 

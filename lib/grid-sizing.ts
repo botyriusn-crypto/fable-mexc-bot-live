@@ -79,8 +79,12 @@ export async function computeSafeGridSettings(
   //   availableBalance * budgetPct/100 * leverage / levels >= MIN_NOTIONAL
   //   budgetPct >= MIN_NOTIONAL * levels * 100 / (availableBalance * leverage)
   const MIN_NOTIONAL = 1.0
+  // grid.ts backoff: budget * leverage < MIN_NOTIONAL * sidesPerLevel.
+  // So minimum budget = MIN_NOTIONAL * sidesPerLevel / leverage (leverage
+  // DOES reduce the margin needed). COMBO = 2 sides.
+  //   budgetPct >= MIN_NOTIONAL * COMBO_MARGIN_MULTIPLIER * 100 / (availableBalance * leverage)
   const minBudgetPctForNotional = availableBalance > 0
-    ? (MIN_NOTIONAL * levels * 100) / (availableBalance * leverage)
+    ? (MIN_NOTIONAL * COMBO_MARGIN_MULTIPLIER * 100) / (availableBalance * leverage)
     : MIN_BUDGET_PCT
   budgetPct = Math.max(minBudgetPctForNotional, Math.min(MAX_BUDGET_PCT, budgetPct))
   budgetPct = Math.round(budgetPct * 10) / 10
