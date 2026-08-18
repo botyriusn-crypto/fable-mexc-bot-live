@@ -166,14 +166,6 @@ export async function applyRecommendations(
   recommendations: Array<{ field: string; current: unknown; suggested: unknown; reason: string; impact: string }>,
 ): Promise<boolean> {
   try {
-    const fieldMap: Record<string, string> = {
-      mlConfidenceThreshold: "ml_confidence_threshold",
-      slAtrMult: "sl_atr_mult", tpAtrMult: "tp_atr_mult",
-      emaFast: "ema_fast", emaSlow: "ema_slow",
-      rsiPeriod: "rsi_period", momentumThreshold: "momentum_threshold",
-      positionSizeUsdt: "position_size_usdt",
-    }
-
     // Normalize display names ("ML Confidence Threshold") to canonical keys
     // ("mlConfidenceThreshold") before routing through the levers.
     const normalized = recommendations.map((rec) => ({ ...rec, field: normalizeField(rec.field) }))
@@ -194,8 +186,7 @@ export async function applyRecommendations(
 
     const updates: Record<string, unknown> = {}
     for (const rec of applied) {
-      const dbField = fieldMap[rec.field]
-      if (dbField) updates[dbField] = rec.clamped
+      updates[rec.field] = rec.clamped
     }
     if (Object.keys(updates).length === 0) return false
 
