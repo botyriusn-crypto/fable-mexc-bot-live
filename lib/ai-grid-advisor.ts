@@ -247,17 +247,18 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
     // its own suggested levels/leverage, not the sizing defaults) would fall
     // below MEXC's minimum. Prevents auto-rotating into a pair that
     // immediately hits "budget too small" backoffs.
-    const MIN_ORDER_NOTIONAL = 1.0
+    const MIN_ORDER_MARGIN = 1.0
     const viablePicks = topPicks.filter(m => {
       const levels = Math.max(1, Math.min(m.suggestedLevels, finalSizing.levels))
-      const leverage = Math.max(1, Math.min(m.suggestedLeverage, finalSizing.leverage))
-      const notional = (finalSizing.availableBalance * finalSizing.budgetPct / 100 / levels) * leverage
-      return notional >= MIN_ORDER_NOTIONAL
+      // COMBO = 2 sides; margin per order = budget / (levels * sides). Must
+      // clear $1 per order (same check grid.ts enforces at setup).
+      const marginPerOrder = finalSizing.availableBalance * finalSizing.budgetPct / 100 / (levels * 2)
+      return marginPerOrder >= MIN_ORDER_MARGIN
     })
     if (viablePicks.length < topPicks.length) {
       await db.insert(botLogs).values({
         level: "info",
-        message: `AI Advisor: dropped ${topPicks.length - viablePicks.length} pick(s) — notional below $${MIN_ORDER_NOTIONAL} minimum after budget sizing`,
+        message: `AI Advisor: dropped ${topPicks.length - viablePicks.length} pick(s) — margin below $${MIN_ORDER_MARGIN} per order after budget sizing`,
       }).catch(() => {})
     }
 

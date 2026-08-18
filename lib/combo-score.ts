@@ -91,11 +91,22 @@ export function comboDna(candles: Candle[], spacingPct = 0.6, lastAdx?: number):
 function suggestLeverage(dna: ComboDna): number {
   if (dna.rejected) return 1
   const absDrift = Math.abs(dna.driftPct)
-  if (dna.score >= 90 && absDrift < 3) return 10
-  if (dna.score >= 80 && absDrift < 5) return 7
-  if (dna.score >= 70 && absDrift < 8) return 5
-  if (dna.score >= 60 && absDrift < 12) return 3
-  return 1
+  const atrPct = dna.atrPct
+
+  // Volatility-based: lower ATR% → safer → higher leverage.
+  // Large caps (SUI/HYPE) have low ATR% and should lever up, not down.
+  let lev: number
+  if (atrPct < 1.0) lev = 10
+  else if (atrPct < 1.5) lev = 7
+  else if (atrPct < 2.5) lev = 5
+  else if (atrPct < 4.0) lev = 3
+  else lev = 1
+
+  // Drift guard: already moved a lot → cap leverage regardless of ATR.
+  if (absDrift > 8) lev = Math.min(lev, 1)
+  else if (absDrift > 5) lev = Math.min(lev, 3)
+
+  return lev
 }
 
 export function comboParams(dna: ComboDna, price: number) {
