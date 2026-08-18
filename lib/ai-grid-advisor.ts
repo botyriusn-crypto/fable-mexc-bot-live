@@ -325,7 +325,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
           await db.insert(gridConfigs).values({
             symbol: rec.symbol,
             timeframe: "Min15",
-            direction: "neutral",
+            direction: "auto",
             levels: rec.levels,
             rangeAtrMult: rec.atrMult,
             leverage: rec.leverage,
@@ -343,7 +343,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
           applied.push(rec.symbol)
           await db.insert(botLogs).values({
             level: "trade",
-            message: `AI Advisor auto-built and enabled COMBO grid for ${rec.symbol}: levels=${rec.levels} atrMult=${rec.atrMult}x leverage=${rec.leverage}x budget=${rec.budgetPct}%`,
+            message: `AI Advisor auto-built and enabled AUTO grid for ${rec.symbol}: levels=${rec.levels} atrMult=${rec.atrMult}x leverage=${rec.leverage}x budget=${rec.budgetPct}%`,
           }).catch(() => {})
         } catch (err) {
           console.error(`AI Advisor auto-apply failed for ${rec.symbol}:`, err)
