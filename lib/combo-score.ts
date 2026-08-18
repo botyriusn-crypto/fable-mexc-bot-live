@@ -88,29 +88,33 @@ export function comboDna(candles: Candle[], spacingPct = 0.6, lastAdx?: number):
   return { chop, revRate, rangePct, driftPct, atrPct, touches, score }
 }
 
-function suggestLeverage(dna: ComboDna): number {
+function suggestLeverage(dna: ComboDna, volumeUsdt: number): number {
   if (dna.rejected) return 1
-  const absDrift = Math.abs(dna.driftPct)
-  const atrPct = dna.atrPct
 
-  // Volatility-based: lower ATR% → safer → higher leverage.
-  // Large caps (SUI/HYPE) have low ATR% and should lever up, not down.
+  // Liquidity ceiling: 24h volume as a market-cap proxy. Large caps can
+  // absorb higher leverage without slippage; micro caps cannot.
   let lev: number
-  if (atrPct < 1.0) lev = 10
-  else if (atrPct < 1.5) lev = 7
-  else if (atrPct < 2.5) lev = 5
-  else if (atrPct < 4.0) lev = 3
+  if (volumeUsdt >= 50_000_000) lev = 10
+  else if (volumeUsdt >= 10_000_000) lev = 5
+  else if (volumeUsdt >= 2_000_000) lev = 3
   else lev = 1
 
-  // Drift guard: already moved a lot → cap leverage regardless of ATR.
+  // Volatility cap: high ATR% → pull down regardless of size.
+  const atrPct = dna.atrPct
+  if (atrPct >= 4.0) lev = Math.min(lev, 1)
+  else if (atrPct >= 2.5) lev = Math.min(lev, 3)
+  else if (atrPct >= 1.5) lev = Math.min(lev, 5)
+
+  // Drift cap: already moved a lot → pull down regardless of size.
+  const absDrift = Math.abs(dna.driftPct)
   if (absDrift > 8) lev = Math.min(lev, 1)
   else if (absDrift > 5) lev = Math.min(lev, 3)
 
   return lev
 }
 
-export function comboParams(dna: ComboDna, price: number) {
-  const suggestedLeverage = suggestLeverage(dna)
+export function comboParams(dna: ComboDna, price: number, volumeUsdt: number) {
+  const suggestedLeverage = suggestLeverage(dna, volumeUsdt)
   return {
     suggestedLeverage,
     spacingPct: Math.min(Math.max(dna.atrPct / 2, 0.4), 1.2),
