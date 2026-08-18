@@ -66,7 +66,7 @@ export async function GET() {
       db.select().from(gridOrders).where(inArray(gridOrders.status, ["pending", "external"])).orderBy(desc(gridOrders.price)),
       db.select().from(classifierDecisions).orderBy(desc(classifierDecisions.createdAt)).limit(100),
       db.select().from(gridConfigs).orderBy(gridConfigs.symbol),
-      db.select({ pnl: trades.pnl, live: trades.live }).from(trades),
+      db.select({ pnl: trades.pnl, live: trades.live, closedAt: trades.closedAt }).from(trades),
     ])
 
     // True all-time stats for LIVE trades only (paper/backtest excluded).
