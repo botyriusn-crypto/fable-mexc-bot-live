@@ -1,7 +1,7 @@
 import { db } from "./db"
 import { trades, botConfig, aiRecommendations } from "./db/schema"
 import { eq, desc, and } from "drizzle-orm"
-import { clampRecommendations } from "./ai-levers"
+import { clampRecommendations, normalizeField } from "./ai-levers"
 
 export interface TradeAnalysis {
   tradeCount: number
@@ -118,9 +118,18 @@ CURRENT SETTINGS:
 RECENT TRADE OUTCOMES:
 ${recentTrades.slice(0, 10).map((t, i) => `Trade ${i + 1}: ${t.side.toUpperCase()} - PnL: $${t.pnl.toFixed(2)}, Fees: $${t.fees.toFixed(2)}, Exit: ${t.exitReason}`).join("\n")}
 
-Provide 2-4 specific, actionable recommendations to improve performance. Return as JSON:
+Provide 2-4 specific, actionable recommendations to improve performance. Return as JSON array. Use EXACTLY these field names (camelCase, no spaces):
+- mlConfidenceThreshold
+- slAtrMult
+- tpAtrMult
+- emaFast
+- emaSlow
+- rsiPeriod
+- momentumThreshold
+- positionSizeUsdt
+
 [
-  {"field": "setting_name", "current": current_value, "suggested": suggested_value, "reason": "brief reason", "impact": "expected impact"}
+  {"field": "mlConfidenceThreshold", "current": 0.7, "suggested": 0.85, "reason": "brief reason", "impact": "expected impact"}
 ]`
 
     const text = await callLLM(prompt)
@@ -165,9 +174,13 @@ export async function applyRecommendations(
       positionSizeUsdt: "position_size_usdt",
     }
 
+    // Normalize display names ("ML Confidence Threshold") to canonical keys
+    // ("mlConfidenceThreshold") before routing through the levers.
+    const normalized = recommendations.map((rec) => ({ ...rec, field: normalizeField(rec.field) }))
+
     // Route every suggestion through the levers (guardrails) before writing.
     const { applied, skipped } = clampRecommendations(
-      recommendations as Array<{ field: string; current: string | number | boolean; suggested: string | number | boolean; reason: string; impact: string }>,
+      normalized as Array<{ field: string; current: string | number | boolean; suggested: string | number | boolean; reason: string; impact: string }>,
     )
 
     for (const rec of skipped) {

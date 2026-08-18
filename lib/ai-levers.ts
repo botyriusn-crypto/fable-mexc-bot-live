@@ -99,3 +99,30 @@ export function clampRecommendations(recommendations: RecommendationInput[]): Cl
 
   return { applied, skipped }
 }
+
+// Map human-readable display names (what DeepSeek sometimes emits) to the
+// canonical camelCase keys used by FIELD_LIMITS and the fieldMap. Safety net:
+// the prompt asks for canonical names, but if the model echoes a display name
+// like "ML Confidence Threshold", we still resolve it correctly.
+export function normalizeField(field: string): string {
+  if (FIELD_LIMITS[field]) return field
+  const norm = field.toLowerCase().replace(/[^a-z0-9]/g, "")
+  const aliases: Record<string, string> = {
+    mlconfidencethreshold: "mlConfidenceThreshold",
+    stoplossatrmultiplier: "slAtrMult",
+    slatrmultiplier: "slAtrMult",
+    takeprofitatrmultiplier: "tpAtrMult",
+    tpatrmultiplier: "tpAtrMult",
+    emafast: "emaFast",
+    emaslow: "emaSlow",
+    rsiperiod: "rsiPeriod",
+    momentumthreshold: "momentumThreshold",
+    positionsize: "positionSizeUsdt",
+    positionsizeusdt: "positionSizeUsdt",
+  }
+  if (aliases[norm]) return aliases[norm]
+  for (const canonical of Object.keys(FIELD_LIMITS)) {
+    if (canonical.toLowerCase().replace(/[^a-z0-9]/g, "") === norm) return canonical
+  }
+  return field
+}
