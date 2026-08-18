@@ -1619,7 +1619,13 @@ export async function reconcileOrphanedPositions(): Promise<void> {
   try {
     const exchange = getExchangeClient("mexc")
     const openPositions = (await exchange.getOpenPositions()) as any[]
+    console.log(`[Reconcile] Checking ${Array.isArray(openPositions) ? openPositions.length : 0} open MEXC position(s) for orphans`)
     if (!Array.isArray(openPositions) || openPositions.length === 0) return
+
+    // Normalize a symbol to a canonical form (underscore, uppercase) so the
+    // comparison is robust regardless of whether the DB stores "HYPE/USDT"
+    // (slash) or "HYPE_USDT" (underscore). MEXC returns underscore format.
+    const norm = (s: string) => s.replace(/\//g, "_").toUpperCase()
 
     // Tracked grid positions: pending sell (held long) or pending buy (held
     // short) with buyPrice set — buyPrice marks a real filled entry.
@@ -1629,7 +1635,7 @@ export async function reconcileOrphanedPositions(): Promise<void> {
     const trendOpen = await db.select().from(positions).where(eq(positions.status, "open"))
 
     for (const p of openPositions) {
-      const symbol = String(p.symbol ?? "").toUpperCase()
+      const symbol = norm(String(p.symbol ?? ""))
       const positionType = Number(p.positionType) // 1 = long, 2 = short
       const side = positionType === 1 ? "long" : "short"
       const holdVol = Number(p.holdVol ?? 0) // contracts
@@ -1637,11 +1643,11 @@ export async function reconcileOrphanedPositions(): Promise<void> {
 
       const gridTracked = gridHeld.some(
         (o) =>
-          o.symbol.toUpperCase() === symbol &&
+          norm(o.symbol) === symbol &&
           ((side === "long" && o.side === "sell") || (side === "short" && o.side === "buy"))
       )
       const trendTracked = trendOpen.some(
-        (o) => o.symbol.toUpperCase() === symbol && o.side === side
+        (o) => norm(o.symbol) === symbol && o.side === side
       )
       if (gridTracked || trendTracked) continue
 
