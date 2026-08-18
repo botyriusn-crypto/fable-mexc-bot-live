@@ -328,6 +328,12 @@ export function SettingsPanel({ state }: { state: BotState }) {
           </Label>
           <Switch id="allow-short" checked={cfg.allowShort} onCheckedChange={(c) => toggleBool("allowShort", c)} />
         </div>
+        <div className="flex items-center justify-between">
+          <Label htmlFor="sniper-live" className="text-xs text-muted-foreground">
+            Sniper live
+          </Label>
+          <Switch id="sniper-live" checked={Boolean(cfg.sniperLive)} onCheckedChange={(c) => toggleBool("sniperLive", c)} />
+        </div>
 
         <Button size="sm" onClick={handleSave} disabled={saving || Object.keys(form).length === 0}>
           {saving ? "Saving…" : "Save Settings"}

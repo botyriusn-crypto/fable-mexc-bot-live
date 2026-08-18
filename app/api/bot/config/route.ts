@@ -49,6 +49,7 @@ const BOOL_FIELDS = [
   "lorentzianKernelFilter",
   "lorentzianWebhooks",
   "aiAdvisorEnabled",
+  "sniperLive",
 ] as const
 
 export async function POST(request: Request) {

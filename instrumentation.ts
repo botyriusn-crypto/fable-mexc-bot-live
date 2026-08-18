@@ -53,6 +53,19 @@ export async function register() {
         }
       }, 20 * 1000)
 
+      // Main trading tick: data → features → ML-gated signal → exit
+      // management → paper/live execution → model update → persistence.
+      // This is the bot's heartbeat — runs every 60s so the bot operates
+      // unattended without an external cron trigger.
+      const { runTick } = await import("./lib/engine")
+      setInterval(async () => {
+        try {
+          await runTick()
+        } catch (e) {
+          console.error("[Tick] Scheduled runTick failed:", e)
+        }
+      }, 60 * 1000)
+
       // Portfolio rebalance (volatility-inverse + correlation-aware budget
       // allocation across enabled grid pairs) every 5 hours. Dampened (max
       // +/-3pp change per pair per run) and circuit-breaker protected (skips

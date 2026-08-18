@@ -23,7 +23,7 @@ import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs, type GridConfig } from "./grid"
 import { detectFlashFade, executeFlashFade } from "./flash-fade"
 import { maybeRunGridAiAdvisorAuto } from "./ai-grid-advisor"
-import { runSniperCycle, SNIPER_LIVE } from "./sniper"
+import { runSniperCycle } from "./sniper"
 import { analyzeTradesForMarket, applyRecommendations } from "./ai-advisor"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager } from './mexc/ws';
@@ -243,7 +243,18 @@ export async function closePosition(
         leverage: position.leverage,
       })
     } catch (err) {
-      await log("error", `LIVE close failed: ${err instanceof Error ? err.message : String(err)}`)
+      const errMsg = err instanceof Error ? err.message : String(err)
+      // RECONCILE: MEXC 2009 means the position is already gone (closed
+      // manually, liquidated, or never existed). Treat it as already-closed
+      // instead of retrying forever — mark it closed in the DB so the engine
+      // stops trying to close a phantom position. No trade is recorded and no
+      // ML training happens, since we don't know the real exit price.
+      if (errMsg.includes("2009") || errMsg.includes("nonexistent")) {
+        await db.update(positions).set({ status: "closed", closedAt: sql`NOW()` }).where(eq(positions.id, position.id))
+        await log("info", `Position ${position.symbol} ${position.side} already closed on exchange (2009) — reconciled DB state`)
+        return
+      }
+      await log("error", `LIVE close failed: ${errMsg}`)
       return
     }
   }
@@ -720,7 +731,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     // Best-effort — must never throw and break the live trading loop.
     try {
       const fresh = await runSniperCycle()
-      if (SNIPER_LIVE && fresh.length > 0) {
+      if (cfg.sniperLive && fresh.length > 0) {
         for (const c of fresh) {
           try {
             const marketCfg: BotConfig = { ...cfg, symbol: c.symbol, timeframe: c.timeframe } as BotConfig

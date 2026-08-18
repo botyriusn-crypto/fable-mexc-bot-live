@@ -62,6 +62,7 @@ export const botConfig = pgTable("bot_config", {
   aiAdvisorEnabled: boolean("ai_advisor_enabled").notNull().default(false),
   aiAnalysisSchedule: text("ai_analysis_schedule").notNull().default("manual"),
   aiLastAnalysis: timestamp("ai_last_analysis", { withTimezone: true }),
+  sniperLive: boolean("sniper_live").notNull().default(false),
   mode: text("mode").notNull().default("paper"),
   status: text("status").notNull().default("stopped"),
   paperBalance: doublePrecision("paper_balance").notNull().default(10000),

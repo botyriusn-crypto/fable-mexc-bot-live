@@ -13,7 +13,7 @@ import { getGridConfigs, gridUnrealizedPnl } from "@/lib/grid"
 import { isRotationEnabled, getLastRotationTime } from "@/lib/portfolio-rotator"
 import { getShadowStats, runShadowCycle } from "@/lib/shadow-evaluator"
 import { getWatchdogReport } from "@/lib/watchdog"
-import { getSniperStats } from "@/lib/sniper"
+import { getSniperStats, runSniperCycle } from "@/lib/sniper"
 import { evaluatePortfolioRisk, getRiskState } from "@/lib/risk-manager"
 
 interface MexcAsset {
@@ -35,12 +35,17 @@ async function fetchLiveAccount() {
 
 export const dynamic = "force-dynamic"
 let lastShadowRun = 0
+let lastSniperRun = 0
 
 export async function GET() {
   const nowMs = Date.now()
   if (nowMs - lastShadowRun > 60_000) {
     lastShadowRun = nowMs
     runShadowCycle().catch(() => {})
+    if (nowMs - lastSniperRun > 60_000) {
+      lastSniperRun = nowMs
+      runSniperCycle().catch(() => {})
+    }
   }
   let shadowStats: any = null
   let sniperStats: any = null

@@ -1,5 +1,5 @@
 import { db } from "./db"
-import { botConfig, gridConfigs, gridOrders, trades, botLogs, type BotConfig, type GridOrder } from "./db/schema"
+import { botConfig, gridConfigs, gridOrders, trades, botLogs, positions, type BotConfig, type GridOrder } from "./db/schema"
 import { eq, sql, and, inArray, desc, isNotNull } from 'drizzle-orm'
 import type { FeatureVector, IndicatorSnapshot } from "./indicators"
 import { detectVolatilitySurge, adaptiveSpacing, type VolatilityState } from "./volatility-guard"
@@ -1067,6 +1067,45 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
     const state = Number(st.state)
     if (state === 3) {
       const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
+      // COMBO SHORT CLOSE: a buy with buyPrice set is a buy-to-close that
+      // just filled — the short is now closed. Record the short close and
+      // re-arm a fresh naked sell at the original short entry level.
+      if (o.buyPrice != null) {
+        const entryPrice = o.buyPrice
+        const grossPnl = (entryPrice - fillPrice) * o.quantity
+        const { makerFeeRate: scRate } = getMexcFeeRates(o.symbol)
+        const fees = (entryPrice + fillPrice) * o.quantity * scRate
+        const netPnl = grossPnl - fees
+        const sizeUsdt = (entryPrice * o.quantity) / o.leverage
+        await db.update(gridOrders)
+          .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
+          .where(eq(gridOrders.id, o.id))
+        await db.insert(trades).values({
+          symbol: o.symbol, side: "short", entryPrice, exitPrice: fillPrice,
+          sizeUsdt, leverage: o.leverage, pnl: netPnl, fees,
+          exitReason: "tp", strategy: "grid", live: cfg.mode === "live",
+        })
+        if (cfg.mode === "paper") {
+          await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (fillPrice * o.quantity * scRate)}` }).where(eq(botConfig.id, 1))
+        }
+        await log("trade", `Grid ${o.symbol} (maker) COMBO short closed @ ${fillPrice.toFixed(6)} (shorted ${entryPrice.toFixed(6)}) | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
+        // Re-arm a fresh naked sell at the original short entry level
+        if (!paused) {
+          try {
+            const res: any = await placeRoundedMakerOrder(o.symbol, 3, entryPrice, o.quantity, o.leverage)
+            const sid = extractOrderId(res)
+            await db.insert(gridOrders).values({
+              symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
+              spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell",
+              price: entryPrice, quantity: o.quantity,
+              mexcOrderId: sid, exchangeStatus: "new", status: "pending",
+            })
+          } catch (err) {
+            await log("error", `Grid ${o.symbol} (maker): re-arm short failed @ ${entryPrice.toFixed(6)}: ${dbErr(err)}`)
+          }
+        }
+        continue
+      }
       await db
         .update(gridOrders)
         .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
@@ -1101,7 +1140,31 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
     if (!st) continue
     const state = Number(st.state)
     if (state === 3) {
-      const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
+      const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
+      // COMBO SHORT OPEN: a naked sell (no buyPrice) filling means we just
+      // opened a short. Place a buy-to-close TP one spacing below entry.
+      if (o.buyPrice == null) {
+        await db.update(gridOrders)
+          .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
+          .where(eq(gridOrders.id, o.id))
+        const closePrice = fillPrice - (snap.atr * gc.rangeAtrMult)
+        try {
+          const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage)
+          const bid = extractOrderId(res)
+          await db.insert(gridOrders).values({
+            symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
+            spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy",
+            price: closePrice, quantity: o.quantity, buyPrice: fillPrice,
+            entryFeatures: { ...snap.features, sideLong: -1 },
+            mexcOrderId: bid, exchangeStatus: "new", status: "pending",
+          })
+          await log("trade", `Grid ${o.symbol} (maker) COMBO short opened @ ${fillPrice.toFixed(6)} | buy-to-close @ ${closePrice.toFixed(6)}`)
+        } catch (err) {
+          await log("error", `Grid ${o.symbol} (maker): buy-to-close placement failed @ ${closePrice.toFixed(6)}: ${dbErr(err)}`)
+        }
+        continue
+      }
+      const exitPrice = fillPrice
       await settleMakerSell(o, exitPrice, cfg)
       // Re-arm a resting maker buy back at the original level
       if (o.buyPrice != null && !paused) {
@@ -1404,20 +1467,20 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
     if (!st) continue
     if (Number(st.state) === 3) {
       const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
-      const sellPrice = exitPrice + (snap.atr * gc.rangeAtrMult)
-      const grossPnl = sellPrice - exitPrice
-      const fees = (sellPrice + exitPrice) * o.quantity * getMexcFeeRates(o.symbol).makerFeeRate
+      const entryPrice = o.buyPrice ?? exitPrice
+      const grossPnl = (entryPrice - exitPrice) * o.quantity
+      const fees = (entryPrice + exitPrice) * o.quantity * getMexcFeeRates(o.symbol).makerFeeRate
       const netPnl = grossPnl - fees
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
       if (cfg.mode === "paper") {
         await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
       }
-      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice, sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
+      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice, sizeUsdt: (entryPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
       await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(6)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
       try {
-        const res: any = await placeRoundedMakerOrder(o.symbol, 3, sellPrice, o.quantity, o.leverage)
+        const res: any = await placeRoundedMakerOrder(o.symbol, 3, entryPrice, o.quantity, o.leverage)
         const sid = extractOrderId(res)
-        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: sellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
+        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: entryPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
       } catch (err) {
         await log("error", `Short ${o.symbol} re-arm sell failed: ${dbErr(err)}`)
       }
@@ -1474,17 +1537,17 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
       const st: any = await fetchOrderStatus(o.mexcOrderId)
       if (st && Number(st.state) === 3) {
         const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
-        const sellPrice = exitPrice + (snap.atr * gc.rangeAtrMult)
-        const grossPnl = sellPrice - exitPrice
-        const fees = (sellPrice + exitPrice) * o.quantity * getMexcFeeRates(o.symbol).makerFeeRate
+        const entryPrice = o.buyPrice ?? exitPrice
+        const grossPnl = (entryPrice - exitPrice) * o.quantity
+        const fees = (entryPrice + exitPrice) * o.quantity * getMexcFeeRates(o.symbol).makerFeeRate
         const netPnl = grossPnl - fees
         await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
         if (cfg.mode === "paper") {
           await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
         }
-        await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice, sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
+        await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice, sizeUsdt: (entryPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
         await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
-        const newSellPrice = exitPrice + (snap.atr * gc.rangeAtrMult)
+        const newSellPrice = entryPrice
         if (cfg.mode === "live") {
           try {
             const res: any = await placeRoundedMakerOrder(o.symbol, 3, newSellPrice, o.quantity, o.leverage)
@@ -1496,24 +1559,22 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
         }
       }
     } else if (price <= o.price) {
-      const sellPrice = o.price + (snap.atr * gc.rangeAtrMult)
+      const entryPrice = o.buyPrice ?? o.price
       if (cfg.mode === "live" && exchange) {
         try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (err) { await log("error", `Short close failed: ${dbErr(err)}`) }
       }
-      const grossPnl = sellPrice - o.price
+      const grossPnl = (entryPrice - o.price) * o.quantity
       const { makerFeeRate: mixedMaker, takerFeeRate: mixedTaker } = getMexcFeeRates(o.symbol)
-      // Mixed fill: o.price leg closed via a real market order (taker),
-      // sellPrice leg is the newly re-armed resting order (maker, not
-      // yet filled -- charged at maker rate as an estimate).
-      const fees = (sellPrice * mixedMaker + o.price * mixedTaker) * o.quantity
+      // Mixed fill: entry leg was a maker sell, close leg is a taker buy.
+      const fees = (entryPrice * mixedMaker + o.price * mixedTaker) * o.quantity
       const netPnl = grossPnl - fees
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
       if (cfg.mode === "paper") {
         await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
       }
-      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: sellPrice, exitPrice: o.price, sizeUsdt: (sellPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
+      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice: o.price, sizeUsdt: (entryPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
       await log("trade", `Short ${o.symbol} closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
-      const newSellPrice = o.price + (snap.atr * gc.rangeAtrMult)
+      const newSellPrice = entryPrice
       if (cfg.mode === "live") {
         try {
           const res: any = await placeRoundedMakerOrder(o.symbol, 3, newSellPrice, o.quantity, o.leverage)
@@ -1544,6 +1605,74 @@ const act = await getActiveOrders(symbol, timeframe)
 const shortPnl = act.filter(o => o.side === "buy" && o.buyPrice != null).reduce((acc, o) => acc + ((o.buyPrice ?? 0) - currentPrice) * o.quantity, 0)
 return longPnl + shortPnl
 }
+
+// ── Orphaned position reconciliation ──
+// A "naked" position on MEXC with no matching tracking record in the DB is a
+// serious risk: the bot's exit logic only manages positions it finds in its
+// own tables (gridOrders for grid positions, positions for trend/scalp). If a
+// tracking order is ever dropped (pause/recenter/sync drift) while the real
+// position stays open on MEXC, the position becomes unprotected and can run
+// to liquidation. This step queries MEXC's real open positions and force-
+// closes any that have no matching tracking record, so no position can ever
+// be silently abandoned again.
+export async function reconcileOrphanedPositions(): Promise<void> {
+  try {
+    const exchange = getExchangeClient("mexc")
+    const openPositions = (await exchange.getOpenPositions()) as any[]
+    if (!Array.isArray(openPositions) || openPositions.length === 0) return
+
+    // Tracked grid positions: pending sell (held long) or pending buy (held
+    // short) with buyPrice set — buyPrice marks a real filled entry.
+    const gridPending = await db.select().from(gridOrders).where(eq(gridOrders.status, "pending"))
+    const gridHeld = gridPending.filter((o) => o.buyPrice != null)
+    // Tracked trend/scalp positions.
+    const trendOpen = await db.select().from(positions).where(eq(positions.status, "open"))
+
+    for (const p of openPositions) {
+      const symbol = String(p.symbol ?? "").toUpperCase()
+      const positionType = Number(p.positionType) // 1 = long, 2 = short
+      const side = positionType === 1 ? "long" : "short"
+      const holdVol = Number(p.holdVol ?? 0) // contracts
+      if (!symbol || holdVol <= 0) continue
+
+      const gridTracked = gridHeld.some(
+        (o) =>
+          o.symbol.toUpperCase() === symbol &&
+          ((side === "long" && o.side === "sell") || (side === "short" && o.side === "buy"))
+      )
+      const trendTracked = trendOpen.some(
+        (o) => o.symbol.toUpperCase() === symbol && o.side === side
+      )
+      if (gridTracked || trendTracked) continue
+
+      // ORPHAN: no tracking record anywhere. Force-close at market.
+      const spec = await getMexcSpecAsync(symbol, Number(p.openAvgPrice ?? 0))
+      const coinQty = holdVol * spec.contractSize
+      const closeSide = side === "long" ? 4 : 2
+      await log(
+        "error",
+        `[Orphan] DETECTED naked ${side} on ${symbol} (${holdVol} contracts ≈ ${coinQty} coins) with no tracking record — force-closing at market`
+      )
+      try {
+        await exchange.placeMarketOrder({
+          symbol,
+          side: closeSide as 1 | 2 | 3 | 4,
+          volume: coinQty,
+          leverage: Number(p.leverage ?? 1),
+        })
+        await log("info", `[Orphan] Closed naked ${side} on ${symbol} at market`)
+      } catch (err) {
+        await log(
+          "error",
+          `[Orphan] FAILED to close naked ${side} on ${symbol}: ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+    }
+  } catch (err) {
+    console.error("[Orphan] Reconciliation failed:", err)
+  }
+}
+
 
 export async function syncExchangeState() {
   try {
@@ -1595,6 +1724,7 @@ export async function syncExchangeState() {
       }
     }
     console.log("[Reconcile] State sync complete.")
+    await reconcileOrphanedPositions()
   } catch (e) {
     console.error("[Reconcile] Failed to sync exchange state:", e)
   }

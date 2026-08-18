@@ -51,7 +51,6 @@ export class MexcWebSocketManager {
       if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
       this.heartbeatInterval = setInterval(() => {
         if (this.ws?.readyState === WebSocket.OPEN) {
-          this.ws.send("ping")
           this.ws.send(JSON.stringify({ method: "ping" }))
         }
       }, 15000)
@@ -72,7 +71,6 @@ export class MexcWebSocketManager {
         // JSON keep-alive
         if (parsed.method === "ping" || parsed.channel === "ping") {
           this.ws?.send(JSON.stringify({ method: "pong" }))
-          this.ws?.send("pong")
           return
         }
         if (parsed.method === "pong" || parsed.channel === "pong") return
