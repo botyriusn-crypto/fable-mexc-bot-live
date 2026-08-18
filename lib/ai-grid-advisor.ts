@@ -250,7 +250,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
     // immediately hits "budget too small" backoffs.
     const MIN_ORDER_NOTIONAL = 1.0
     const viablePicks = topPicks.filter(m => {
-      const leverage = Math.max(1, Math.min(m.suggestedLeverage, finalSizing.leverage))
+      const leverage = m.suggestedLeverage
       // Only drop picks that can't fund even ONE level (one order per side).
       // grid.ts already reduces levels at setup when the full suggested count
       // exceeds budget, so re-checking the full count here double-penalizes
@@ -270,7 +270,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
       reason: `DNA: ${m.dnaScore} | Blend: ${m.blendedScore} | Chop: ${m.chopRatio} | Rev: ${m.revRate} | Drift: ${m.driftPct}% | Sized for ${finalSizing.totalPairs} pairs @ $${finalSizing.availableBalance.toFixed(2)} available`,
       levels: Math.min(m.suggestedLevels, finalSizing.levels),
       atrMult: parseFloat(Math.min(3, Math.max(0.3, m.suggestedSpacingPct / Math.max(m.atrPct, 0.1))).toFixed(2)),
-      leverage: Math.max(1, Math.min(m.suggestedLeverage, finalSizing.leverage)),
+      leverage: m.suggestedLeverage,
       budgetPct: finalSizing.budgetPct,
       dnaScore: m.dnaScore,
       blendedScore: m.blendedScore,
