@@ -183,8 +183,6 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
   const [makerBusy, setMakerBusy] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [directionBusy, setDirectionBusy] = useState(false)
-const [comboBusy, setComboBusy] = useState(false)
-const isCombo = grid.direction === "neutral"
 const [livePrice, setLivePrice] = useState<number | null>(null)
 const [priceDir, setPriceDir] = useState<"up" | "down" | null>(null)
 const prevPriceRef = useRef<number | null>(null)
@@ -207,23 +205,7 @@ load()
 const t = setInterval(load, 5000)
 return () => { alive = false; clearInterval(t) }
 }, [grid.symbol])
-const handleToggleCombo = async () => {
-setComboBusy(true)
-try {
-await fetch("/api/bot/grid-config", {
-method: "PATCH",
-headers: { "Content-Type": "application/json" },
-body: JSON.stringify({ symbol: grid.symbol, timeframe: grid.timeframe, direction: isCombo ? "long" : "neutral" }),
-})
-onRefresh()
-} catch (err) {
-console.error("Failed to toggle combo:", err)
-} finally {
-setComboBusy(false)
-}
-}
-  
-  const handleToggleDirection = async () => {
+const handleToggleDirection = async () => {
     setDirectionBusy(true)
     try {
       const currentMode = grid.direction.startsWith("auto") ? "auto" : grid.direction
@@ -323,10 +305,6 @@ setComboBusy(false)
             {grid.symbol}
 </Badge>
 {livePrice != null && <span className={`shrink-0 font-mono text-[11px] ${priceDir === "down" ? "text-danger" : priceDir === "up" ? "text-success" : "text-chart-3"}`}>@{livePrice < 1 ? livePrice.toFixed(6) : livePrice.toFixed(2)}</span>}
-<label className="flex shrink-0 cursor-pointer items-center gap-1" title="COMBO: neutral two-sided grid (buys + sells placed instantly)">
-<input type="checkbox" checked={isCombo} disabled={comboBusy} onChange={handleToggleCombo} className="size-3.5 accent-chart-3" />
-<span className={`font-mono text-[10px] ${isCombo ? "text-chart-3" : "text-muted-foreground/60"}`}>COMBO</span>
-</label>
           <span className="text-muted-foreground shrink-0">{grid.timeframe}</span>
           {grid.paused && <Badge variant="outline" className="border-chart-3/40 text-chart-3 shrink-0">PAUSED</Badge>}
           <Badge
@@ -493,7 +471,7 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
           leverage: pick.leverage,
           budgetPct: pick.budgetPct,
           makerMode: true,
-          direction: "neutral"
+          direction: "auto"
         })
       })
 
