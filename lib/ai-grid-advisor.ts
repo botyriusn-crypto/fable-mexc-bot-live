@@ -242,7 +242,26 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
     const topPicks = depthChecked
 
     const finalSizing = await computeSafeGridSettings(topPicks.length)
-    const recommendations: GridAiRecommendation[] = topPicks.map(m => ({
+
+    // Budget-aware guard: drop any pick whose ACTUAL order notional (using
+    // its own suggested levels/leverage, not the sizing defaults) would fall
+    // below MEXC's minimum. Prevents auto-rotating into a pair that
+    // immediately hits "budget too small" backoffs.
+    const MIN_ORDER_NOTIONAL = 1.0
+    const viablePicks = topPicks.filter(m => {
+      const levels = Math.max(1, Math.min(m.suggestedLevels, finalSizing.levels))
+      const leverage = Math.max(1, Math.min(m.suggestedLeverage, finalSizing.leverage))
+      const notional = (finalSizing.availableBalance * finalSizing.budgetPct / 100 / levels) * leverage
+      return notional >= MIN_ORDER_NOTIONAL
+    })
+    if (viablePicks.length < topPicks.length) {
+      await db.insert(botLogs).values({
+        level: "info",
+        message: `AI Advisor: dropped ${topPicks.length - viablePicks.length} pick(s) — notional below $${MIN_ORDER_NOTIONAL} minimum after budget sizing`,
+      }).catch(() => {})
+    }
+
+    const recommendations: GridAiRecommendation[] = viablePicks.map(m => ({
       symbol: m.symbol,
       reason: `DNA: ${m.dnaScore} | Blend: ${m.blendedScore} | Chop: ${m.chopRatio} | Rev: ${m.revRate} | Drift: ${m.driftPct}% | Sized for ${finalSizing.totalPairs} pairs @ $${finalSizing.availableBalance.toFixed(2)} available`,
       levels: Math.min(m.suggestedLevels, finalSizing.levels),

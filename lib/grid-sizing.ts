@@ -57,21 +57,33 @@ export async function computeSafeGridSettings(
   const enabledCount = excludeSymbol ? enabledRows.filter((r) => r.symbol !== excludeSymbol).length : enabledRows.length
   const totalPairs = Math.max(1, enabledCount + additionalPairs)
 
-  // Evenly split the safe margin budget across every pair that will be
-  // competing for it, then account for COMBO needing 2x per pair.
-  let budgetPct = (SAFETY_FACTOR * 100) / (COMBO_MARGIN_MULTIPLIER * totalPairs)
-  budgetPct = Math.max(MIN_BUDGET_PCT, Math.min(MAX_BUDGET_PCT, budgetPct))
-  budgetPct = Math.round(budgetPct * 10) / 10
-
-  // Small accounts: fewer, larger orders clear MEXC's per-order minimums
-  // more reliably than many tiny slivers.
-  const levels = availableBalance < 100 ? 4 : availableBalance < 500 ? 6 : 10
-
   // Slightly higher leverage on small accounts keeps position sizes
   // meaningful without changing margin usage (margin is budget-driven, not
   // leverage-driven, in this codebase's grid math) — still bounded well
   // under the liquidation-safety check already enforced in lib/grid.ts.
   const leverage = availableBalance < 100 ? 5 : 3
+
+  // Small accounts: fewer, larger orders clear MEXC's per-order minimums
+  // more reliably than many tiny slivers.
+  const levels = availableBalance < 100 ? 4 : availableBalance < 500 ? 6 : 10
+
+  // Evenly split the safe margin budget across every pair that will be
+  // competing for it, then account for COMBO needing 2x per pair.
+  let budgetPct = (SAFETY_FACTOR * 100) / (COMBO_MARGIN_MULTIPLIER * totalPairs)
+
+  // MINIMUM-NOTIONAL FLOOR: a budgetPct that can't place even ONE order at
+  // MEXC's minimum notional is useless — it produces "budget too small"
+  // backoffs despite free balance. Raise the floor to the smallest % that
+  // clears the minimum, so no pair is ever sized into dust.
+  //   notional per order = budget * leverage / totalLevels (see setupGrid)
+  //   availableBalance * budgetPct/100 * leverage / levels >= MIN_NOTIONAL
+  //   budgetPct >= MIN_NOTIONAL * levels * 100 / (availableBalance * leverage)
+  const MIN_NOTIONAL = 1.0
+  const minBudgetPctForNotional = availableBalance > 0
+    ? (MIN_NOTIONAL * levels * 100) / (availableBalance * leverage)
+    : MIN_BUDGET_PCT
+  budgetPct = Math.max(minBudgetPctForNotional, Math.min(MAX_BUDGET_PCT, budgetPct))
+  budgetPct = Math.round(budgetPct * 10) / 10
 
   return {
     levels,
