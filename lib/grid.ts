@@ -109,7 +109,7 @@ export interface GridConfig {
   autoPause: boolean
   makerMode: boolean
   // "neutral" = COMBO / Bitsgap-style two-sided grid (buys below + sells above).
-  direction: "long" | "short" | "neutral"
+  direction: "long" | "short" | "neutral" | "auto"
 }
 // Returns ALL grid configs, not just enabled ones. Disabling a pair should
 // stop new buy ladders but must not abandon existing held inventory (a
@@ -132,7 +132,7 @@ export async function getGridConfigs(): Promise<GridConfig[]> {
     feeMarginMult: r.feeMarginMult,
     autoPause: r.autoPause,
     makerMode: r.makerMode,
-    direction: (r.direction as "long" | "short" | "neutral") || "long",
+    direction: (r.direction as "long" | "short" | "neutral" | "auto") || "long",
   }))
 }
 
@@ -247,6 +247,46 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
 }
 
 // Pre-fetch MEXC specs before grid setup
+// ── Auto-direction (COMBO ↔ one-sided switching) ──
+// When a grid config has direction === "auto", the bot resolves the effective
+// side each tick from the detected regime, with hysteresis to avoid whipsaw.
+//   range   → neutral (COMBO: two-sided, mean-reversion)
+//   trend   → long/short by EMA direction (one-sided, trend-following)
+//   neutral → hold the last confirmed side (no flip on ambiguity)
+// The resolved side only changes which NEW rungs get placed on the next
+// rebuild — it never force-closes an existing position, so switching modes
+// carries no cliff and no forced liquidation.
+const AUTO_SIDE_CONFIRM_TICKS = 3
+const AUTO_SIDE_STATE = new Map<string, { confirmed: "long" | "short" | "neutral"; pending: "long" | "short" | "neutral"; pendingCount: number }>()
+
+function effectiveDirection(gc: GridConfig): "long" | "short" | "neutral" {
+  if (gc.direction === "auto") return (gc as any)._autoSide || "neutral"
+  return gc.direction
+}
+
+function resolveAutoSide(gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): "long" | "short" | "neutral" {
+  let desired: "long" | "short" | "neutral"
+  if (regime === "range") desired = "neutral"
+  else if (regime === "trend") desired = snap.emaFast > snap.emaSlow ? "long" : "short"
+  else desired = "neutral" // neutral regime → default to COMBO (safe)
+
+  const key = gc.symbol
+  let st = AUTO_SIDE_STATE.get(key)
+  if (!st) {
+    st = { confirmed: "neutral", pending: desired, pendingCount: 0 }
+    AUTO_SIDE_STATE.set(key, st)
+  }
+
+  if (st.pending === desired) st.pendingCount++
+  else { st.pending = desired; st.pendingCount = 1 }
+
+  if (st.pendingCount >= AUTO_SIDE_CONFIRM_TICKS && st.pending !== st.confirmed) {
+    st.confirmed = st.pending
+  }
+
+  return st.confirmed
+}
+
 export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, volatility?: VolatilityState, exchange?: ExchangeClient, startAtPrice = false): Promise<void> {
   // ── Portfolio risk gate ── do not deploy NEW grid capital while the
   // portfolio-level risk layer is halted (daily loss / drawdown / margin cap).
@@ -357,8 +397,8 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   const bbBaseSpacing = bbWidth / 4
   const maxSpacing = center * 0.02 // 2% cap — grids farther than this never fill (dead capital)
 let baseSpacing = Math.min(Math.max(bbBaseSpacing, minSpacing), maxSpacing)
-if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, minSpacing) // COMBO-DENSE
-  const geomRatio = gc.direction === "neutral" ? 1.0 : 1.15 // COMBO-DENSE: uniform arithmetic spacing like Bitsgap
+if (effectiveDirection(gc) === "neutral") baseSpacing = Math.max(center * 0.006, minSpacing) // COMBO-DENSE
+  const geomRatio = effectiveDirection(gc) === "neutral" ? 1.0 : 1.15 // COMBO-DENSE: uniform arithmetic spacing like Bitsgap
   const totalLevels = Math.max(1, Math.min(4, Math.floor(gc.levels / 2))) // Cap at 4 levels per side
   const effectiveLevels = gc.levels
   // Approximate half-range for DB logging
@@ -385,7 +425,7 @@ if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, 
       await log("error", `[Balance] Failed to fetch MEXC balance: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  const isNeutral = gc.direction === "neutral"
+  const isNeutral = effectiveDirection(gc) === "neutral"
   const budget = (effectiveBalance * gc.budgetPct) / 100
 
   // Decide how many levels per side we can actually afford BEFORE
@@ -424,7 +464,7 @@ if ((gc as any).direction === "neutral") baseSpacing = Math.max(center * 0.006, 
     return
   }
 
-  const isShort = !isNeutral && (gc.direction === "short" || (gc as any)._autoSide === "short")
+  const isShort = !isNeutral && effectiveDirection(gc) === "short"
 let orders: any[] = []
   for (let i = 1; i <= effectiveLevelsPerSide; i++) {
     // Calculate cumulative distance for geometric spacing
@@ -1211,6 +1251,16 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
 }
 
 export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime, exchange?: ExchangeClient, candles?: Candle[]): Promise<void> {
+  // Auto-direction: resolve the effective side from regime before any
+  // branching so the build path and short-grid handlers see the same side.
+  if (gc.direction === "auto") {
+    const prev = (gc as any)._autoSide
+    const next = resolveAutoSide(gc, snap, regime)
+    ;(gc as any)._autoSide = next
+    if (prev && prev !== next) {
+      await log("info", `Grid ${gc.symbol}: auto-direction switched ${prev} → ${next} (regime ${regime})`)
+    }
+  }
   // Maker mode (live + enabled symbol): use the real-order polling path and
   // skip the entire virtual-fill engine below.
   if (cfg.mode === "live" && isMakerSymbol(gc)) {

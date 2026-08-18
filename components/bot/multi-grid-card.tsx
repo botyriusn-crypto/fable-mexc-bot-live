@@ -227,7 +227,7 @@ setComboBusy(false)
     setDirectionBusy(true)
     try {
       const currentMode = grid.direction.startsWith("auto") ? "auto" : grid.direction
-      const nextDir = currentMode === "long" ? "short" : currentMode === "short" ? "auto" : "long"
+      const nextDir = currentMode === "long" ? "short" : currentMode === "short" ? "auto" : currentMode === "auto" ? "neutral" : "long"
       await fetch("/api/bot/grid-config", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -346,7 +346,7 @@ setComboBusy(false)
 : "border-success/40 bg-success/15 text-success"
             }`}
             onClick={handleToggleDirection}
-            title="Toggle direction (long/short/auto)"
+            title="Toggle direction (long/short/auto/neutral)"
           >
             {directionBusy ? "…" : 
               grid.direction === "short" ? "SHORT" 
