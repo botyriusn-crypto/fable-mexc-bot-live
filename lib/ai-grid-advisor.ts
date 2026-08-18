@@ -183,6 +183,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
 
         const dna = comboDna(candles, 0.6, lastAdx)
         const params = comboParams(dna, lastClose, t.amount24)
+        console.log(`[LevDebug] ${t.symbol} vol=$${Math.round(t.amount24)} atrPct=${atrPct.toFixed(2)}% lev=${params.suggestedLeverage}x`)
         if (dna.rejected) { gateStats.dnaRejected++; continue }
         const blendedScore = Math.round(Math.min(score, 100) * 0.35 + dna.score * 0.65)
 
