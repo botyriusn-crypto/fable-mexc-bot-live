@@ -734,12 +734,15 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       if (cfg.sniperLive && fresh.length > 0) {
         // Option B: enter only the top N candidates by confidence, not every
         // signal. The margin cap inside openPosition still applies on top.
-        const SNIPER_MAX_ENTRIES = 3
         const ranked = [...fresh]
           .sort((a, b) => b.confidence - a.confidence)
-          .slice(0, SNIPER_MAX_ENTRIES)
+          .slice(0, Math.max(1, cfg.sniperMaxEntries ?? 3))
+        const heldSymbols = new Set((await getOpenPositions()).map((p) => p.symbol))
+        let remainingBudget = marginBudgetRemaining()
         for (const c of ranked) {
           try {
+            if (heldSymbols.has(c.symbol)) continue
+            heldSymbols.add(c.symbol)
             const marketCfg: BotConfig = { ...cfg, symbol: c.symbol, timeframe: c.timeframe } as BotConfig
             const candles = await exchange.fetchKlines(toExchangeSymbol(c.symbol), c.timeframe, 200)
             if (candles.length < 60) continue
@@ -749,7 +752,9 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
             await openPosition(marketCfg, c.direction, snap, c.confidence, features, "sniper", {
               stopLoss: c.stopLoss,
               takeProfit: c.takeProfit,
+              sizeUsdtOverride: remainingBudget,
             })
+            remainingBudget -= Math.min(cfg.positionSizeUsdt, remainingBudget)
           } catch (err) {
             console.error("[Sniper] live entry failed:", err)
           }
