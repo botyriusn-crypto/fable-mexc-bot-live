@@ -115,6 +115,18 @@ CURRENT SETTINGS:
 - Position Size: $${config.positionSizeUsdt}
 - Confirmation Mode: ${config.confirmationMode}
 
+SNIPER SETTINGS:
+- Sniper Live: ${config.sniperLive}
+- Sniper Max Entries: ${config.sniperMaxEntries}
+- Sniper Position Size: $${config.sniperPositionSizeUsdt}
+- Sniper Leverage: ${config.sniperLeverage}x
+- Sniper Confidence Floor: ${config.sniperConfidenceFloor}
+- Sniper Correlation Threshold: ${config.sniperCorrThreshold}
+- Sniper Sigma Extreme: ${config.sniperSigmaExtreme}
+- Sniper Volume Surge ×: ${config.sniperVolumeSurgeMult}
+- Sniper Min Volume (USDT): ${config.sniperMinVolumeUsdt}
+- Sniper Target Risk (USDT): $${config.sniperTargetRiskUsdt} (read-only — do not recommend changes)
+
 RECENT TRADE OUTCOMES:
 ${recentTrades.slice(0, 10).map((t, i) => `Trade ${i + 1}: ${t.side.toUpperCase()} - PnL: $${t.pnl.toFixed(2)}, Fees: $${t.fees.toFixed(2)}, Exit: ${t.exitReason}`).join("\n")}
 
@@ -127,6 +139,14 @@ Provide 2-4 specific, actionable recommendations to improve performance. Return 
 - rsiPeriod
 - momentumThreshold
 - positionSizeUsdt
+- sniperMaxEntries
+- sniperPositionSizeUsdt
+- sniperLeverage
+- sniperConfidenceFloor
+- sniperCorrThreshold
+- sniperSigmaExtreme
+- sniperVolumeSurgeMult
+- sniperMinVolumeUsdt
 
 [
   {"field": "mlConfidenceThreshold", "current": 0.7, "suggested": 0.85, "reason": "brief reason", "impact": "expected impact"}
@@ -148,6 +168,15 @@ Provide 2-4 specific, actionable recommendations to improve performance. Return 
         tpAtrMult: config.tpAtrMult,
         emaFast: config.emaFast, emaSlow: config.emaSlow,
         strategyMode: config.strategyMode,
+        sniperMaxEntries: config.sniperMaxEntries,
+        sniperPositionSizeUsdt: config.sniperPositionSizeUsdt,
+        sniperLeverage: config.sniperLeverage,
+        sniperConfidenceFloor: config.sniperConfidenceFloor,
+        sniperCorrThreshold: config.sniperCorrThreshold,
+        sniperSigmaExtreme: config.sniperSigmaExtreme,
+        sniperVolumeSurgeMult: config.sniperVolumeSurgeMult,
+        sniperMinVolumeUsdt: config.sniperMinVolumeUsdt,
+        sniperTargetRiskUsdt: config.sniperTargetRiskUsdt,
       },
       recommendations,
       status: "pending",

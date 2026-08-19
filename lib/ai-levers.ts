@@ -29,6 +29,11 @@ export const FIELD_LIMITS: Record<string, FieldLimit> = {
   sniperSigmaExtreme:    { min: 2.0, max: 6.0, maxStep: 0.5, maxRelStep: 0.3 },
   sniperVolumeSurgeMult: { min: 1.0, max: 5.0, maxStep: 0.5, maxRelStep: 0.3 },
   sniperMinVolumeUsdt:   { min: 100000, max: 10000000, maxStep: 1000000, maxRelStep: 0.5 },
+  sniperMaxEntries:      { min: 1,   max: 10,  maxStep: 2,   maxRelStep: 0.5 },
+  sniperPositionSizeUsdt:{ min: 5,   max: 500, maxStep: 50,  maxRelStep: 0.5 },
+  sniperLeverage:        { min: 1,   max: 10,  maxStep: 2,   maxRelStep: 0.5 },
+  sniperConfidenceFloor: { min: 0.5, max: 0.9, maxStep: 0.05, maxRelStep: 0.2 },
+  sniperCorrThreshold:   { min: 0.5, max: 0.95, maxStep: 0.05, maxRelStep: 0.2 },
 }
 
 export interface RecommendationInput {
@@ -128,6 +133,13 @@ export function normalizeField(field: string): string {
     snipervolumesurgemult: "sniperVolumeSurgeMult",
     sniperminvolume: "sniperMinVolumeUsdt",
     sniperminvolumeusdt: "sniperMinVolumeUsdt",
+    snipermaxentries: "sniperMaxEntries",
+    sniperpositionsize: "sniperPositionSizeUsdt",
+    sniperpositionsizeusdt: "sniperPositionSizeUsdt",
+    sniperleverage: "sniperLeverage",
+    sniperconfidencefloor: "sniperConfidenceFloor",
+    snipercorrthreshold: "sniperCorrThreshold",
+    snipercorrelationthreshold: "sniperCorrThreshold",
   }
   if (aliases[norm]) return aliases[norm]
   for (const canonical of Object.keys(FIELD_LIMITS)) {
