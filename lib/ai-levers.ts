@@ -26,6 +26,9 @@ export const FIELD_LIMITS: Record<string, FieldLimit> = {
   rsiPeriod:             { min: 5,   max: 30,  maxStep: 5,   maxRelStep: 0.5 },
   momentumThreshold:     { min: 0.2, max: 1.5, maxStep: 0.3, maxRelStep: 0.5 },
   positionSizeUsdt:      { min: 5,   max: 100, maxStep: 25,  maxRelStep: 0.5 },
+  sniperSigmaExtreme:    { min: 2.0, max: 6.0, maxStep: 0.5, maxRelStep: 0.3 },
+  sniperVolumeSurgeMult: { min: 1.0, max: 5.0, maxStep: 0.5, maxRelStep: 0.3 },
+  sniperMinVolumeUsdt:   { min: 100000, max: 10000000, maxStep: 1000000, maxRelStep: 0.5 },
 }
 
 export interface RecommendationInput {
@@ -119,6 +122,12 @@ export function normalizeField(field: string): string {
     momentumthreshold: "momentumThreshold",
     positionsize: "positionSizeUsdt",
     positionsizeusdt: "positionSizeUsdt",
+    snipersigmaextreme: "sniperSigmaExtreme",
+    snipersigma: "sniperSigmaExtreme",
+    snipervolumesurge: "sniperVolumeSurgeMult",
+    snipervolumesurgemult: "sniperVolumeSurgeMult",
+    sniperminvolume: "sniperMinVolumeUsdt",
+    sniperminvolumeusdt: "sniperMinVolumeUsdt",
   }
   if (aliases[norm]) return aliases[norm]
   for (const canonical of Object.keys(FIELD_LIMITS)) {

@@ -1,7 +1,7 @@
 import type { Candle } from "./mexc/public"
 import type { IndicatorSnapshot } from "./indicators"
 import { db } from "./db"
-import { classifierDecisions } from "./db/schema"
+import { classifierDecisions, botConfig } from "./db/schema"
 import { and, eq, isNull, sql } from "drizzle-orm"
 import { fetchTicker, fetchAllTickers, fetchKlines, type BulkTicker } from "./mexc/public"
 import { recordOutcome, type SniperFeatures } from "./advisor"
@@ -12,7 +12,7 @@ export const SNIPER_LIVE = false // Stage 2: flip to true after observe baseline
 export const SNIPER_PARAMS = {
   sweepLookback: 20,
   volumeSurgeMult: 2.0,
-  sigmaExtreme: 2.5,
+  sigmaExtreme: 3.5,
   fundingThreshold: 0.0005,
   minVolumeUsdt: 1_000_000,
   tpSlRatio: 3,
@@ -40,9 +40,17 @@ function avg(nums: number[]): number {
   return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : 0
 }
 
-export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, fundingRate = 0): SniperSignal {
+export interface SniperOverrides {
+  sigmaExtreme?: number
+  volumeSurgeMult?: number
+}
+
+export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, fundingRate = 0, overrides: SniperOverrides = {}): SniperSignal {
   const none: SniperSignal = { direction: null, reason: "no dislocation", confidence: 0, stopLoss: 0, takeProfit: 0, signalType: null, volSurge: 0, z: 0, fundingRate }
   if (candles.length < 60) return none
+
+  const sigmaExtreme = overrides.sigmaExtreme ?? SIGMA_EXTREME
+  const volumeSurgeMult = overrides.volumeSurgeMult ?? VOLUME_SURGE_MULT
 
   const last = candles[candles.length - 1]
   const prev = candles.slice(-SWEEP_LOOKBACK - 1, -1)
@@ -51,16 +59,16 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const avgVol = avg(prev.map(c => c.volume))
   const volSurge = avgVol > 0 ? last.volume / avgVol : 1
 
-  const bullishReclaim = last.low < swingLow && last.close > swingLow && last.close > last.open && volSurge >= VOLUME_SURGE_MULT
-  const bearishReclaim = last.high > swingHigh && last.close < swingHigh && last.close < last.open && volSurge >= VOLUME_SURGE_MULT
+  const bullishReclaim = last.low < swingLow && last.close > swingLow && last.close > last.open && volSurge >= volumeSurgeMult
+  const bearishReclaim = last.high > swingHigh && last.close < swingHigh && last.close < last.open && volSurge >= volumeSurgeMult
 
   const closes = candles.map(c => c.close)
   const window = closes.slice(-100)
   const mean = avg(window)
   const sd = Math.sqrt(avg(window.map(c => (c - mean) ** 2))) || 1
   const z = (last.close - mean) / sd
-  const exhaustedDown = z < -SIGMA_EXTREME && last.close > last.open
-  const exhaustedUp = z > SIGMA_EXTREME && last.close < last.open
+  const exhaustedDown = z < -sigmaExtreme && last.close > last.open
+  const exhaustedUp = z > sigmaExtreme && last.close < last.open
 
   let direction: "long" | "short" | null = null
   let confidence = 0
@@ -254,6 +262,17 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
   // run the (expensive) kline fetch on the top candidates.
   const SCAN_LIMIT = 15 // top N movers per cycle
 
+  // Read tunable sniper params from bot_config so the AI advisor can adjust
+  // them at runtime. Fall back to SNIPER_PARAMS defaults if unset.
+  let cfg: any = null
+  try {
+    const rows = await db.select().from(botConfig).where(eq(botConfig.id, 1))
+    cfg = rows[0] ?? null
+  } catch {}
+  const minVolumeUsdt = cfg?.sniperMinVolumeUsdt ?? SNIPER_PARAMS.minVolumeUsdt
+  const sigmaExtreme = cfg?.sniperSigmaExtreme ?? SNIPER_PARAMS.sigmaExtreme
+  const volumeSurgeMult = cfg?.sniperVolumeSurgeMult ?? SNIPER_PARAMS.volumeSurgeMult
+
   let tickers: BulkTicker[]
   try {
     tickers = await fetchAllTickers()
@@ -269,7 +288,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
   // straight through a stop. `amount24` is the quote (USDT) notional, the
   // correct liquidity measure (base `volume24` is misleading for low-price coins).
   const ranked = tickers
-    .filter((t) => t.amount24 >= SNIPER_PARAMS.minVolumeUsdt && t.lastPrice > 0)
+    .filter((t) => t.amount24 >= minVolumeUsdt && t.lastPrice > 0)
     .map((t) => ({ ...t, score: Math.abs(t.riseFallRate) * Math.log10(t.amount24 + 1) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, SCAN_LIMIT)
@@ -300,7 +319,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     const candles = await fetchKlines(symbol, timeframe, 200).catch(() => null)
     if (!candles || candles.length < 60) continue
 
-    const sig = detectSniper(candles as Candle[], {} as IndicatorSnapshot, t.fundingRate)
+    const sig = detectSniper(candles as Candle[], {} as IndicatorSnapshot, t.fundingRate, { sigmaExtreme, volumeSurgeMult })
     if (!sig.direction) continue
 
     await recordSniperCandidate(symbol, timeframe, bucket, t.lastPrice, sig)

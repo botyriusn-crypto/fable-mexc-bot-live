@@ -83,6 +83,9 @@ const SNIPER_FIELDS: FieldDef[] = [
   { key: "sniperLeverage", label: "Sniper leverage", step: "1" },
   { key: "sniperConfidenceFloor", label: "Sniper min confidence", step: "0.05" },
   { key: "sniperCorrThreshold", label: "Sniper correlation threshold", step: "0.05" },
+  { key: "sniperSigmaExtreme", label: "Sniper sigma extreme", step: "0.1" },
+  { key: "sniperVolumeSurgeMult", label: "Sniper volume surge ×", step: "0.1" },
+  { key: "sniperMinVolumeUsdt", label: "Sniper min volume (USDT)" },
 ]
 
 export function SettingsPanel({ state }: { state: BotState }) {
