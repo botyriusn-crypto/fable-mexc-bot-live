@@ -14,6 +14,7 @@ export const SNIPER_PARAMS = {
   volumeSurgeMult: 2.0,
   sigmaExtreme: 2.5,
   fundingThreshold: 0.0005,
+  minVolumeUsdt: 1_000_000,
   tpSlRatio: 3,
   resolveAfterBuckets: 6,
 } as const
@@ -263,9 +264,13 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
 
   // Rank by a momentum score: absolute 24h move weighted by volume, so we
   // surface coins that are both moving AND liquid (not dead micro-caps).
+  // Hard liquidity floor: drop any coin whose 24h USDT notional is below the
+  // threshold. Low-cap coins have thin books — a $20 order can whipsaw price
+  // straight through a stop. `amount24` is the quote (USDT) notional, the
+  // correct liquidity measure (base `volume24` is misleading for low-price coins).
   const ranked = tickers
-    .filter((t) => t.volume24 > 0 && t.lastPrice > 0)
-    .map((t) => ({ ...t, score: Math.abs(t.riseFallRate) * Math.log10(t.volume24 + 1) }))
+    .filter((t) => t.amount24 >= SNIPER_PARAMS.minVolumeUsdt && t.lastPrice > 0)
+    .map((t) => ({ ...t, score: Math.abs(t.riseFallRate) * Math.log10(t.amount24 + 1) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, SCAN_LIMIT)
 
