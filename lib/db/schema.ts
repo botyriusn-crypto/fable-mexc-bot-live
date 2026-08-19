@@ -67,6 +67,7 @@ export const botConfig = pgTable("bot_config", {
   sniperPositionSizeUsdt: doublePrecision("sniper_position_size_usdt").notNull().default(50),
   sniperLeverage: integer("sniper_leverage").notNull().default(3),
   sniperConfidenceFloor: doublePrecision("sniper_confidence_floor").notNull().default(0.6),
+  sniperCorrThreshold: doublePrecision("sniper_corr_threshold").notNull().default(0.8),
   mode: text("mode").notNull().default("paper"),
   status: text("status").notNull().default("stopped"),
   paperBalance: doublePrecision("paper_balance").notNull().default(10000),

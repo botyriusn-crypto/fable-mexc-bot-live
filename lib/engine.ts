@@ -119,6 +119,34 @@ function unrealizedPnl(position: Position, markPrice: number): number {
   return (markPrice - position.entryPrice) * dir * position.quantity
 }
 
+// Pearson correlation of close-to-close returns over the overlapping window.
+// Used by the sniper to avoid entering two coins that move in lockstep.
+function priceCorrelation(a: Candle[], b: Candle[]): number {
+  const n = Math.min(a.length, b.length)
+  if (n < 30) return 0
+  const ra: number[] = []
+  const rb: number[] = []
+  for (let i = 1; i < n; i++) {
+    ra.push((a[i].close - a[i - 1].close) / a[i - 1].close)
+    rb.push((b[i].close - b[i - 1].close) / b[i - 1].close)
+  }
+  const m = ra.length
+  const meanA = ra.reduce((sum, v) => sum + v, 0) / m
+  const meanB = rb.reduce((sum, v) => sum + v, 0) / m
+  let num = 0
+  let denA = 0
+  let denB = 0
+  for (let i = 0; i < m; i++) {
+    const da = ra[i] - meanA
+    const db = rb[i] - meanB
+    num += da * db
+    denA += da * da
+    denB += db * db
+  }
+  if (denA === 0 || denB === 0) return 0
+  return num / Math.sqrt(denA * denB)
+}
+
 // Reconcile DB open positions against the exchange's actual open positions.
 // If a position is no longer open on MEXC (liquidated, manually closed, or
 // exchange-side stop), mark it closed in the DB so the UI and risk layer stop
@@ -768,9 +796,42 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
           .slice(0, Math.max(1, cfg.sniperMaxEntries ?? 3))
         const heldSymbols = new Set((await getOpenPositions()).map((p) => p.symbol))
         let remainingBudget = marginBudgetRemaining()
+
+        // ── Correlation dedup ──
+        // Fetch klines for all ranked candidates up front and compute pairwise
+        // correlation, so we skip any coin that moves in lockstep with a
+        // higher-confidence pick (avoids doubling down on one market move).
+        const CORR_THRESHOLD = cfg.sniperCorrThreshold ?? 0.8
+        const klineMap = new Map<string, Candle[]>()
+        for (const c of ranked) {
+          if (heldSymbols.has(c.symbol)) continue
+          try {
+            const k = await exchange.fetchKlines(toExchangeSymbol(c.symbol), c.timeframe, 200)
+            if (k.length >= 60) klineMap.set(c.symbol, k)
+          } catch { /* skip on fetch failure */ }
+        }
+        const correlatedSkip = new Set<string>()
+        const picked: string[] = []
+        for (const c of ranked) {
+          if (heldSymbols.has(c.symbol)) continue
+          const k = klineMap.get(c.symbol)
+          if (!k) continue
+          const isCorrelated = picked.some((sym) => {
+            const pk = klineMap.get(sym)
+            return pk ? priceCorrelation(k, pk) >= CORR_THRESHOLD : false
+          })
+          if (isCorrelated) {
+            correlatedSkip.add(c.symbol)
+            await log("info", `Sniper: skipped ${c.symbol} (correlated with an already-selected mover)`)
+          } else {
+            picked.push(c.symbol)
+          }
+        }
+
         for (const c of ranked) {
           try {
             if (heldSymbols.has(c.symbol)) continue
+            if (correlatedSkip.has(c.symbol)) continue
             heldSymbols.add(c.symbol)
             const marketCfg: BotConfig = {
               ...cfg,
