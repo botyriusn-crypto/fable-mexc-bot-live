@@ -732,7 +732,13 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     try {
       const fresh = await runSniperCycle()
       if (cfg.sniperLive && fresh.length > 0) {
-        for (const c of fresh) {
+        // Option B: enter only the top N candidates by confidence, not every
+        // signal. The margin cap inside openPosition still applies on top.
+        const SNIPER_MAX_ENTRIES = 3
+        const ranked = [...fresh]
+          .sort((a, b) => b.confidence - a.confidence)
+          .slice(0, SNIPER_MAX_ENTRIES)
+        for (const c of ranked) {
           try {
             const marketCfg: BotConfig = { ...cfg, symbol: c.symbol, timeframe: c.timeframe } as BotConfig
             const candles = await exchange.fetchKlines(toExchangeSymbol(c.symbol), c.timeframe, 200)
