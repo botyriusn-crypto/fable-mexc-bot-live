@@ -6,8 +6,6 @@ import { and, eq, isNull, sql } from "drizzle-orm"
 import { fetchTicker, fetchAllTickers, fetchKlines, type BulkTicker } from "./mexc/public"
 import { recordOutcome, type SniperFeatures } from "./advisor"
 
-export const SNIPER_LIVE = false // Stage 2: flip to true after observe baseline proves hit-rate
-
 // Tunable rule parameters (Option A: exposed for display + advisor tuning).
 export const SNIPER_PARAMS = {
   sweepLookback: 20,
@@ -69,6 +67,10 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const z = (last.close - mean) / sd
   const exhaustedDown = z < -sigmaExtreme && last.close > last.open
   const exhaustedUp = z > sigmaExtreme && last.close < last.open
+  // Sigma confidence scales with how far |z| exceeds the threshold, so the
+  // confidence floor and the "top N by confidence" sort actually discriminate
+  // (weak sigma ~0.5 -> rejected by a 0.6 floor; strong sigma ~0.9 -> kept).
+  const sigmaConfidence = 0.5 + Math.min(0.4, (Math.abs(z) - sigmaExtreme) * 0.15)
 
   let direction: "long" | "short" | null = null
   let confidence = 0
@@ -83,10 +85,10 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
     direction = "short"; confidence = 0.6 + Math.min(volSurge, 5) * 0.05
     reason = `Liquidity sweep: pierced ${swingHigh.toFixed(6)} then rejected w/ ${volSurge.toFixed(1)}x volume`; extreme = last.high; signalType = "sweep"
   } else if (exhaustedDown) {
-    direction = "long"; confidence = 0.65
+    direction = "long"; confidence = sigmaConfidence
     reason = `Sigma exhaustion: z=${z.toFixed(1)} crash w/ bullish reversal candle`; extreme = last.low; signalType = "sigma"
   } else if (exhaustedUp) {
-    direction = "short"; confidence = 0.65
+    direction = "short"; confidence = sigmaConfidence
     reason = `Sigma exhaustion: z=${z.toFixed(1)} blow-off w/ bearish reversal candle`; extreme = last.high; signalType = "sigma"
   }
 

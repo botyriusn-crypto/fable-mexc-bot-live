@@ -793,7 +793,6 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         const ranked = [...fresh]
           .filter((c) => c.confidence >= floor)
           .sort((a, b) => b.confidence - a.confidence)
-          .slice(0, Math.max(1, cfg.sniperMaxEntries ?? 3))
         const heldSymbols = new Set((await getOpenPositions()).map((p) => p.symbol))
         let remainingBudget = marginBudgetRemaining()
 
@@ -810,7 +809,6 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
             if (k.length >= 60) klineMap.set(c.symbol, k)
           } catch { /* skip on fetch failure */ }
         }
-        const correlatedSkip = new Set<string>()
         const picked: string[] = []
         for (const c of ranked) {
           if (heldSymbols.has(c.symbol)) continue
@@ -821,17 +819,17 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
             return pk ? priceCorrelation(k, pk) >= CORR_THRESHOLD : false
           })
           if (isCorrelated) {
-            correlatedSkip.add(c.symbol)
             await log("info", `Sniper: skipped ${c.symbol} (correlated with an already-selected mover)`)
           } else {
             picked.push(c.symbol)
           }
         }
+        const selected = picked.slice(0, Math.max(1, cfg.sniperMaxEntries ?? 3))
 
-        for (const c of ranked) {
+        for (const sym of selected) {
+          const c = ranked.find((r) => r.symbol === sym)
+          if (!c) continue
           try {
-            if (heldSymbols.has(c.symbol)) continue
-            if (correlatedSkip.has(c.symbol)) continue
             heldSymbols.add(c.symbol)
             const marketCfg: BotConfig = {
               ...cfg,
@@ -850,7 +848,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
               takeProfit: c.takeProfit,
               sizeUsdtOverride: remainingBudget,
             })
-            remainingBudget -= Math.min(cfg.positionSizeUsdt, remainingBudget)
+            remainingBudget -= Math.min(marketCfg.positionSizeUsdt, remainingBudget)
           } catch (err) {
             console.error("[Sniper] live entry failed:", err)
           }
