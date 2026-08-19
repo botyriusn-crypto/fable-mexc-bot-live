@@ -1,9 +1,9 @@
 import type { Candle } from "./mexc/public"
 import type { IndicatorSnapshot } from "./indicators"
 import { db } from "./db"
-import { classifierDecisions, gridConfigs } from "./db/schema"
+import { classifierDecisions } from "./db/schema"
 import { and, eq, isNull, sql } from "drizzle-orm"
-import { fetchTicker, fetchKlines } from "./mexc/public"
+import { fetchTicker, fetchAllTickers, fetchKlines, type BulkTicker } from "./mexc/public"
 import { recordOutcome, type SniperFeatures } from "./advisor"
 
 export const SNIPER_LIVE = false // Stage 2: flip to true after observe baseline proves hit-rate
@@ -246,39 +246,60 @@ export interface SniperCandidate {
 }
 
 export async function runSniperCycle(): Promise<SniperCandidate[]> {
-  const configs = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
+  // ── Decoupled universe: scan MEXC-wide for volatile movers, NOT grid pairs ──
+  // The grid advisor deliberately picks low-volatility RANGING coins; a
+  // liquidity-sweep / sigma-exhaustion sniper needs the opposite — trending,
+  // high-volume movers. Rank the whole USDT-perp market by momentum and only
+  // run the (expensive) kline fetch on the top candidates.
+  const SCAN_LIMIT = 15 // top N movers per cycle
+
+  let tickers: BulkTicker[]
+  try {
+    tickers = await fetchAllTickers()
+  } catch (err) {
+    console.error("[Sniper] bulk ticker fetch failed:", err)
+    return []
+  }
+
+  // Rank by a momentum score: absolute 24h move weighted by volume, so we
+  // surface coins that are both moving AND liquid (not dead micro-caps).
+  const ranked = tickers
+    .filter((t) => t.volume24 > 0 && t.lastPrice > 0)
+    .map((t) => ({ ...t, score: Math.abs(t.riseFallRate) * Math.log10(t.volume24 + 1) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, SCAN_LIMIT)
+
   const seen = new Set<string>()
   const fresh: SniperCandidate[] = []
 
-  for (const cfg of configs) {
-    const key = `${cfg.symbol}|${cfg.timeframe}`
+  for (const t of ranked) {
+    const symbol = t.symbol
+    const timeframe = "Min5" // sniper operates on a fast timeframe
+    const key = `${symbol}|${timeframe}`
     if (seen.has(key)) continue
     seen.add(key)
 
-    const tfSec = tfSeconds(cfg.timeframe)
+    const tfSec = tfSeconds(timeframe)
     const bucket = Math.floor(Date.now() / 1000 / tfSec)
 
     const dup = await db.select({ id: classifierDecisions.id }).from(classifierDecisions).where(
       and(
         eq(classifierDecisions.strategy, "sniper"),
-        eq(classifierDecisions.symbol, cfg.symbol),
-        eq(classifierDecisions.timeframe, cfg.timeframe),
+        eq(classifierDecisions.symbol, symbol),
+        eq(classifierDecisions.timeframe, timeframe),
         eq(classifierDecisions.candleTime, bucket),
       )
     )
     if (dup.length > 0) continue
 
-    const [ticker, candles] = await Promise.all([
-      fetchTicker(cfg.symbol).catch(() => null),
-      fetchKlines(cfg.symbol, cfg.timeframe, 200).catch(() => null),
-    ])
-    if (!ticker?.lastPrice || !candles || candles.length < 60) continue
+    const candles = await fetchKlines(symbol, timeframe, 200).catch(() => null)
+    if (!candles || candles.length < 60) continue
 
     const sig = detectSniper(candles as Candle[], {} as IndicatorSnapshot, 0)
     if (!sig.direction) continue
 
-    await recordSniperCandidate(cfg.symbol, cfg.timeframe, bucket, ticker.lastPrice, sig)
-    fresh.push({ symbol: cfg.symbol, timeframe: cfg.timeframe, direction: sig.direction, entry: ticker.lastPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence })
+    await recordSniperCandidate(symbol, timeframe, bucket, t.lastPrice, sig)
+    fresh.push({ symbol, timeframe, direction: sig.direction, entry: t.lastPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence })
   }
 
   await resolveSniperDecisions()

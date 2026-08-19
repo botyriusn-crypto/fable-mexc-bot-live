@@ -172,3 +172,26 @@ export function getTicker(symbol: string): Promise<any> {
 export function getCandles(symbol: string, timeframe: string, limit: number): Promise<any> {
   return fetchKlines(symbol, timeframe, limit);
 }
+
+// Bulk ticker for ALL USDT perpetuals in one call — used by the sniper to
+// rank the whole market by volatility/momentum without N per-symbol calls.
+export interface BulkTicker { symbol: string; lastPrice: number; volume24: number; riseFallRate: number }
+let _bulkTickerCache: { data: BulkTicker[]; ts: number } | null = null
+
+export async function fetchAllTickers(): Promise<BulkTicker[]> {
+  if (_bulkTickerCache && Date.now() - _bulkTickerCache.ts < 30 * 1000) return _bulkTickerCache.data
+  const res = await fetch(`${BASE_URL}/ticker`, { cache: "no-store" })
+  if (!res.ok) throw new Error(`MEXC bulk ticker fetch failed: ${res.status}`)
+  const json = await res.json()
+  if (!json.success || !Array.isArray(json.data)) throw new Error("MEXC bulk ticker response unsuccessful")
+  const data: BulkTicker[] = json.data
+    .filter((t: any) => t.symbol.endsWith("_USDT"))
+    .map((t: any) => ({
+      symbol: t.symbol,
+      lastPrice: Number(t.lastPrice),
+      volume24: Number(t.volume24 ?? t.amount24 ?? 0),
+      riseFallRate: Number(t.riseFallRate ?? 0),
+    }))
+  _bulkTickerCache = { data, ts: Date.now() }
+  return data
+}
