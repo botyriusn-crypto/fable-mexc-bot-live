@@ -761,7 +761,9 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       if (cfg.sniperLive && fresh.length > 0) {
         // Option B: enter only the top N candidates by confidence, not every
         // signal. The margin cap inside openPosition still applies on top.
+        const floor = cfg.sniperConfidenceFloor ?? 0.6
         const ranked = [...fresh]
+          .filter((c) => c.confidence >= floor)
           .sort((a, b) => b.confidence - a.confidence)
           .slice(0, Math.max(1, cfg.sniperMaxEntries ?? 3))
         const heldSymbols = new Set((await getOpenPositions()).map((p) => p.symbol))

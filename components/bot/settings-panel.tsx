@@ -81,6 +81,7 @@ const SNIPER_FIELDS: FieldDef[] = [
   { key: "sniperMaxEntries", label: "Sniper max entries", step: "1" },
   { key: "sniperPositionSizeUsdt", label: "Sniper position size (USDT)" },
   { key: "sniperLeverage", label: "Sniper leverage", step: "1" },
+  { key: "sniperConfidenceFloor", label: "Sniper min confidence", step: "0.05" },
 ]
 
 export function SettingsPanel({ state }: { state: BotState }) {
