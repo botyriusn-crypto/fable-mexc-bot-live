@@ -181,7 +181,7 @@ async function openPosition(
   features: FeatureVector,
   strategy: "trend" | "range" | "webhook" | "scalp" | "sniper" = "trend",
   opts?: { sizeUsdtOverride?: number; stopLoss?: number; takeProfit?: number },
-): Promise<void> {
+): Promise<number> {
   // ── Portfolio risk gate ── never ADD risk while halted / over caps.
   if (isTradingHalted() || !canOpenNewPosition()) {
     const rs = getRiskState()
@@ -189,31 +189,13 @@ async function openPosition(
       "info",
       `Entry blocked by risk layer (${direction} ${cfg.symbol}): ${rs?.reasons.join("; ") || "max open positions reached"}`,
     )
-    return
-  }
-
-  // Effective margin for this position: honor a risk-based size override when
-  // provided (trend scalper), but never below a small floor or above the
-  // configured size AND the remaining margin budget.
-  const MIN_MARGIN_USDT = 5
-  const budget = marginBudgetRemaining()
-  let sizeUsdt = cfg.positionSizeUsdt
-  if (opts?.sizeUsdtOverride != null && opts.sizeUsdtOverride > 0) {
-    sizeUsdt = Math.min(opts.sizeUsdtOverride, cfg.positionSizeUsdt)
-  }
-  sizeUsdt = Math.min(sizeUsdt, budget)
-  if (sizeUsdt < MIN_MARGIN_USDT) {
-    await log(
-      "info",
-      `Entry blocked by margin cap (${direction} ${cfg.symbol}): only ${budget.toFixed(2)} USDT margin budget remaining`,
-    )
-    return
+    return 0
   }
 
   const price = snap.price
-  const quantity = (sizeUsdt * cfg.leverage) / price
 
-  // Determine SL/TP: explicit overrides (scalper) win; otherwise strategy default.
+  // Determine SL/TP first — risk-based sizing needs the stop distance.
+  // Explicit overrides (scalper/sniper) win; otherwise strategy default.
   let stopLoss: number
   let takeProfit: number
   let rangeTarget: number | null = null
@@ -232,6 +214,39 @@ async function openPosition(
     takeProfit = stops.takeProfit
   }
 
+  // Effective margin for this position: honor a risk-based size override when
+  // provided (trend scalper), but never below a small floor or above the
+  // configured size AND the remaining margin budget.
+  const MIN_MARGIN_USDT = 5
+  const budget = marginBudgetRemaining()
+  let sizeUsdt = cfg.positionSizeUsdt
+
+  // Risk-based sizing: normalize per-trade dollar risk to a fixed target.
+  // sizeUsdt = targetRiskUsdt * entry / (leverage * risk), capped at the
+  // per-position ceiling and the remaining margin budget. A wide-stop coin
+  // gets less margin, a tight-stop coin gets more — same dollars at risk.
+  if (strategy === "sniper" && cfg.sniperTargetRiskUsdt != null && cfg.sniperTargetRiskUsdt > 0) {
+    const risk = Math.abs(price - stopLoss)
+    if (risk > 0) {
+      const riskSized = (cfg.sniperTargetRiskUsdt * price) / (cfg.leverage * risk)
+      sizeUsdt = Math.min(sizeUsdt, riskSized)
+    }
+  }
+
+  if (opts?.sizeUsdtOverride != null && opts.sizeUsdtOverride > 0) {
+    sizeUsdt = Math.min(opts.sizeUsdtOverride, sizeUsdt)
+  }
+  sizeUsdt = Math.min(sizeUsdt, budget)
+  if (sizeUsdt < MIN_MARGIN_USDT) {
+    await log(
+      "info",
+      `Entry blocked by margin cap (${direction} ${cfg.symbol}): only ${budget.toFixed(2)} USDT margin budget remaining`,
+    )
+    return 0
+  }
+
+  const quantity = (sizeUsdt * cfg.leverage) / price
+
   if (cfg.mode === "live") {
     try {
       const tickerCache = new Map()
@@ -244,7 +259,7 @@ async function openPosition(
       })
     } catch (err) {
       await log("error", `LIVE order failed: ${err instanceof Error ? err.message : String(err)}`)
-      return
+      return 0
     }
   }
 
@@ -278,6 +293,8 @@ async function openPosition(
     "trade",
     `Opened ${direction.toUpperCase()} [${strategy}] @ ${price.toFixed(2)} | size ${sizeUsdt.toFixed(2)} USDT x${cfg.leverage} | SL ${stopLoss.toFixed(2)} TP ${takeProfit.toFixed(2)} | confidence ${(confidence * 100).toFixed(1)}%`,
   )
+
+  return sizeUsdt
 }
 
 export async function closePosition(
@@ -843,12 +860,12 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
             const snap = computeSnapshot(candles, marketCfg)
             snap.price = c.entry
             const features: FeatureVector = { ...snap.features, sideLong: c.direction === "long" ? 1 : -1 }
-            await openPosition(marketCfg, c.direction, snap, c.confidence, features, "sniper", {
+            const used = await openPosition(marketCfg, c.direction, snap, c.confidence, features, "sniper", {
               stopLoss: c.stopLoss,
               takeProfit: c.takeProfit,
               sizeUsdtOverride: remainingBudget,
             })
-            remainingBudget -= Math.min(marketCfg.positionSizeUsdt, remainingBudget)
+            remainingBudget -= Math.min(used, remainingBudget)
           } catch (err) {
             console.error("[Sniper] live entry failed:", err)
           }

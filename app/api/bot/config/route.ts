@@ -41,6 +41,7 @@ const NUMERIC_FIELDS = [
   "sniperSigmaExtreme",
   "sniperVolumeSurgeMult",
   "sniperMinVolumeUsdt",
+  "sniperTargetRiskUsdt",
 ] as const
 
 const STRATEGY_MODES = ["auto", "trend", "range"] as const

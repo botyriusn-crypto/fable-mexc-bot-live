@@ -71,6 +71,7 @@ export const botConfig = pgTable("bot_config", {
   sniperSigmaExtreme: doublePrecision("sniper_sigma_extreme").notNull().default(3.5),
   sniperVolumeSurgeMult: doublePrecision("sniper_volume_surge_mult").notNull().default(2.0),
   sniperMinVolumeUsdt: doublePrecision("sniper_min_volume_usdt").notNull().default(1000000),
+  sniperTargetRiskUsdt: doublePrecision("sniper_target_risk_usdt").notNull().default(5),
   mode: text("mode").notNull().default("paper"),
   status: text("status").notNull().default("stopped"),
   paperBalance: doublePrecision("paper_balance").notNull().default(10000),

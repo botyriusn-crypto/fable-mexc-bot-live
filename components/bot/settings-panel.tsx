@@ -86,6 +86,7 @@ const SNIPER_FIELDS: FieldDef[] = [
   { key: "sniperSigmaExtreme", label: "Sniper sigma extreme", step: "0.1" },
   { key: "sniperVolumeSurgeMult", label: "Sniper volume surge ×", step: "0.1" },
   { key: "sniperMinVolumeUsdt", label: "Sniper min volume (USDT)" },
+  { key: "sniperTargetRiskUsdt", label: "Sniper target risk (USDT)", step: "0.5" },
 ]
 
 export function SettingsPanel({ state }: { state: BotState }) {
