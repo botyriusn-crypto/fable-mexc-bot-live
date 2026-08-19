@@ -2,7 +2,7 @@ import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { botConfig } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
-import { analyzeTradesForMarket, applyRecommendations } from "@/lib/ai-advisor"
+import { analyzeTradesForMarket } from "@/lib/ai-advisor"
 
 export const dynamic = "force-dynamic"
 
@@ -13,14 +13,7 @@ export async function POST() {
 
     const config = cfg[0]
     const result = await analyzeTradesForMarket(config.symbol, config.timeframe)
-
-    // Apply through the levers so "run analysis" actually tunes the bot.
-    let applied = false
-    if (result?.recommendations?.length) {
-      applied = await applyRecommendations(0, result.recommendations)
-    }
-
-    return NextResponse.json({ ...result, applied })
+    return NextResponse.json(result)
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : "Analysis failed" }, { status: 500 })
   }

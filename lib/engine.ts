@@ -27,7 +27,7 @@ import { runSniperCycle } from "./sniper"
 import { analyzeTradesForMarket, applyRecommendations } from "./ai-advisor"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager } from './mexc/ws';
-import { getAccountAssets } from './mexc/private';
+import { getAccountAssets, getOpenPositions as getMexcOpenPositions } from './mexc/private';
 import {
   evaluatePortfolioRisk,
   isTradingHalted,
@@ -117,6 +117,32 @@ async function getOpenPosition(symbol?: string, timeframe?: string): Promise<Pos
 function unrealizedPnl(position: Position, markPrice: number): number {
   const dir = position.side === "long" ? 1 : -1
   return (markPrice - position.entryPrice) * dir * position.quantity
+}
+
+// Reconcile DB open positions against the exchange's actual open positions.
+// If a position is no longer open on MEXC (liquidated, manually closed, or
+// exchange-side stop), mark it closed in the DB so the UI and risk layer stop
+// treating it as live exposure. Only runs in live mode; a failed MEXC read is
+// treated as "unknown" and skipped, never as "all closed".
+function normalizeSymbol(s: string): string {
+  return s.replace(/[^a-zA-Z0-9]/g, "").toUpperCase()
+}
+
+async function reconcilePositions(cfg: BotConfig): Promise<void> {
+  if (cfg.mode !== "live") return
+  try {
+    const mexPositions = (await getMexcOpenPositions()) as any[]
+    const mexSymbols = new Set(mexPositions.map((p) => normalizeSymbol(p?.symbol ?? "")))
+    const dbOpen = await getOpenPositions()
+    for (const pos of dbOpen) {
+      if (!mexSymbols.has(normalizeSymbol(pos.symbol))) {
+        await db.update(positions).set({ status: "closed", closedAt: sql`NOW()` }).where(eq(positions.id, pos.id))
+        await log("info", `Reconciled: ${pos.symbol} ${pos.side} no longer open on MEXC — marked closed in DB`)
+      }
+    }
+  } catch (err) {
+    await log("error", `Reconciliation skipped (MEXC read failed): ${err instanceof Error ? err.message : String(err)}`)
+  }
 }
 
 async function openPosition(
@@ -424,6 +450,7 @@ async function fetchTickerWithRetry(exchange: any, symbol: string, cache: Map<st
 // Ticker cache to avoid rate limits
 export async function runTick(): Promise<{ status: string; detail?: string }> {
   const cfg = await getConfig()
+  await reconcilePositions(cfg)
   console.log("TICK: bot running"); if (cfg.status !== "running") return { status: "skipped", detail: "Bot is stopped" }
 
   try {

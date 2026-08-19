@@ -77,6 +77,7 @@ const EXCHANGES = [
 ] as const
 
 const SIZE_FIELDS: FieldDef[] = [{ key: "positionSizeUsdt", label: "Position size (USDT)" }]
+const SNIPER_FIELDS: FieldDef[] = [{ key: "sniperMaxEntries", label: "Sniper max entries", step: "1" }]
 
 export function SettingsPanel({ state }: { state: BotState }) {
   const { mutate } = useSWRConfig()
@@ -85,6 +86,7 @@ export function SettingsPanel({ state }: { state: BotState }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
+  const [applying, setApplying] = useState(false)
   const [aiResult, setAiResult] = useState<any>(null)
   const [aiError, setAiError] = useState<string | null>(null)
   const [confirmLive, setConfirmLive] = useState(false)
@@ -220,6 +222,20 @@ export function SettingsPanel({ state }: { state: BotState }) {
                 {aiResult.recommendations.map((rec: any, i: number) => (
                   <div key={i} className="text-xs"><span className="font-medium">{rec.field}:</span> {String(rec.current)} → {String(rec.suggested)} — {rec.reason}</div>
                 ))}
+                <Button size="sm" variant="default" className="h-6 px-2 text-xs mt-1" disabled={applying} onClick={async () => {
+                  setApplying(true); setAiError(null)
+                  try {
+                    const res = await fetch("/api/bot/ai-apply", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ recommendations: aiResult.recommendations }),
+                    })
+                    const data = await res.json()
+                    if (data.error) { setAiError(data.error) }
+                    else { setAiResult(null); await mutate("/api/bot/status") }
+                  } catch (err) { setAiError(err instanceof Error ? err.message : "Apply failed") }
+                  finally { setApplying(false) }
+                }}>{applying ? "Applying…" : "Apply Recommendations"}</Button>
               </div>
             )}
             </div>
@@ -334,6 +350,7 @@ export function SettingsPanel({ state }: { state: BotState }) {
           </Label>
           <Switch id="sniper-live" checked={Boolean(cfg.sniperLive)} onCheckedChange={(c) => toggleBool("sniperLive", c)} />
         </div>
+        {renderFields(SNIPER_FIELDS)}
 
         <Button size="sm" onClick={handleSave} disabled={saving || Object.keys(form).length === 0}>
           {saving ? "Saving…" : "Save Settings"}
