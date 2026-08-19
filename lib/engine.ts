@@ -770,7 +770,13 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
           try {
             if (heldSymbols.has(c.symbol)) continue
             heldSymbols.add(c.symbol)
-            const marketCfg: BotConfig = { ...cfg, symbol: c.symbol, timeframe: c.timeframe } as BotConfig
+            const marketCfg: BotConfig = {
+              ...cfg,
+              symbol: c.symbol,
+              timeframe: c.timeframe,
+              leverage: cfg.sniperLeverage ?? cfg.leverage,
+              positionSizeUsdt: cfg.sniperPositionSizeUsdt ?? cfg.positionSizeUsdt,
+            } as BotConfig
             const candles = await exchange.fetchKlines(toExchangeSymbol(c.symbol), c.timeframe, 200)
             if (candles.length < 60) continue
             const snap = computeSnapshot(candles, marketCfg)

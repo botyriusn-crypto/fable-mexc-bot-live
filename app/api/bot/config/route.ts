@@ -34,6 +34,8 @@ const NUMERIC_FIELDS = [
   "gridBudgetPct",
   "gridLeverage",
   "sniperMaxEntries",
+  "sniperPositionSizeUsdt",
+  "sniperLeverage",
 ] as const
 
 const STRATEGY_MODES = ["auto", "trend", "range"] as const

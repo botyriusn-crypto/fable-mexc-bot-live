@@ -64,6 +64,8 @@ export const botConfig = pgTable("bot_config", {
   aiLastAnalysis: timestamp("ai_last_analysis", { withTimezone: true }),
   sniperLive: boolean("sniper_live").notNull().default(false),
   sniperMaxEntries: integer("sniper_max_entries").notNull().default(3),
+  sniperPositionSizeUsdt: doublePrecision("sniper_position_size_usdt").notNull().default(50),
+  sniperLeverage: integer("sniper_leverage").notNull().default(3),
   mode: text("mode").notNull().default("paper"),
   status: text("status").notNull().default("stopped"),
   paperBalance: doublePrecision("paper_balance").notNull().default(10000),
