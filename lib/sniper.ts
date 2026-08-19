@@ -295,7 +295,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     const candles = await fetchKlines(symbol, timeframe, 200).catch(() => null)
     if (!candles || candles.length < 60) continue
 
-    const sig = detectSniper(candles as Candle[], {} as IndicatorSnapshot, 0)
+    const sig = detectSniper(candles as Candle[], {} as IndicatorSnapshot, t.fundingRate)
     if (!sig.direction) continue
 
     await recordSniperCandidate(symbol, timeframe, bucket, t.lastPrice, sig)

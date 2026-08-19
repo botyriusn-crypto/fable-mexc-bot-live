@@ -175,7 +175,7 @@ export function getCandles(symbol: string, timeframe: string, limit: number): Pr
 
 // Bulk ticker for ALL USDT perpetuals in one call — used by the sniper to
 // rank the whole market by volatility/momentum without N per-symbol calls.
-export interface BulkTicker { symbol: string; lastPrice: number; volume24: number; riseFallRate: number }
+export interface BulkTicker { symbol: string; lastPrice: number; volume24: number; riseFallRate: number; fundingRate: number }
 let _bulkTickerCache: { data: BulkTicker[]; ts: number } | null = null
 
 export async function fetchAllTickers(): Promise<BulkTicker[]> {
@@ -191,6 +191,7 @@ export async function fetchAllTickers(): Promise<BulkTicker[]> {
       lastPrice: Number(t.lastPrice),
       volume24: Number(t.volume24 ?? t.amount24 ?? 0),
       riseFallRate: Number(t.riseFallRate ?? 0),
+      fundingRate: Number(t.fundingRate ?? 0),
     }))
   _bulkTickerCache = { data, ts: Date.now() }
   return data
