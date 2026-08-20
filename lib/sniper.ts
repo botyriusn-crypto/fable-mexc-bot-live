@@ -65,8 +65,21 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const mean = avg(window)
   const sd = Math.sqrt(avg(window.map(c => (c - mean) ** 2))) || 1
   const z = (last.close - mean) / sd
-  const exhaustedDown = z < -sigmaExtreme && last.close > last.open
-  const exhaustedUp = z > sigmaExtreme && last.close < last.open
+
+  // Trend filter: mean-reversion only WITH the longer-horizon trend.
+  // The z-score measures dislocation from the recent 100-candle mean. The
+  // trend is the direction of the longer-term center: compare the recent
+  // 100-candle mean against the mean of the candles BEFORE it. If the recent
+  // center is higher, the trend is up (dips are buyable); if lower, the trend
+  // is down and "buy the dip" is a falling knife. This is what was killing the
+  // long side (42% hit rate): sigma-longs kept catching knives in a downtrend.
+  const older = closes.slice(0, Math.max(0, closes.length - 100))
+  const olderMean = older.length > 0 ? avg(older) : mean
+  const trendUp = mean > olderMean
+  const trendDown = mean < olderMean
+
+  const exhaustedDown = z < -sigmaExtreme && last.close > last.open && trendUp
+  const exhaustedUp = z > sigmaExtreme && last.close < last.open && trendDown
   // Sigma confidence scales with how far |z| exceeds the threshold, so the
   // confidence floor and the "top N by confidence" sort actually discriminate
   // (weak sigma ~0.5 -> rejected by a 0.6 floor; strong sigma ~0.9 -> kept).

@@ -41,6 +41,8 @@ const NUMERIC_FIELDS = [
   "sniperSigmaExtreme",
   "sniperVolumeSurgeMult",
   "sniperMinVolumeUsdt",
+  "sniperMomentumThreshold",
+  "sniperTrailAtrMult",
   "sniperTargetRiskUsdt",
 ] as const
 

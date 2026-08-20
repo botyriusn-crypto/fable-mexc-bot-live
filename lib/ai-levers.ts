@@ -34,6 +34,8 @@ export const FIELD_LIMITS: Record<string, FieldLimit> = {
   sniperLeverage:        { min: 1,   max: 10,  maxStep: 2,   maxRelStep: 0.5 },
   sniperConfidenceFloor: { min: 0.5, max: 0.9, maxStep: 0.05, maxRelStep: 0.2 },
   sniperCorrThreshold:   { min: 0.5, max: 0.95, maxStep: 0.05, maxRelStep: 0.2 },
+  sniperMomentumThreshold: { min: 0.3, max: 1.5, maxStep: 0.1, maxRelStep: 0.3 },
+  sniperTrailAtrMult:   { min: 0.2, max: 2.0, maxStep: 0.2, maxRelStep: 0.3 },
 }
 
 export interface RecommendationInput {
@@ -140,6 +142,10 @@ export function normalizeField(field: string): string {
     sniperconfidencefloor: "sniperConfidenceFloor",
     snipercorrthreshold: "sniperCorrThreshold",
     snipercorrelationthreshold: "sniperCorrThreshold",
+    snipermomentumthreshold: "sniperMomentumThreshold",
+    snipermomentum: "sniperMomentumThreshold",
+    snipertrailatrmult: "sniperTrailAtrMult",
+    snipertrail: "sniperTrailAtrMult",
   }
   if (aliases[norm]) return aliases[norm]
   for (const canonical of Object.keys(FIELD_LIMITS)) {

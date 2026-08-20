@@ -29,6 +29,14 @@ export interface ExitDecision {
 // guarantees the coded stop always triggers well before liquidation.
 const LIQUIDATION_SAFETY_FACTOR = 0.75
 
+// Sniper-specific exit tuning: the sniper trades high-ATR, low-price coins
+// where the global trail (1.2× ATR) is far too loose relative to its 3×-stop
+// TP, so winners give back most of their gain. Sniper positions use a tighter
+// trail and a higher momentum bar so the "let winners run" override only
+// engages on genuinely strong momentum and banks the fixed TP otherwise.
+const SNIPER_MOMENTUM_THRESHOLD = 0.7
+const SNIPER_TRAIL_ATR_MULT = 0.6
+
 export function computeInitialStops(
   side: "long" | "short",
   entryPrice: number,
@@ -57,6 +65,11 @@ export function evaluateExit(
   const atrValue = position.atrAtEntry ?? snap.atr
   const momentum = momentumScore(snap, dir)
 
+  // Sniper positions use a tighter trail + higher momentum bar (see constants above).
+  const isSniper = position.strategy === "sniper"
+  const momentumThreshold = isSniper ? (cfg.sniperMomentumThreshold ?? SNIPER_MOMENTUM_THRESHOLD) : cfg.momentumThreshold
+  const trailAtrMult = isSniper ? (cfg.sniperTrailAtrMult ?? SNIPER_TRAIL_ATR_MULT) : cfg.trailAtrMult
+
   const updates: ExitDecision["updates"] = {}
 
   // Track extremes
@@ -82,7 +95,7 @@ export function evaluateExit(
   }
 
   // 3. Momentum / hype detection
-  const hypeActive = momentum >= cfg.momentumThreshold
+  const hypeActive = momentum >= momentumThreshold
 
   // 4. Trailing stop management
   let trailingActive = position.trailingActive
@@ -92,8 +105,8 @@ export function evaluateExit(
     // Activate/update trailing mode — ride the trend, suspend fixed TP
     trailingActive = true
     // Trail distance scales with ATR; tightens as momentum fades toward threshold
-    const momentumFactor = Math.max(0.5, Math.min(momentum / cfg.momentumThreshold, 1.5))
-    const trailDist = atrValue * cfg.trailAtrMult * momentumFactor
+    const momentumFactor = Math.max(0.5, Math.min(momentum / momentumThreshold, 1.5))
+    const trailDist = atrValue * trailAtrMult * momentumFactor
     const candidate = side === "long" ? highest - trailDist : lowest + trailDist
     // Ratchet: only ever moves in favor of the position
     if (trailingStop == null) {
@@ -105,7 +118,7 @@ export function evaluateExit(
     updates.trailingStop = trailingStop
   } else if (trailingActive && trailingStop != null) {
     // Momentum faded — tighten the trail to lock in gains
-    const tightDist = atrValue * cfg.trailAtrMult * 0.5
+    const tightDist = atrValue * trailAtrMult * 0.5
     const candidate = side === "long" ? highest - tightDist : lowest + tightDist
     trailingStop = side === "long" ? Math.max(trailingStop, candidate) : Math.min(trailingStop, candidate)
     updates.trailingStop = trailingStop
@@ -124,7 +137,7 @@ export function evaluateExit(
       if (hypeActive) {
         // Hype at TP moment: skip TP, let the trail take over next evaluation
         updates.trailingActive = true
-        const trailDist = atrValue * cfg.trailAtrMult
+        const trailDist = atrValue * trailAtrMult
         updates.trailingStop = side === "long" ? highest - trailDist : lowest + trailDist
       } else {
         return { action: "close", reason: "tp", updates, momentum }

@@ -1,0 +1,10 @@
+ALTER TABLE "bot_config" ADD COLUMN "sniper_position_size_usdt" double precision DEFAULT 50 NOT NULL;
+ALTER TABLE "bot_config" ADD COLUMN "sniper_leverage" integer DEFAULT 3 NOT NULL;
+ALTER TABLE "bot_config" ADD COLUMN "sniper_confidence_floor" double precision DEFAULT 0.6 NOT NULL;
+ALTER TABLE "bot_config" ADD COLUMN "sniper_corr_threshold" double precision DEFAULT 0.8 NOT NULL;
+ALTER TABLE "bot_config" ADD COLUMN "sniper_sigma_extreme" double precision DEFAULT 3.5 NOT NULL;
+ALTER TABLE "bot_config" ADD COLUMN "sniper_volume_surge_mult" double precision DEFAULT 2 NOT NULL;
+ALTER TABLE "bot_config" ADD COLUMN "sniper_min_volume_usdt" double precision DEFAULT 1000000 NOT NULL;
+ALTER TABLE "bot_config" ADD COLUMN "sniper_target_risk_usdt" double precision DEFAULT 5 NOT NULL;
+ALTER TABLE "bot_config" ADD COLUMN "sniper_momentum_threshold" double precision DEFAULT 0.7 NOT NULL;
+ALTER TABLE "bot_config" ADD COLUMN "sniper_trail_atr_mult" double precision DEFAULT 0.6 NOT NULL;

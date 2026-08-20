@@ -125,6 +125,8 @@ SNIPER SETTINGS:
 - Sniper Sigma Extreme: ${config.sniperSigmaExtreme}
 - Sniper Volume Surge ×: ${config.sniperVolumeSurgeMult}
 - Sniper Min Volume (USDT): ${config.sniperMinVolumeUsdt}
+- Sniper Momentum Threshold: ${config.sniperMomentumThreshold}
+- Sniper Trail ATR ×: ${config.sniperTrailAtrMult}
 - Sniper Target Risk (USDT): $${config.sniperTargetRiskUsdt} (read-only — do not recommend changes)
 
 RECENT TRADE OUTCOMES:
@@ -147,6 +149,8 @@ Provide 2-4 specific, actionable recommendations to improve performance. Return 
 - sniperSigmaExtreme
 - sniperVolumeSurgeMult
 - sniperMinVolumeUsdt
+- sniperMomentumThreshold
+- sniperTrailAtrMult
 
 [
   {"field": "mlConfidenceThreshold", "current": 0.7, "suggested": 0.85, "reason": "brief reason", "impact": "expected impact"}
@@ -176,6 +180,8 @@ Provide 2-4 specific, actionable recommendations to improve performance. Return 
         sniperSigmaExtreme: config.sniperSigmaExtreme,
         sniperVolumeSurgeMult: config.sniperVolumeSurgeMult,
         sniperMinVolumeUsdt: config.sniperMinVolumeUsdt,
+        sniperMomentumThreshold: config.sniperMomentumThreshold,
+        sniperTrailAtrMult: config.sniperTrailAtrMult,
         sniperTargetRiskUsdt: config.sniperTargetRiskUsdt,
       },
       recommendations,
