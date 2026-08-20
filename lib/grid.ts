@@ -1667,6 +1667,18 @@ return longPnl + shortPnl
 // be silently abandoned again.
 export async function reconcileOrphanedPositions(): Promise<void> {
   try {
+    // Gate: only sweep for orphans when the grid subsystem is enabled. When the
+    // grid is OFF (sniper-only / manual trading mode), this account-wide sweep
+    // would force-close manual trades the bot has no tracking record for.
+    const cfgRows = await db
+      .select({ gridEnabled: botConfig.gridEnabled })
+      .from(botConfig)
+      .where(eq(botConfig.id, 1))
+    if (!cfgRows[0]?.gridEnabled) {
+      console.log("[Reconcile] gridEnabled=false — skipping orphan reconciliation (manual trading mode)")
+      return
+    }
+
     const exchange = getExchangeClient("mexc")
     const openPositions = (await exchange.getOpenPositions()) as any[]
     console.log(`[Reconcile] Checking ${Array.isArray(openPositions) ? openPositions.length : 0} open MEXC position(s) for orphans`)
