@@ -566,28 +566,46 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
           >
             🔄 Rotate Now
           </Button>
-          <Button 
-            onClick={async () => {
-              const currentState = state.rotationEnabled
-              await fetch("/api/bot/rotate", { 
-                method: "POST", 
-                headers: {"Content-Type":"application/json"}, 
-                body: JSON.stringify({enabled: !currentState}) 
-              })
-              alert(currentState ? "❌ Auto-rotation disabled!" : "✅ Auto-rotation enabled! Runs every 4 hours.")
-              setTimeout(() => window.location.reload(), 500)
-            }} 
-            size="sm" 
-            variant="outline" 
-            className={`text-xs h-7 px-3 transition-all ${
-              state.rotationEnabled 
-                ? 'bg-success/20 border-success/60 text-success font-bold shadow-[0_0_8px_rgba(var(--success),0.3)]' 
-                : 'hover:bg-danger/10 hover:border-danger/40'
-            }`}
-            title={state.rotationEnabled ? 'Auto-rotation is ON (click to disable)' : 'Auto-rotation is OFF (click to enable)'}
-          >
-            ⏰ {state.rotationEnabled ? 'Auto ON' : 'Auto OFF'}
-          </Button>
+          {state.gridEnabled ? (
+            <Button 
+              onClick={async () => {
+                if (!window.confirm("🛑 STOP all grids? This disables every pair, tears down all ladders, and persists a kill-switch so nothing re-activates on restart.")) return
+                const res = await fetch("/api/bot/stop", { method: "POST" })
+                const data = await res.json().catch(() => ({}))
+                if (data.ok) {
+                  alert(`🛑 All grids stopped (${data.disabled} pairs disabled). Kill-switch persisted.`)
+                  setTimeout(() => window.location.reload(), 500)
+                } else {
+                  alert("❌ STOP failed: " + (data.error || "unknown"))
+                }
+              }} 
+              size="sm" 
+              variant="outline" 
+              className="text-xs h-7 px-3 transition-all border-danger/40 text-danger font-bold hover:bg-danger/10 hover:border-danger/60"
+              title="Disable all grids, tear down ladders, and persist a kill-switch"
+            >
+              🛑 STOP
+            </Button>
+          ) : (
+            <Button 
+              onClick={async () => {
+                const res = await fetch("/api/bot/start", { method: "POST" })
+                const data = await res.json().catch(() => ({}))
+                if (data.ok) {
+                  alert("▶️ Grids re-enabled. Re-enable individual pairs manually to resume trading.")
+                  setTimeout(() => window.location.reload(), 500)
+                } else {
+                  alert("❌ START failed: " + (data.error || "unknown"))
+                }
+              }} 
+              size="sm" 
+              variant="outline" 
+              className="text-xs h-7 px-3 transition-all border-success/40 text-success font-bold hover:bg-success/10 hover:border-success/60"
+              title="Clear the kill-switch (grids stay disabled until re-enabled manually)"
+            >
+              ▶️ START
+            </Button>
+          )}
         </div>
           <span className="text-xs text-muted-foreground">{grids.length} pairs · {totalOrders} orders active</span>
         {state.lastRotationTime && state.lastRotationTime > 0 && (

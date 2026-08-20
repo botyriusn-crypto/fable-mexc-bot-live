@@ -10,7 +10,7 @@ import { getAccountAssets } from "@/lib/mexc/private"
 import { ema, computeSnapshot } from "@/lib/indicators"
 import { detectRegime, type Regime } from "@/lib/strategy"
 import { getGridConfigs, gridUnrealizedPnl } from "@/lib/grid"
-import { isRotationEnabled, getLastRotationTime } from "@/lib/portfolio-rotator"
+import { getLastRotationTime } from "@/lib/portfolio-rotator"
 import { getShadowStats, runShadowCycle } from "@/lib/shadow-evaluator"
 import { getWatchdogReport } from "@/lib/watchdog"
 import { getSniperStats, runSniperCycle } from "@/lib/sniper"
@@ -231,7 +231,7 @@ export async function GET() {
     }
 
     return NextResponse.json({
-      rotationEnabled: isRotationEnabled(),
+      gridEnabled: cfg.gridEnabled,
       lastRotationTime: getLastRotationTime(),
       shadowStats,
       risk,

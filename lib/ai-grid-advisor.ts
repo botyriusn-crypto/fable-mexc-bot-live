@@ -1,7 +1,7 @@
 import { ema, atr, adx, bollinger } from "./indicators"
 import { comboDna, comboParams } from "./combo-score"
 import { db } from "./db"
-import { botLogs, gridConfigs } from "./db/schema"
+import { botLogs, gridConfigs, botConfig } from "./db/schema"
 import { livePrices } from "./mexc/ws"
 import { fetchDepth, depthNotionalNearMid } from "./mexc/public"
 import type { Candle } from "./mexc/public"
@@ -317,7 +317,9 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
     }
 
     const applied: string[] = []
-    if (autoApply) {
+    const cfgRows = await db.select({ gridEnabled: botConfig.gridEnabled }).from(botConfig).where(eq(botConfig.id, 1))
+    const gridsEnabled = cfgRows[0]?.gridEnabled ?? false
+    if (autoApply && gridsEnabled) {
       for (const rec of recommendations) {
         try {
           const existing = await db.select().from(gridConfigs).where(eq(gridConfigs.symbol, rec.symbol)).limit(1)

@@ -83,7 +83,7 @@ export interface BotState {
     makerMode?: boolean
     direction: string
   }>
-  rotationEnabled?: boolean
+  gridEnabled?: boolean
   lastRotationTime?: number
   shadowStats?: {
     totalEvaluations: number
