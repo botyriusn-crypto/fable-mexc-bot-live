@@ -1,5 +1,5 @@
 "use client"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useBotState } from "@/lib/use-bot-state"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -17,6 +17,30 @@ function readLS(key: string, def: string): string {
 function writeLS(key: string, val: string) {
   if (typeof window === "undefined") return
   try { window.localStorage.setItem(key, val) } catch {}
+}
+
+// Two-tone chime via Web Audio API — no asset file needed.
+function playAlertSound() {
+  if (typeof window === "undefined") return
+  try {
+    const Ctx = window.AudioContext || (window as any).webkitAudioContext
+    const ctx = new Ctx()
+    const now = ctx.currentTime
+    const tones = [880, 1174.66] // A5, D6
+    tones.forEach((freq, i) => {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = "sine"
+      osc.frequency.value = freq
+      const t = now + i * 0.18
+      gain.gain.setValueAtTime(0.0001, t)
+      gain.gain.exponentialRampToValueAtTime(0.3, t + 0.02)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.35)
+      osc.connect(gain).connect(ctx.destination)
+      osc.start(t)
+      osc.stop(t + 0.4)
+    })
+  } catch {}
 }
 
 // Control block that lives at the top of Strategy Settings
@@ -96,6 +120,16 @@ export function SniperAlertBubble() {
   }, [top?.createdAt])
 
   const active = Boolean(enabled && top && top.confidence >= threshold && !inCooldown)
+
+  // Play a chime once per new candidate (keyed on symbol+direction) so you
+  // hear the alert even when working in another window.
+  const lastPlayedKey = useRef("")
+  useEffect(() => {
+    if (active && key && key !== lastPlayedKey.current) {
+      lastPlayedKey.current = key
+      playAlertSound()
+    }
+  }, [active, key])
 
   const acknowledge = () => {
     const next = { ...dismissed, [key]: Date.now() }
