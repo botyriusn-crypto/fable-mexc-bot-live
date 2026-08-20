@@ -1,7 +1,7 @@
 import type { Candle } from "./mexc/public"
 import type { IndicatorSnapshot } from "./indicators"
 import { db } from "./db"
-import { classifierDecisions, botConfig } from "./db/schema"
+import { classifierDecisions, botConfig, botLogs } from "./db/schema"
 import { and, eq, isNull, sql } from "drizzle-orm"
 import { fetchTicker, fetchAllTickers, fetchKlines, type BulkTicker } from "./mexc/public"
 import { recordOutcome, type SniperFeatures } from "./advisor"
@@ -323,6 +323,12 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
 
     const sig = detectSniper(candles as Candle[], {} as IndicatorSnapshot, t.fundingRate, { sigmaExtreme, volumeSurgeMult })
     if (!sig.direction) continue
+
+    if (sig.reason.includes("funding")) {
+      try {
+        await db.insert(botLogs).values({ level: "info", message: `Sniper: funding edge on ${symbol} (rate ${(sig.fundingRate * 100).toFixed(4)}%, ${sig.direction === "long" ? "crowded shorts" : "crowded longs"})` })
+      } catch { /* best-effort */ }
+    }
 
     await recordSniperCandidate(symbol, timeframe, bucket, t.lastPrice, sig)
     fresh.push({ symbol, timeframe, direction: sig.direction, entry: t.lastPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence })

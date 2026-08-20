@@ -2,7 +2,7 @@ import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { botConfig, positions, equitySnapshots, botLogs } from "@/lib/db/schema"
 import { eq, sql } from "drizzle-orm"
-import { getConfig, closePosition, stopRealtimeEngine, initRealtimeEngine } from "@/lib/engine"
+import { getConfig, closePosition, stopRealtimeEngine, initRealtimeEngine, runTick } from "@/lib/engine"
 import { teardownGrid, getGridConfigs } from "@/lib/grid"
 import { fetchTicker } from "@/lib/mexc/public"
 
@@ -26,6 +26,10 @@ export async function POST(request: Request) {
           console.error("[control] failed to restart WS engines:", err)
         }
         await db.insert(botLogs).values({ level: "info", message: "Bot started" })
+        // Immediate sync: run one tick now so the bot reconciles with MEXC
+        // and refreshes balance/positions immediately instead of waiting for
+        // the next scheduled tick (avoids the stale-balance lag after stop/start).
+        runTick().catch((err) => console.error("[control] immediate tick failed:", err))
         return NextResponse.json({ ok: true })
       }
       case "stop": {

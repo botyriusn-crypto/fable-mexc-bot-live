@@ -831,14 +831,19 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
           if (heldSymbols.has(c.symbol)) continue
           const k = klineMap.get(c.symbol)
           if (!k) continue
-          const isCorrelated = picked.some((sym) => {
+          let bestCorr = 0
+          let bestSym = ""
+          for (const sym of picked) {
             const pk = klineMap.get(sym)
-            return pk ? priceCorrelation(k, pk) >= CORR_THRESHOLD : false
-          })
-          if (isCorrelated) {
-            await log("info", `Sniper: skipped ${c.symbol} (correlated with an already-selected mover)`)
+            if (!pk) continue
+            const corr = priceCorrelation(k, pk)
+            if (corr > bestCorr) { bestCorr = corr; bestSym = sym }
+          }
+          if (bestCorr >= CORR_THRESHOLD) {
+            await log("info", `Sniper: skipped ${c.symbol} (corr ${bestCorr.toFixed(2)} vs ${bestSym}, >= ${CORR_THRESHOLD})`)
           } else {
             picked.push(c.symbol)
+            await log("info", `Sniper: picked ${c.symbol} (max corr ${bestCorr.toFixed(2)}${bestSym ? ` vs ${bestSym}` : ""}, < ${CORR_THRESHOLD})`)
           }
         }
         const selected = picked.slice(0, Math.max(1, cfg.sniperMaxEntries ?? 3))
