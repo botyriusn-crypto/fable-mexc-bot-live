@@ -5,8 +5,8 @@ import type { IndicatorSnapshot } from "./indicators"
 import { momentumScore } from "./indicators"
 
 export interface ExitDecision {
-  action: "hold" | "close"
-  reason?: "tp" | "sl" | "trail" | "signal"
+  action: "hold" | "close" | "partial"
+  reason?: "tp" | "sl" | "trail" | "signal" | "partial"
   // Updated position fields to persist when holding
   updates: {
     stopLoss?: number
@@ -17,6 +17,7 @@ export interface ExitDecision {
     lowestPrice?: number
   }
   momentum: number
+  partialFraction?: number
 }
 
 // Safety margin against liquidation: isolated-margin futures liquidate at
@@ -92,6 +93,24 @@ export function evaluateExit(
     stopLoss = position.entryPrice
     updates.stopLoss = stopLoss
     updates.breakEvenMoved = true
+  }
+
+  // 2b. Partial profit taking: at tp1 (partialAtrMult × ATR), bank a fraction
+  // and move SL to break-even, letting the rest ride to full TP or trail.
+  if (
+    cfg.partialTakeEnabled &&
+    (position.partialExitCount ?? 0) === 0 &&
+    profitDist >= atrValue * (cfg.partialAtrMult ?? 1.0)
+  ) {
+    updates.stopLoss = position.entryPrice
+    updates.breakEvenMoved = true
+    return {
+      action: "partial",
+      reason: "partial",
+      updates,
+      momentum,
+      partialFraction: cfg.partialFraction ?? 0.5,
+    }
   }
 
   // 3. Momentum / hype detection

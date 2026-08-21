@@ -74,6 +74,10 @@ export const botConfig = pgTable("bot_config", {
   sniperTargetRiskUsdt: doublePrecision("sniper_target_risk_usdt").notNull().default(5),
   sniperMomentumThreshold: doublePrecision("sniper_momentum_threshold").notNull().default(0.7),
   sniperTrailAtrMult: doublePrecision("sniper_trail_atr_mult").notNull().default(0.6),
+  // Partial profit taking
+  partialTakeEnabled: boolean("partial_take_enabled").notNull().default(false),
+  partialFraction: doublePrecision("partial_fraction").notNull().default(0.5),
+  partialAtrMult: doublePrecision("partial_atr_mult").notNull().default(1.0),
   // Advanced strategy
   advancedEnabled: boolean("advanced_enabled").notNull().default(false),
   advancedMtfEnabled: boolean("advanced_mtf_enabled").notNull().default(true),
@@ -119,6 +123,8 @@ export const positions = pgTable("positions", {
   atrAtEntry: doublePrecision("atr_at_entry"),
   strategy: text("strategy").notNull().default("trend"), // 'trend' | 'range' | 'webhook'
   rangeTarget: doublePrecision("range_target"), // mean-reversion TP (BB middle at entry)
+  remainingQuantity: doublePrecision("remaining_quantity"),
+  partialExitCount: integer("partial_exit_count").notNull().default(0),
   status: text("status").notNull().default("open"), // 'open' | 'closed'
   openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
   closedAt: timestamp("closed_at", { withTimezone: true }),
@@ -135,9 +141,10 @@ export const trades = pgTable("trades", {
   leverage: integer("leverage").notNull(),
   pnl: doublePrecision("pnl").notNull(),
   fees: doublePrecision("fees").notNull(),
-  exitReason: text("exit_reason").notNull(), // 'tp' | 'sl' | 'trail' | 'signal' | 'manual'
+  exitReason: text("exit_reason").notNull(), // 'tp' | 'sl' | 'trail' | 'signal' | 'manual' | 'partial'
   strategy: text("strategy").notNull().default("trend"), // 'trend' | 'range' | 'webhook'
   entryConfidence: doublePrecision("entry_confidence"),
+  partial: boolean("partial").notNull().default(false),
   openedAt: timestamp("opened_at", { withTimezone: true }),
   closedAt: timestamp("closed_at", { withTimezone: true }).notNull().defaultNow(),
   live: boolean("live").notNull().default(false),

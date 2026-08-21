@@ -138,7 +138,8 @@ async function getOpenPosition(symbol?: string, timeframe?: string): Promise<Pos
 
 function unrealizedPnl(position: Position, markPrice: number): number {
   const dir = position.side === "long" ? 1 : -1
-  return (markPrice - position.entryPrice) * dir * position.quantity
+  const qty = position.remainingQuantity ?? position.quantity
+  return (markPrice - position.entryPrice) * dir * qty
 }
 
 // Pearson correlation of close-to-close returns over the overlapping window.
@@ -319,6 +320,74 @@ async function openPosition(
   return sizeUsdt
 }
 
+export async function takePartialProfit(
+  position: Position,
+  exitPrice: number,
+  fraction: number,
+  cfg: BotConfig,
+): Promise<void> {
+  const remainingQty = position.remainingQuantity ?? position.quantity
+  const closeQty = remainingQty * fraction
+
+  if (cfg.mode === "live") {
+    try {
+      const exchange = getExchangeClient(cfg.exchange as Exchange)
+      await exchange.placeMarketOrder({
+        symbol: position.symbol,
+        side: position.side === "long" ? 4 : 2,
+        volume: closeQty,
+        leverage: position.leverage,
+      })
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      await log("error", `LIVE partial close failed: ${errMsg}`)
+      return
+    }
+  }
+
+  const dir = position.side === "long" ? 1 : -1
+  const grossPnl = (exitPrice - position.entryPrice) * dir * closeQty
+  const closeFee = position.sizeUsdt * position.leverage * TAKER_FEE * fraction
+  const netPnl = grossPnl - closeFee
+
+  await db.insert(trades).values({
+    positionId: position.id,
+    symbol: position.symbol,
+    side: position.side,
+    entryPrice: position.entryPrice,
+    exitPrice,
+    sizeUsdt: position.sizeUsdt * fraction,
+    leverage: position.leverage,
+    pnl: netPnl,
+    fees: closeFee,
+    exitReason: "partial",
+    strategy: position.strategy ?? "trend",
+    entryConfidence: position.entryConfidence,
+    openedAt: position.openedAt,
+    partial: true,
+  })
+
+  await db
+    .update(positions)
+    .set({
+      remainingQuantity: remainingQty - closeQty,
+      partialExitCount: sql`${positions.partialExitCount} + 1`,
+      stopLoss: position.entryPrice,
+      breakEvenMoved: true,
+    })
+    .where(eq(positions.id, position.id))
+
+  await db
+    .update(botConfig)
+    .set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` })
+    .where(eq(botConfig.id, 1))
+
+  await log(
+    "trade",
+    `Partial close ${position.side.toUpperCase()} @ ${exitPrice.toFixed(2)} | ${(fraction * 100).toFixed(0)}% of position | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT | SL → break-even`,
+  )
+}
+
 export async function closePosition(
   position: Position,
   exitPrice: number,
@@ -332,7 +401,7 @@ export async function closePosition(
       await exchange.placeMarketOrder({
         symbol: position.symbol,
         side: position.side === "long" ? 4 : 2,
-        volume: position.quantity,
+        volume: position.remainingQuantity ?? position.quantity,
         leverage: position.leverage,
       })
     } catch (err) {
@@ -353,9 +422,11 @@ export async function closePosition(
   }
 
   const grossPnl = unrealizedPnl(position, exitPrice)
-  const closeFee = position.sizeUsdt * position.leverage * TAKER_FEE
+  const remainingQty = position.remainingQuantity ?? position.quantity
+  const remainingSize = position.sizeUsdt * (remainingQty / position.quantity)
+  const closeFee = remainingSize * position.leverage * TAKER_FEE
   const netPnl = grossPnl - closeFee
-  const pnlPct = (netPnl / position.sizeUsdt) * 100
+  const pnlPct = (netPnl / remainingSize) * 100
 
   const [trade] = await db
     .insert(trades)
@@ -365,7 +436,7 @@ export async function closePosition(
       side: position.side,
       entryPrice: position.entryPrice,
       exitPrice,
-      sizeUsdt: position.sizeUsdt,
+      sizeUsdt: remainingSize,
       leverage: position.leverage,
       pnl: netPnl,
       fees: closeFee,
@@ -614,6 +685,8 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
           const decision = evaluateExit(marketPosition, snap, marketCfg, opposite)
           if (decision.action === "close") {
             await closePosition(marketPosition, snap.price, decision.reason!, marketCfg)
+          } else if (decision.action === "partial") {
+            await takePartialProfit(marketPosition, snap.price, decision.partialFraction ?? 0.5, marketCfg)
           } else if (Object.keys(decision.updates).length > 0) {
             await db.update(positions).set(decision.updates).where(eq(positions.id, marketPosition.id))
           }
@@ -1000,6 +1073,6 @@ export async function stopRealtimeEngine(symbol: string) {
   if ((globalThis as any).__wsManagers?.[symbol]) {
     await (globalThis as any).__wsManagers[symbol].disconnect()
     delete (globalThis as any).__wsManagers[symbol]
-    console.log(`[Engine] Stopped real-time engine for ${symbol}`)
+    console.log(`[Engine] Stopped realtime engine for ${symbol}`)
   }
 }
