@@ -36,6 +36,7 @@ import {
   getRiskState,
 } from "./risk-manager"
 import { evaluateScalpSignal } from "./trend-scalper"
+import { evaluateAdvancedEntry, type AdvancedConfig } from "./advanced-strategy"
 
 const TAKER_FEE = 0.0002 // 0.02%
 
@@ -48,6 +49,27 @@ function toExchangeSymbol(symbol: string): string {
 
 function toDbSymbol(symbol: string): string {
   return symbol.replace(/\//g, "_");
+}
+
+function advancedConfigFromBot(cfg: BotConfig): AdvancedConfig {
+  return {
+    enabled: cfg.advancedEnabled,
+    mtfEnabled: cfg.advancedMtfEnabled,
+    htfTimeframe: cfg.advancedHtfTimeframe,
+    htfEmaFast: cfg.advancedHtfEmaFast,
+    htfEmaSlow: cfg.advancedHtfEmaSlow,
+    mtfMinAlignment: cfg.advancedMtfMinAlignment,
+    smartMoneyEnabled: cfg.advancedSmartMoneyEnabled,
+    fundingLongThreshold: cfg.advancedFundingLongThreshold,
+    fundingShortThreshold: cfg.advancedFundingShortThreshold,
+    oiDeltaThresholdPct: cfg.advancedOiDeltaThresholdPct,
+    cvdZThreshold: cfg.advancedCvdZThreshold,
+    dynamicSizingEnabled: cfg.advancedDynamicSizingEnabled,
+    baseRiskPct: cfg.advancedBaseRiskPct,
+    maxRiskPct: cfg.advancedMaxRiskPct,
+    confidenceFloor: cfg.advancedConfidenceFloor,
+    maxPositionPct: cfg.advancedMaxPositionPct,
+  }
 }
 
 function lorentzianOptions(cfg: BotConfig) {
@@ -699,7 +721,39 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
               confirmationMode: marketCfg.confirmationMode,
             })
             if (confirmation.allowed) {
-              await openPosition(marketCfg, signal.candidateDirection, snap, signal.confidence, signal.features, signal.strategy)
+              const advCfg = advancedConfigFromBot(marketCfg)
+              const candlesByTf: Record<string, Candle[]> = { [timeframe]: candles }
+              if (advCfg.mtfEnabled && advCfg.htfTimeframe && advCfg.htfTimeframe !== timeframe) {
+                const htfCandles = await exchange
+                  .fetchKlines(toExchangeSymbol(symbol), advCfg.htfTimeframe, 200)
+                  .catch(() => null)
+                if (htfCandles && htfCandles.length >= 60) {
+                  candlesByTf[advCfg.htfTimeframe] = htfCandles
+                }
+              }
+              const adv = evaluateAdvancedEntry(
+                signal.candidateDirection,
+                signal.confidence,
+                candlesByTf,
+                { fundingRate: typeof ticker.fundingRate === "number" ? ticker.fundingRate : undefined },
+                cfg.paperBalance ?? 10000,
+                snap.atr,
+                snap.price,
+                advCfg,
+              )
+              if (adv.passed) {
+                await openPosition(
+                  marketCfg,
+                  adv.direction ?? signal.candidateDirection,
+                  snap,
+                  adv.confidence,
+                  signal.features,
+                  signal.strategy,
+                  adv.sizeUsdt != null ? { sizeUsdtOverride: adv.sizeUsdt } : undefined,
+                )
+              } else {
+                await log("info", `Advanced strategy blocked ${signal.candidateDirection}: ${adv.reason}`)
+              }
             }
           }
           }
