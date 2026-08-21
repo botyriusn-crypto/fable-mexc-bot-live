@@ -14,7 +14,7 @@ import {
   type Position,
 } from "./db/schema"
 import { and, eq, isNull, sql } from "drizzle-orm"
-import { type Candle } from "./mexc/public"
+import { type Candle, fetchDeals, computeTakerFlow } from "./mexc/public"
 import { getExchangeClient, type Exchange } from "./exchange"
 import { classifyLorentzian, combineConfirmation } from "./lorentzian"
 import { computeSnapshot, type FeatureVector, type IndicatorSnapshot } from "./indicators"
@@ -36,7 +36,7 @@ import {
   getRiskState,
 } from "./risk-manager"
 import { evaluateScalpSignal } from "./trend-scalper"
-import { evaluateAdvancedEntry, type AdvancedConfig } from "./advanced-strategy"
+import { evaluateAdvancedEntry, type AdvancedConfig, cvdRollingStats } from "./advanced-strategy"
 
 const TAKER_FEE = 0.0002 // 0.02%
 
@@ -731,11 +731,37 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
                   candlesByTf[advCfg.htfTimeframe] = htfCandles
                 }
               }
+              let takerBuyVolume: number | undefined
+              let takerSellVolume: number | undefined
+              let cvd: number | undefined
+              let cvdMean: number | undefined
+              let cvdStd: number | undefined
+              if (advCfg.smartMoneyEnabled) {
+                try {
+                  const deals = await fetchDeals(toExchangeSymbol(symbol))
+                  const flow = computeTakerFlow(deals)
+                  const cvdStats = cvdRollingStats(flow.cvd)
+                  takerBuyVolume = flow.takerBuyVolume
+                  takerSellVolume = flow.takerSellVolume
+                  cvd = cvdStats.cvd
+                  cvdMean = cvdStats.cvdMean
+                  cvdStd = cvdStats.cvdStd
+                } catch (err) {
+                  await log("warn", `${symbol}: deals fetch failed, smart-money flow skipped: ${err}`)
+                }
+              }
               const adv = evaluateAdvancedEntry(
                 signal.candidateDirection,
                 signal.confidence,
                 candlesByTf,
-                { fundingRate: typeof ticker.fundingRate === "number" ? ticker.fundingRate : undefined },
+                {
+                  fundingRate: typeof ticker.fundingRate === "number" ? ticker.fundingRate : undefined,
+                  takerBuyVolume,
+                  takerSellVolume,
+                  cvd,
+                  cvdMean,
+                  cvdStd,
+                },
                 cfg.paperBalance ?? 10000,
                 snap.atr,
                 snap.price,

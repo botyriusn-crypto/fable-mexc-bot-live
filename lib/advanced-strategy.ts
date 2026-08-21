@@ -263,3 +263,17 @@ export function evaluateAdvancedEntry(
     reason,
   }
 }
+
+// Rolling CVD buffer for z-score computation. In-memory and best-effort: it
+// resets on cold start, so the z-score is only meaningful after a few ticks.
+const cvdHistory: number[] = []
+const CVD_HISTORY_MAX = 50
+
+export function cvdRollingStats(cvd: number): { cvd: number; cvdMean: number; cvdStd: number } {
+  cvdHistory.push(cvd)
+  if (cvdHistory.length > CVD_HISTORY_MAX) cvdHistory.shift()
+  const n = cvdHistory.length
+  const mean = cvdHistory.reduce((a, b) => a + b, 0) / n
+  const variance = cvdHistory.reduce((a, b) => a + (b - mean) ** 2, 0) / n
+  return { cvd, cvdMean: mean, cvdStd: Math.sqrt(variance) }
+}

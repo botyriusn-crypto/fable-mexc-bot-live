@@ -197,3 +197,42 @@ export async function fetchAllTickers(): Promise<BulkTicker[]> {
   _bulkTickerCache = { data, ts: Date.now() }
   return data
 }
+
+// Recent trades (taker side) — the only "smart money" flow signal MEXC's
+// public API exposes. There is NO open-interest endpoint, so OI stays neutral.
+// Each deal carries a side (T: 1 = buy, 2 = sell) and a notional (p * v).
+export interface Deal { price: number; volume: number; side: 1 | 2; time: number }
+
+const __dealsCache = new Map<string, { t: number; d: Deal[] }>()
+
+export async function fetchDeals(symbol: string, limit = 100): Promise<Deal[]> {
+  const now = Date.now()
+  const c = __dealsCache.get(symbol)
+  if (c && now - c.t < 5000) return c.d
+  const res = await fetch(`${BASE_URL}/deals/${symbol}?limit=${limit}`, { cache: "no-store" })
+  if (!res.ok) throw new Error(`MEXC deals fetch failed for ${symbol}: ${res.status}`)
+  const json = await res.json()
+  if (!json.success || !Array.isArray(json.data)) throw new Error("MEXC deals response unsuccessful")
+  const deals: Deal[] = json.data.map((d: any) => ({
+    price: Number(d.p),
+    volume: Number(d.v),
+    side: d.T === 1 ? 1 : 2,
+    time: Number(d.t),
+  }))
+  __dealsCache.set(symbol, { t: Date.now(), d: deals })
+  return deals
+}
+
+// Aggregate taker buy/sell notional and net delta (CVD) from a deals snapshot.
+export interface TakerFlow { takerBuyVolume: number; takerSellVolume: number; cvd: number }
+
+export function computeTakerFlow(deals: Deal[]): TakerFlow {
+  let buy = 0
+  let sell = 0
+  for (const d of deals) {
+    const notional = d.price * d.volume
+    if (d.side === 1) buy += notional
+    else sell += notional
+  }
+  return { takerBuyVolume: buy, takerSellVolume: sell, cvd: buy - sell }
+}
