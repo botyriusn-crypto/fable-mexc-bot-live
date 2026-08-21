@@ -267,6 +267,15 @@ export const gridConfigs = pgTable("grid_configs", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 })
 
+
+export const advisorVariants = pgTable("advisor_variants", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull().unique(),
+  params: jsonb("params").notNull(),
+  stats: jsonb("stats").notNull().default({ allowed: 0, correct: 0, sumReturn: 0 }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
 export type BotConfig = typeof botConfig.$inferSelect
 export type GridConfigRow = typeof gridConfigs.$inferSelect
 export type GridOrder = typeof gridOrders.$inferSelect
