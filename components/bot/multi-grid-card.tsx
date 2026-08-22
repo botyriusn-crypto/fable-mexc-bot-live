@@ -19,7 +19,10 @@ const marketsFetcher = async (url: string) => {
 }
 
 function AddPairControl({ existingSymbols, onAdded }: { existingSymbols: string[]; onAdded: () => void }) {
-  const { data } = useSWR("/api/bot/market", marketsFetcher, { revalidateOnFocus: false })
+  const { data, error: swrError, isLoading } = useSWR("/api/bot/market", marketsFetcher, { 
+    revalidateOnFocus: false,
+    onError: (err) => console.error("[AddPairControl] SWR error:", err)
+  })
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState("")
   const [adding, setAdding] = useState(false)
@@ -82,9 +85,11 @@ function AddPairControl({ existingSymbols, onAdded }: { existingSymbols: string[
             <ChevronsUpDown aria-hidden="true" className="pointer-events-none absolute right-4 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           </div>
           <div className="max-h-56 overflow-y-auto">
-            {error && <div className="px-3 py-2 text-xs text-danger">{error}</div>}
-            {filtered.length === 0 ? (
-              <div className="px-3 py-2 text-xs text-muted-foreground">No matching contracts</div>
+            {error && <div className="px-3 py-2 text-xs text-danger">Add error: {error}</div>}
+            {swrError && <div className="px-3 py-2 text-xs text-danger">Failed to load markets: {swrError.message}</div>}
+            {isLoading && <div className="px-3 py-2 text-xs text-muted-foreground">Loading markets...</div>}
+            {!isLoading && !swrError && filtered.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground">No matching contracts (total: {data?.markets?.length || 0})</div>
             ) : (
               filtered.map((m) => (
                 <button
@@ -415,6 +420,7 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
   
   const [scanning, setScanning] = useState(false)
   const [aiPicks, setAiPicks] = useState<any[]>([])
+  const [aiMessage, setAiMessage] = useState<string>("")
   const [applyingSym, setApplyingSym] = useState<string | null>(null)
 
   const handleRefresh = async () => {
@@ -442,6 +448,7 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
       const json = await res.json()
       if (!json.success) throw new Error(json.error || "AI scan failed")
       setAiPicks(json.recommendations || [])
+      setAiMessage((json.recommendations || []).length > 0 ? "" : "Scan complete — 0 candidates passed all quality gates. The advisor only recommends A+ setups; try again in a few hours.")
     } catch (err) {
       console.error("AI scan failed:", err)
       window.alert("Failed to run AI advisor. Check Fly logs.")
@@ -646,6 +653,9 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
+        {aiMessage && aiPicks.length === 0 && !scanning && (
+          <div className="mb-2 rounded-md border border-chart-3/30 bg-chart-3/5 p-2 text-xs text-chart-3">{aiMessage}</div>
+        )}
         {aiPicks.length > 0 && (
           <div className="flex flex-col gap-2 p-2 border border-chart-3/30 rounded-md bg-chart-3/5">
             <span className="text-xs font-bold text-chart-3">AI Recommendations:</span>
