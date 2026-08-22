@@ -1,0 +1,45 @@
+[DB] Connecting to: postgresql://postgres:****@127.0.0.1:5432/fable_mexc_bot
+Fetching ENA_USDT Min5 for 60 days (offset 60d)...
+Fetched 17280 candles
+
+══════════════════════════════════════════════════════
+  SNIPER BACKTEST  [ENA_USDT Min5 60d]
+  entry=next-open  sigma=3.5  volMult=2  lev=3x  risk=1.0%  fees=0.020%  slip=0.030%  beAt=1R  offset=60d
+══════════════════════════════════════════════════════
+  Trades:            129
+  Win rate:          20.9%  (breakeven at 3:1 after costs is ~26-28%)
+  Avg win:           257.16 USDT
+  Avg loss:          68.04 USDT
+  Expectancy:        0.03 USDT/trade
+  Avg R:             0.011R
+  Profit factor:     1.00
+  Total PnL:         3.64 USDT (0.0%)
+  Total fees:        707.07 USDT
+  Sharpe (per-trade):0.000
+  Max drawdown (MTM):22.0%
+
+  By signal type:
+    sweep    n= 124  win=21.0%  pnl=-4.52  avgR=0.01
+    sigma    n=   5  win=20.0%  pnl=8.16  avgR=0.09
+
+  By direction:
+    long     n=  71  win=25.4%  pnl=1109.80  avgR=0.17
+    short    n=  58  win=15.5%  pnl=-1106.15  avgR=-0.18
+
+  By exit reason:
+    tp       n=  27  win=100.0%  pnl=6943.27  avgR=2.80
+    sl       n=  63  win=0.0%  pnl=-6551.65  avgR=-1.11
+    be       n=  39  win=0.0%  pnl=-387.97  avgR=-0.11
+
+  Stop-distance buckets (stop as % of entry):
+    0.3-0.6%  n=  48  win=14.6%  avgR=-0.27
+    0.6-1.0%  n=  43  win=18.6%  avgR=-0.16
+    >=1.0%    n=  38  win=31.6%  avgR=0.56
+
+  MFE before full-SL death (of 63 SL losers):
+    >=+1R:    1 (2%)  <- a TP at 1R converts these
+    >=+1.5R:    0 (0%)  <- a TP at 1.5R converts these
+    >=+2R:    0 (0%)  <- a TP at 2R converts these
+    >=+2.5R:    0 (0%)  <- a TP at 2.5R converts these
+
+Per-trade CSV: snbeo60_ENA_USDT.csv

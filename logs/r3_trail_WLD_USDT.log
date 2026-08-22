@@ -1,0 +1,30 @@
+[DB] Connecting to: postgresql://postgres:****@127.0.0.1:5432/fable_mexc_bot
+Fetching WLD_USDT Min15 for 60 days...
+Fetched 5760 candles
+  Config: EMA 9/21  RSI 35/65  ADX t/r 25/29  SL/TP 1.5/2.5xATR  trail 1.2xATR  lev 3x  fees 0.020%  slip 0.030%  (live parity; ML gate neutral)
+  !! F9 WARNING: adxRangeThreshold (29) >= adxTrendThreshold (25)
+     -> "neutral" regime is IMPOSSIBLE; the live bot never stands aside.
+     -> Re-run with --adx-range 20 to quantify what the neutral zone restores.
+
+══════════════════════════════════════════════════════
+  BASE+TRAILONLY  [WLD_USDT Min15 60d]
+══════════════════════════════════════════════════════
+  Trades:            269
+  Win rate:          40.9%
+  Avg win:           130.08 USDT
+  Avg loss:          92.11 USDT
+  Expectancy:        -1.25 USDT/trade
+  Avg R:             -0.010R
+  Profit factor:     0.98
+  Total PnL:         -337.01 USDT (-3.4%)
+  Total fees:        817.25 USDT
+  Sharpe (per-trade):-0.011
+  Max drawdown (MTM):18.1%
+
+  Per-strategy:
+    trend    n=176   win=39.8%  pnl=-1561.56  avgR=-0.06
+    range    n=93    win=43.0%  pnl=1224.55  avgR=0.09
+  Per-exit-reason:
+    sl       n=151   win=0.0%  pnl=-14469.27
+    tp       n=86    win=100.0%  pnl=12288.58
+    trail    n=32    win=75.0%  pnl=1843.69

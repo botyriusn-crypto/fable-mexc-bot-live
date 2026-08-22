@@ -1,0 +1,30 @@
+[DB] Connecting to: postgres://PASTE_THE_FULL_URL_HERE
+Fetching WLD_USDT Min60 for 180 days...
+Fetched 4320 candles
+  Config: EMA 9/21  RSI 35/65  ADX t/r 25/29  SL/TP 1.5/2.5xATR  trail 1.2xATR  lev 3x  fees 0.020%  slip 0.030%  (live parity; ML gate neutral)
+  !! F9 WARNING: adxRangeThreshold (29) >= adxTrendThreshold (25)
+     -> "neutral" regime is IMPOSSIBLE; the live bot never stands aside.
+     -> Re-run with --adx-range 20 to quantify what the neutral zone restores.
+
+══════════════════════════════════════════════════════
+  BASE+FIXED+RANGE+MK  [WLD_USDT Min60 180d]
+══════════════════════════════════════════════════════
+  Trades:            185
+  Win rate:          31.9%
+  Avg win:           223.79 USDT
+  Avg loss:          145.94 USDT
+  Expectancy:        -28.02 USDT/trade
+  Avg R:             -0.171R
+  Profit factor:     0.72
+  Total PnL:         -5184.07 USDT (-51.8%)
+  Total fees:        302.68 USDT
+  Sharpe (per-trade):-0.155
+  Max drawdown (MTM):55.9%
+
+  Per-strategy:
+    range    n=185   win=31.9%  pnl=-5184.07  avgR=-0.17
+  Per-exit-reason:
+    tp       n=59    win=100.0%  pnl=13203.81
+    sl       n=126   win=0.0%  pnl=-18387.89
+
+Per-trade CSVs: r4_range_WLD_USDT_o0_*.csv

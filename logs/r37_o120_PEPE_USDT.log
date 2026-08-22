@@ -1,0 +1,44 @@
+[DB] Connecting to: postgres://PASTE_THE_FULL_URL_HERE
+Fetching PEPE_USDT Min5 for 60 days (offset 120d)...
+Fetched 17280 candles
+
+══════════════════════════════════════════════════════
+  SNIPER BACKTEST  [PEPE_USDT Min5 60d]
+  entry=next-open  sigma=3.5  volMult=2  lev=3x  risk=1.0%  fees=0.020%  slip=0.030%  offset=120d
+══════════════════════════════════════════════════════
+  Trades:            145
+  Win rate:          22.1%  (breakeven at 3:1 after costs is ~26-28%)
+  Avg win:           226.52 USDT
+  Avg loss:          92.18 USDT
+  Expectancy:        -21.84 USDT/trade
+  Avg R:             -0.251R
+  Profit factor:     0.70
+  Total PnL:         -3167.45 USDT (-31.7%)
+  Total fees:        708.54 USDT
+  Sharpe (per-trade):-0.164
+  Max drawdown (MTM):35.1%
+
+  By signal type:
+    sweep    n= 140  win=22.9%  pnl=-2708.37  avgR=-0.22
+    sigma    n=   5  win=0.0%  pnl=-459.08  avgR=-1.17
+
+  By direction:
+    long     n=  67  win=19.4%  pnl=-2095.38  avgR=-0.35
+    short    n=  78  win=24.4%  pnl=-1072.07  avgR=-0.16
+
+  By exit reason:
+    sl       n= 113  win=0.0%  pnl=-10416.11  avgR=-1.10
+    tp       n=  32  win=100.0%  pnl=7248.66  avgR=2.76
+
+  Stop-distance buckets (stop as % of entry):
+    0.3-0.6%  n=  44  win=18.2%  avgR=-0.46
+    0.6-1.0%  n=  69  win=26.1%  avgR=-0.08
+    >=1.0%    n=  32  win=18.8%  avgR=-0.32
+
+  MFE before full-SL death (of 113 SL losers):
+    >=+1R:   27 (24%)  <- a TP at 1R converts these
+    >=+1.5R:   20 (18%)  <- a TP at 1.5R converts these
+    >=+2R:   12 (11%)  <- a TP at 2R converts these
+    >=+2.5R:    2 (2%)  <- a TP at 2.5R converts these
+
+Per-trade CSV: sno120_PEPE_USDT.csv

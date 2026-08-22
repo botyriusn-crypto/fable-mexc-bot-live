@@ -1,6 +1,6 @@
 // Advanced Signal Strategy — additive layer on top of lib/strategy.ts.
 import type { Candle } from "./mexc/public"
-import { ema, adx, vwap } from "./indicators"
+import { ema, adx, vwap, bollinger } from "./indicators"
 
 export interface AdvancedConfig {
   enabled: boolean
@@ -102,6 +102,44 @@ export function multiTimeframeAlignment(
   return { alignment, votes, aligned, reason }
 }
 
+export interface RangeConfirmationResult {
+  confirmed: boolean
+  htfBbPosition: number // 0 = at HTF lower band, 1 = at HTF upper band
+  reason: string
+}
+
+// Range/mean-reversion confluence check: confirms the HTF price is actually
+// near a range extreme, rather than requiring HTF trend agreement (which
+// would contradict a counter-trend range entry by design — see
+// evaluateAdvancedEntry for why this replaces multiTimeframeAlignment when
+// strategyKind === "range").
+export function higherTimeframeRangeConfirmation(
+  candlesByTf: Record<string, Candle[]>,
+  candidate: "long" | "short",
+  cfg: AdvancedConfig,
+): RangeConfirmationResult {
+  const htf = candlesByTf[cfg.htfTimeframe]
+  if (!htf || htf.length < 20) {
+    return { confirmed: false, htfBbPosition: 0.5, reason: "insufficient HTF data for range confirmation" }
+  }
+  const closes = htf.map((c) => c.close)
+  const bb = bollinger(closes, 20, 2)
+  const price = closes[closes.length - 1]
+  const bandWidth = bb.upper - bb.lower
+  const htfBbPosition = bandWidth > 0 ? (price - bb.lower) / bandWidth : 0.5
+
+  // Long (buying a dip) confirmed when price sits in the lower portion of
+  // the HTF range; short (selling a rally) confirmed in the upper portion.
+  const LOWER_ZONE = 0.3
+  const UPPER_ZONE = 0.7
+  const confirmed = candidate === "long" ? htfBbPosition <= LOWER_ZONE : htfBbPosition >= UPPER_ZONE
+  const reason = confirmed
+    ? `price at ${(htfBbPosition * 100).toFixed(0)}% of HTF range confirms ${candidate}`
+    : `price at ${(htfBbPosition * 100).toFixed(0)}% of HTF range does not confirm ${candidate} (need <=${LOWER_ZONE * 100}% for long / >=${UPPER_ZONE * 100}% for short)`
+
+  return { confirmed, htfBbPosition, reason }
+}
+
 export interface SmartMoneyInput {
   fundingRate?: number
   openInterest?: number
@@ -197,6 +235,7 @@ export interface AdvancedSignal {
   direction: "long" | "short" | null
   confidence: number
   mtf: MultiTimeframeResult | null
+  rangeConfirmation: RangeConfirmationResult | null
   smartMoney: SmartMoneyResult | null
   sizeUsdt: number | null
   passed: boolean
@@ -206,6 +245,7 @@ export interface AdvancedSignal {
 export function evaluateAdvancedEntry(
   baseDirection: "long" | "short",
   baseConfidence: number,
+  strategyKind: "trend" | "range",
   candlesByTf: Record<string, Candle[]>,
   smartMoneyInput: SmartMoneyInput,
   equity: number,
@@ -218,6 +258,7 @@ export function evaluateAdvancedEntry(
       direction: baseDirection,
       confidence: baseConfidence,
       mtf: null,
+      rangeConfirmation: null,
       smartMoney: null,
       sizeUsdt: null,
       passed: true,
@@ -228,9 +269,19 @@ export function evaluateAdvancedEntry(
   const failures: string[] = []
 
   let mtf: MultiTimeframeResult | null = null
+  let rangeConfirmation: RangeConfirmationResult | null = null
   if (cfg.mtfEnabled) {
-    mtf = multiTimeframeAlignment(candlesByTf, baseDirection, cfg)
-    if (!mtf.aligned) failures.push(mtf.reason)
+    if (strategyKind === "range") {
+      // Range/mean-reversion trades are supposed to go AGAINST the immediate
+      // trend by design (buy dips at range lows, sell rallies at range
+      // highs). Requiring HTF trend agreement here would reject almost
+      // every legitimate range entry — use a range-extreme check instead.
+      rangeConfirmation = higherTimeframeRangeConfirmation(candlesByTf, baseDirection, cfg)
+      if (!rangeConfirmation.confirmed) failures.push(rangeConfirmation.reason)
+    } else {
+      mtf = multiTimeframeAlignment(candlesByTf, baseDirection, cfg)
+      if (!mtf.aligned) failures.push(mtf.reason)
+    }
   }
 
   let sm: SmartMoneyResult | null = null
@@ -257,6 +308,7 @@ export function evaluateAdvancedEntry(
     direction: passed ? baseDirection : null,
     confidence,
     mtf,
+    rangeConfirmation,
     smartMoney: sm,
     sizeUsdt,
     passed,

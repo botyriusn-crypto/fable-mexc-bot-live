@@ -1,0 +1,26 @@
+[DB] Connecting to: postgresql://postgres:****@127.0.0.1:5432/fable_mexc_bot
+Fetching WLD_USDT Min15 for 60 days...
+Fetched 5760 candles
+  Config: EMA 9/21  RSI 35/65  ADX t/r 25/20  SL/TP 1.5/2.5xATR  trail 1.2xATR  lev 3x  fees 0.020%  slip 0.030%  (live parity; ML gate neutral)
+
+══════════════════════════════════════════════════════
+  BASE+FIXED  [WLD_USDT Min15 60d]
+══════════════════════════════════════════════════════
+  Trades:            231
+  Win rate:          38.1%
+  Avg win:           124.38 USDT
+  Avg loss:          85.96 USDT
+  Expectancy:        -5.83 USDT/trade
+  Avg R:             -0.038R
+  Profit factor:     0.89
+  Total PnL:         -1347.17 USDT (-13.5%)
+  Total fees:        613.98 USDT
+  Sharpe (per-trade):-0.054
+  Max drawdown (MTM):18.0%
+
+  Per-strategy:
+    trend    n=182   win=36.3%  pnl=-1961.80  avgR=-0.09
+    range    n=49    win=44.9%  pnl=614.62  avgR=0.14
+  Per-exit-reason:
+    sl       n=143   win=0.0%  pnl=-12292.40
+    tp       n=88    win=100.0%  pnl=10945.23

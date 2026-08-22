@@ -1,0 +1,30 @@
+[DB] Connecting to: postgres://PASTE_THE_FULL_URL_HERE
+Fetching SOL_USDT Min60 for 180 days...
+Fetched 4320 candles
+  Config: EMA 9/21  RSI 35/65  ADX t/r 25/29  SL/TP 1.5/2.5xATR  trail 1.2xATR  lev 3x  fees 0.020%  slip 0.030%  (live parity; ML gate neutral)
+  !! F9 WARNING: adxRangeThreshold (29) >= adxTrendThreshold (25)
+     -> "neutral" regime is IMPOSSIBLE; the live bot never stands aside.
+     -> Re-run with --adx-range 20 to quantify what the neutral zone restores.
+
+══════════════════════════════════════════════════════
+  BASE+FIXED+RANGE+MK  [SOL_USDT Min60 180d]
+══════════════════════════════════════════════════════
+  Trades:            165
+  Win rate:          38.8%
+  Avg win:           237.33 USDT
+  Avg loss:          139.53 USDT
+  Expectancy:        6.65 USDT/trade
+  Avg R:             0.007R
+  Profit factor:     1.08
+  Total PnL:         1096.64 USDT (11.0%)
+  Total fees:        364.63 USDT
+  Sharpe (per-trade):0.035
+  Max drawdown (MTM):26.9%
+
+  Per-strategy:
+    range    n=165   win=38.8%  pnl=1096.64  avgR=0.01
+  Per-exit-reason:
+    tp       n=64    win=100.0%  pnl=15189.36
+    sl       n=101   win=0.0%  pnl=-14092.71
+
+Per-trade CSVs: r4_range_SOL_USDT_o360_*.csv

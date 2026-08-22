@@ -14,6 +14,8 @@ import { SettingsPanel } from "./settings-panel"
 import { SniperAlertBubble, SniperCommand } from "./sniper-alerts"
 import { AdvisorCard } from "./advisor-card"
 import { MultiGridCard } from "./multi-grid-card"
+import { OpenPositionsCard } from "./open-positions-card"
+import { SwingCard } from "./swing-card"
 import { PerformanceAnalyzer } from "./performance-analyzer"
 import { MarketBar } from "./market-bar"
 import { MlCard } from "./ml-card"
@@ -220,6 +222,10 @@ export function DashboardV2() {
           <MarketBar state={state} />
         </div>
 
+        <div className="p-3 pb-0">
+          <OpenPositionsCard state={state} />
+        </div>
+
         {/* STATS ROW */}
         <div className="flex gap-3 p-3 overflow-x-auto">
           <StatCard label="Available" value={`${fmt(balance)} USDT`} tone="neutral" />
@@ -238,6 +244,7 @@ export function DashboardV2() {
           {/* LEFT 65% */}
           <div className="w-[65%] flex flex-col gap-3 pr-3">
             <MultiGridCard />
+            <SwingCard state={state} />
 
             <CollapsibleSection title="Charts" defaultOpen={true}>
               <div>

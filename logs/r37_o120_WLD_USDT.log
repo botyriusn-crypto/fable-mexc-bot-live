@@ -1,0 +1,16 @@
+[DB] Connecting to: postgres://PASTE_THE_FULL_URL_HERE
+Fetching WLD_USDT Min5 for 60 days (offset 120d)...
+TypeError: fetch failed
+    at node:internal/deps/undici/undici:14976:13
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async fetchKlinesRange (/home/nb/Downloads/Fable_Mexc_online_trading_botyrius_backup/backtest-sniper.ts:101:17)
+    at async main (/home/nb/Downloads/Fable_Mexc_online_trading_botyrius_backup/backtest-sniper.ts:423:19) {
+  [cause]: ConnectTimeoutError: Connect Timeout Error (attempted address: api.mexc.com:443, timeout: 10000ms)
+      at onConnectTimeout (node:internal/deps/undici/undici:2746:28)
+      at Immediate._onImmediate (node:internal/deps/undici/undici:2727:11)
+      at process.processImmediate (node:internal/timers:484:21) {
+    code: 'UND_ERR_CONNECT_TIMEOUT',
+    [Symbol(undici.error.UND_ERR)]: true,
+    [Symbol(undici.error.UND_ERR_CONNECT_TIMEOUT)]: true
+  }
+}

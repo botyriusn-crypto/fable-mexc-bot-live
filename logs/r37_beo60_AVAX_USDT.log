@@ -1,0 +1,46 @@
+[DB] Connecting to: postgresql://postgres:****@127.0.0.1:5432/fable_mexc_bot
+Fetching AVAX_USDT Min5 for 60 days (offset 60d)...
+Fetched 17280 candles
+
+══════════════════════════════════════════════════════
+  SNIPER BACKTEST  [AVAX_USDT Min5 60d]
+  entry=next-open  sigma=3.5  volMult=2  lev=3x  risk=1.0%  fees=0.020%  slip=0.030%  beAt=1R  offset=60d
+══════════════════════════════════════════════════════
+  Trades:            92
+  Win rate:          13.0%  (breakeven at 3:1 after costs is ~26-28%)
+  Avg win:           212.67 USDT
+  Avg loss:          60.44 USDT
+  Expectancy:        -24.82 USDT/trade
+  Avg R:             -0.277R
+  Profit factor:     0.53
+  Total PnL:         -2283.33 USDT (-22.8%)
+  Total fees:        556.16 USDT
+  Sharpe (per-trade):-0.248
+  Max drawdown (MTM):29.6%
+
+  By signal type:
+    sweep    n=  84  win=11.9%  pnl=-2350.62  avgR=-0.32
+    sigma    n=   8  win=25.0%  pnl=67.29  avgR=0.19
+
+  By direction:
+    short    n=  41  win=9.8%  pnl=-1114.96  avgR=-0.29
+    long     n=  51  win=15.7%  pnl=-1168.38  avgR=-0.26
+
+  By exit reason:
+    sl       n=  48  win=0.0%  pnl=-4479.21  avgR=-1.12
+    be       n=  32  win=0.0%  pnl=-356.18  avgR=-0.13
+    tp       n=  12  win=100.0%  pnl=2552.05  avgR=2.72
+
+  Stop-distance buckets (stop as % of entry):
+    <0.3%     n=   1  win=0.0%  avgR=-1.26
+    0.3-0.6%  n=  47  win=14.9%  avgR=-0.21
+    0.6-1.0%  n=  35  win=8.6%  avgR=-0.39
+    >=1.0%    n=   9  win=22.2%  avgR=-0.07
+
+  MFE before full-SL death (of 48 SL losers):
+    >=+1R:    0 (0%)  <- a TP at 1R converts these
+    >=+1.5R:    0 (0%)  <- a TP at 1.5R converts these
+    >=+2R:    0 (0%)  <- a TP at 2R converts these
+    >=+2.5R:    0 (0%)  <- a TP at 2.5R converts these
+
+Per-trade CSV: snbeo60_AVAX_USDT.csv

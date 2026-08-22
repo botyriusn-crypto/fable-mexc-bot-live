@@ -56,7 +56,7 @@ export async function GET() {
     shadowStats = { totalEvaluations: 0, resolvedCount: 0, correctCount: 0, accuracy: 0, topCandidate: null }
   }
   try {
-    const [cfgRows, openPosRows, recentTrades, equity, logs, modelRows, activeGridOrders, decisions, gridConfigRows, lifetimeTradesRaw] = await Promise.all([
+    const [cfgRows, openPosRows, recentTrades, equity, logs, modelRows, activeGridOrders, decisions, gridConfigRows, lifetimeTradesRaw, swingPosRows, swingTradesRows] = await Promise.all([
       db.select().from(botConfig).where(eq(botConfig.id, 1)),
       db.select().from(positions).where(eq(positions.status, "open")),
       db.select().from(trades).orderBy(desc(trades.closedAt)).limit(50),
@@ -67,6 +67,8 @@ export async function GET() {
       db.select().from(classifierDecisions).orderBy(desc(classifierDecisions.createdAt)).limit(100),
       db.select().from(gridConfigs).orderBy(gridConfigs.symbol),
       db.select({ pnl: trades.pnl, live: trades.live, closedAt: trades.closedAt }).from(trades),
+      db.select().from(positions).where(eq(positions.strategy, "swing")),
+      db.select().from(trades).where(eq(trades.strategy, "swing")),
     ])
 
     // True all-time stats for LIVE trades only (paper/backtest excluded).
@@ -89,6 +91,16 @@ export async function GET() {
 
     const cfg = cfgRows[0]
     if (!cfg) return NextResponse.json({ error: "Config not found" }, { status: 500 })
+
+    
+    // Swing strategy stats
+    const swingPositions = swingPosRows.filter((p: any) => p.status === "open")
+    const swingStats = {
+      totalTrades: swingTradesRows.length,
+      totalPnl: swingTradesRows.reduce((s, t) => s + (t.pnl || 0), 0),
+      winRate: swingTradesRows.length > 0 ? swingTradesRows.filter((t) => (t.pnl || 0) > 0).length / swingTradesRows.length : 0,
+      openPositions: swingPositions.length,
+    }
 
     const liveAccount = cfg.mode === "live" ? await fetchLiveAccount() : null
 
@@ -128,6 +140,41 @@ export async function GET() {
       return { position: p, markPrice: mark, unrealizedPnl: mark == null ? 0 : (mark - p.entryPrice) * dir * p.quantity, selected: p.symbol === cfg.symbol && p.timeframe === cfg.timeframe }
     })
     const unrealizedPnl = exposures.reduce((t, e) => t + e.unrealizedPnl, 0)
+
+    // Strategy breakdown for open positions (mode-filtered)
+    const isLiveMode = cfg.mode === "live"
+    const filteredOpenPosRows = openPosRows.filter(p => isLiveMode ? p.live === true : p.live !== true)
+    
+    const strategyBreakdown = {
+      grid: { unrealized: 0, count: 0 },
+      sniper: { unrealized: 0, count: 0 },
+      swing: { unrealized: 0, count: 0 },
+      trend: { unrealized: 0, count: 0 }
+    }
+    
+    for (const p of filteredOpenPosRows) {
+      const mark = markBySymbol.get(p.symbol)
+      if (!mark) continue
+      const dir = p.side === "long" ? 1 : -1
+      const pnl = (mark - p.entryPrice) * dir * p.quantity
+      const strat = p.strategy || "trend"
+      if (strategyBreakdown[strat]) {
+        strategyBreakdown[strat].unrealized += pnl
+        strategyBreakdown[strat].count += 1
+      }
+    }
+    
+    // Sniper profitability (all-time, mode-filtered)
+    const sniperTrades = await db.select().from(trades).where(eq(trades.strategy, "sniper"))
+    const filteredSniperTrades = sniperTrades.filter(t => isLiveMode ? t.live === true : t.live !== true)
+    const sniperWins = filteredSniperTrades.filter(t => t.pnl > 0)
+    const sniperLosses = filteredSniperTrades.filter(t => t.pnl <= 0)
+    const sniperTotalPnl = filteredSniperTrades.reduce((s, t) => s + t.pnl, 0)
+    const sniperWinRate = filteredSniperTrades.length > 0 ? sniperWins.length / filteredSniperTrades.length : 0
+    const sniperAvgR = filteredSniperTrades.length > 0 ? sniperTotalPnl / (filteredSniperTrades.length * (cfg.sniperTargetRiskUsdt || 5)) : 0
+    const sniperProfitFactor = sniperLosses.length > 0 
+      ? Math.abs(sniperWins.reduce((s, t) => s + t.pnl, 0) / sniperLosses.reduce((s, t) => s + t.pnl, 0))
+      : sniperWins.length > 0 ? Infinity : 0
 
     const wins = recentTrades.filter(t => t.pnl > 0).length
     const winRate = recentTrades.length > 0 ? wins / recentTrades.length : 0
@@ -236,11 +283,21 @@ export async function GET() {
       shadowStats,
       risk,
       sniperStats,
+    strategyBreakdown,
+    sniperProfitability: {
+      winRate: sniperWinRate,
+      avgR: sniperAvgR,
+      totalPnl: sniperTotalPnl,
+      profitFactor: sniperProfitFactor,
+      totalTrades: filteredSniperTrades.length,
+      wins: sniperWins.length,
+      losses: sniperLosses.length
+    },
       watchdog: getWatchdogReport(),
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,
       markPrice, unrealizedPnl: totalGridUnrealized,
       equity: cfg.paperBalance + totalGridUnrealized,
-      trades: recentTrades, winRate, liveStats, todayStats, equityCurve: equity.filter((e: any) => e.live === (cfg.mode === "live")).reverse(), logs,
+      trades: recentTrades, winRate, liveStats, todayStats, swingStats, swingPositions: swingPositions, equityCurve: equity.filter((e: any) => e.live === (cfg.mode === "live")).reverse(), logs,
       model: modelRows[0] ?? null, classifierAnalytics, ticker, chart, liveAccount, regime, adxValue,
       grid: { orders: selectedGridOrders, allOrders: activeGridOrders, holdingCount: gridHolding.length, unrealizedPnl: gridUnrealized, realizedPnl: gridRealized },
       gridConfigs: gridConfigsState,

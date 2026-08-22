@@ -109,7 +109,7 @@ async function resolveClassifierOutcomes(symbol: string, timeframe: string, cand
   }
 }
 
-async function log(level: "info" | "trade" | "error", message: string, details?: unknown) {
+async function log(level: "info" | "trade" | "error" | "warn", message: string, details?: unknown) {
   try {
     await db.insert(botLogs).values({
       level,
@@ -391,7 +391,7 @@ export async function takePartialProfit(
 export async function closePosition(
   position: Position,
   exitPrice: number,
-  reason: "tp" | "sl" | "trail" | "signal" | "manual",
+  reason: "tp" | "sl" | "trail" | "signal" | "manual" | "partial",
   cfg: BotConfig,
 ): Promise<void> {
   if (cfg.mode === "live") {
@@ -826,6 +826,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
               const adv = evaluateAdvancedEntry(
                 signal.candidateDirection,
                 signal.confidence,
+                signal.strategy,
                 candlesByTf,
                 {
                   fundingRate: typeof ticker.fundingRate === "number" ? ticker.fundingRate : undefined,
