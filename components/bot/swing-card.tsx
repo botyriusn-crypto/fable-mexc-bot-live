@@ -92,7 +92,7 @@ export function SwingCard({ state }: { state: any }) {
         <div className="flex items-center justify-between">
           <CardTitle className="flex items-center gap-2">
             <TrendingUp className="h-5 w-5 text-primary" />
-            Swing Breakout (4H)
+            
           </CardTitle>
           <div className="flex items-center gap-2">
             <Badge variant={config.enabled ? "default" : "secondary"}>

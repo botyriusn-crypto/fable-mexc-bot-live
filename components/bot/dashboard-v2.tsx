@@ -240,7 +240,9 @@ export function DashboardV2() {
           {/* LEFT 65% */}
           <div className="w-[65%] flex flex-col gap-3 pr-3">
             <MultiGridCard />
-            <SwingCard state={state} />
+            <CollapsibleSection title="Swing Breakout (4H)" defaultOpen={false}>
+              <SwingCard state={state} />
+            </CollapsibleSection>
 
             <CollapsibleSection title="Charts" defaultOpen={true}>
               <div>
