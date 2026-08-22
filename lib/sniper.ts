@@ -294,6 +294,8 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
   const minVolumeUsdt = cfg?.sniperMinVolumeUsdt ?? SNIPER_PARAMS.minVolumeUsdt
   const sigmaExtreme = cfg?.sniperSigmaExtreme ?? SNIPER_PARAMS.sigmaExtreme
   const volumeSurgeMult = cfg?.sniperVolumeSurgeMult ?? SNIPER_PARAMS.volumeSurgeMult
+  const minStopPct = cfg?.sniperMinStopPct ?? SNIPER_PARAMS.minStopPct
+  const tpSlRatio = cfg?.sniperTpSlRatio ?? SNIPER_PARAMS.tpSlRatio
 
   let tickers: BulkTicker[]
   try {
