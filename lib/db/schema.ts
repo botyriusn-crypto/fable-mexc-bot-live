@@ -77,7 +77,7 @@ export const botConfig = pgTable("bot_config", {
   sniperMinVolumeUsdt: doublePrecision("sniper_min_volume_usdt").notNull().default(1000000),
   sniperTargetRiskUsdt: doublePrecision("sniper_target_risk_usdt").notNull().default(5),
   sniperMinStopPct: doublePrecision("sniper_min_stop_pct").notNull().default(0.008),
-  sniperTpSlRatio: doublePrecision("sniper_tp_sl_ratio").notNull().default(3.0),
+  sniperTpSlRatio: doublePrecision("sniper_tp_sl_ratio").notNull().default(4.0),
   sniperMomentumThreshold: doublePrecision("sniper_momentum_threshold").notNull().default(0.7),
   sniperTrailAtrMult: doublePrecision("sniper_trail_atr_mult").notNull().default(0.6),
   // Partial profit taking

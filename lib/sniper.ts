@@ -13,7 +13,7 @@ export const SNIPER_PARAMS = {
   sigmaExtreme: 3.5,
   fundingThreshold: 0.0005,
   minVolumeUsdt: 1_000_000,
-  tpSlRatio: 3,
+  tpSlRatio: 4,
   resolveAfterBuckets: 6,
   minStopPct: 0.008,
 } as const
@@ -116,8 +116,12 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const entry = last.close
   const structuralStop = direction === "long" ? Math.min(extreme, last.low) * 0.998 : Math.max(extreme, last.high) * 1.002
   const minStopPct = overrides.minStopPct ?? SNIPER_PARAMS.minStopPct
-  const minStop = direction === "long" ? entry * (1 - minStopPct) : entry * (1 + minStopPct)
-  const stopLoss = direction === "long" ? Math.min(structuralStop, minStop) : Math.max(structuralStop, minStop)
+  // REJECT sub-noise signals (validated): a structural stop tighter than
+  // minStopPct means spread+slippage+wicks kill the trade. Do NOT widen —
+  // the setup geometry itself is invalid.
+  const structuralRisk = Math.abs(entry - structuralStop) / entry
+  if (structuralRisk < minStopPct) return none
+  const stopLoss = structuralStop
   const risk = Math.abs(entry - stopLoss)
   if (risk <= 0) return none
   const tpSlRatio = overrides.tpSlRatio ?? SNIPER_PARAMS.tpSlRatio
