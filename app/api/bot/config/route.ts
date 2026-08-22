@@ -39,6 +39,8 @@ const NUMERIC_FIELDS = [
   "sniperConfidenceFloor",
   "sniperCorrThreshold",
   "sniperSigmaExtreme",
+  "sniperMinStopPct",
+  "sniperTpSlRatio",
   "sniperVolumeSurgeMult",
   "sniperMinVolumeUsdt",
   "sniperMomentumThreshold",

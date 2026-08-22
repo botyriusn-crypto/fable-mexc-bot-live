@@ -87,6 +87,8 @@ const SNIPER_FIELDS: FieldDef[] = [
   { key: "sniperVolumeSurgeMult", label: "Sniper volume surge ×", step: "0.1" },
   { key: "sniperMinVolumeUsdt", label: "Sniper min volume (USDT)" },
   { key: "sniperTargetRiskUsdt", label: "Sniper target risk (USDT)", step: "0.5" },
+    { key: "sniperMinStopPct", label: "Sniper min stop distance (%)", step: "0.1", multiplier: 100 },
+    { key: "sniperTpSlRatio", label: "Sniper TP:SL ratio (R)", step: "0.5" },
 ]
 
 export function SettingsPanel({ state }: { state: BotState }) {

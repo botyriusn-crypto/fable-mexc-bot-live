@@ -15,6 +15,7 @@ export const SNIPER_PARAMS = {
   minVolumeUsdt: 1_000_000,
   tpSlRatio: 3,
   resolveAfterBuckets: 6,
+  minStopPct: 0.008,
 } as const
 
 export interface SniperSignal {
@@ -41,6 +42,8 @@ function avg(nums: number[]): number {
 export interface SniperOverrides {
   sigmaExtreme?: number
   volumeSurgeMult?: number
+  minStopPct?: number
+  tpSlRatio?: number
 }
 
 export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, fundingRate = 0, overrides: SniperOverrides = {}): SniperSignal {
@@ -111,10 +114,14 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   if (direction === "long" && fundingRate < -SNIPER_PARAMS.fundingThreshold) { confidence += 0.1; reason += " + crowded shorts (funding)" }
 
   const entry = last.close
-  const stopLoss = direction === "long" ? Math.min(extreme, last.low) * 0.998 : Math.max(extreme, last.high) * 1.002
+  const structuralStop = direction === "long" ? Math.min(extreme, last.low) * 0.998 : Math.max(extreme, last.high) * 1.002
+  const minStopPct = overrides.minStopPct ?? SNIPER_PARAMS.minStopPct
+  const minStop = direction === "long" ? entry * (1 - minStopPct) : entry * (1 + minStopPct)
+  const stopLoss = direction === "long" ? Math.min(structuralStop, minStop) : Math.max(structuralStop, minStop)
   const risk = Math.abs(entry - stopLoss)
   if (risk <= 0) return none
-  const takeProfit = direction === "long" ? entry + risk * SNIPER_PARAMS.tpSlRatio : entry - risk * SNIPER_PARAMS.tpSlRatio
+  const tpSlRatio = overrides.tpSlRatio ?? SNIPER_PARAMS.tpSlRatio
+  const takeProfit = direction === "long" ? entry + risk * tpSlRatio : entry - risk * tpSlRatio
 
   return { direction, reason, confidence: Math.min(confidence, 0.95), stopLoss, takeProfit, signalType, volSurge, z, fundingRate }
 }
