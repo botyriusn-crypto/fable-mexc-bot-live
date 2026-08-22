@@ -80,9 +80,17 @@ export async function GET() {
       winRate: liveOnly.length > 0 ? liveOnly.filter((t) => (t.pnl || 0) > 0).length / liveOnly.length : 0,
     }
     
-    // TODAY stats (last 24h)
+    // MODE-AWARE stats — paper shows paper, live shows live (no mixing)
+    const isLiveModeStats = cfgRows[0]?.mode === "live"
+    const modeTrades = lifetimeTradesRaw.filter((t) => isLiveModeStats ? t.live === true : t.live !== true)
+    const modeStats = {
+      totalTrades: modeTrades.length,
+      totalPnl: modeTrades.reduce((s, t) => s + (t.pnl || 0), 0),
+      winRate: modeTrades.length > 0 ? modeTrades.filter((t) => (t.pnl || 0) > 0).length / modeTrades.length : 0,
+    }
+    // TODAY stats (last 24h, mode-aware)
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000)
-    const todayTrades = liveOnly.filter((t: any) => new Date(t.closedAt) > oneDayAgo)
+    const todayTrades = modeTrades.filter((t: any) => new Date(t.closedAt) > oneDayAgo)
     const todayStats = {
       trades: todayTrades.length,
       pnl: todayTrades.reduce((s, t) => s + (t.pnl || 0), 0),
@@ -143,7 +151,7 @@ export async function GET() {
 
     // Strategy breakdown for open positions (mode-filtered)
     const isLiveMode = cfg.mode === "live"
-    const filteredOpenPosRows = openPosRows.filter(p => isLiveMode ? p.live === true : p.live !== true)
+    const filteredOpenPosRows = openPosRows
     
     const strategyBreakdown = {
       grid: { unrealized: 0, count: 0 },
@@ -297,7 +305,7 @@ export async function GET() {
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,
       markPrice, unrealizedPnl: totalGridUnrealized,
       equity: cfg.paperBalance + totalGridUnrealized,
-      trades: recentTrades, winRate, liveStats, todayStats, swingStats, swingPositions: swingPositions, equityCurve: equity.filter((e: any) => e.live === (cfg.mode === "live")).reverse(), logs,
+      trades: recentTrades, winRate, liveStats, modeStats, todayStats, swingStats, swingPositions: swingPositions, equityCurve: equity.filter((e: any) => e.live === (cfg.mode === "live")).reverse(), logs,
       model: modelRows[0] ?? null, classifierAnalytics, ticker, chart, liveAccount, regime, adxValue,
       grid: { orders: selectedGridOrders, allOrders: activeGridOrders, holdingCount: gridHolding.length, unrealizedPnl: gridUnrealized, realizedPnl: gridRealized },
       gridConfigs: gridConfigsState,
