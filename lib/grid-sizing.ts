@@ -44,13 +44,33 @@ export async function computeSafeGridSettings(
   additionalPairs = 1,
   excludeSymbol?: string,
 ): Promise<SafeGridSettings & { availableBalance: number; totalPairs: number }> {
-  let availableBalance = 0
+  // Get current mode from bot_config to decide balance source
+  let mode = "paper"
+  let paperBalance = 0
   try {
-    const assets = (await getAccountAssets()) as any[]
-    const usdt = Array.isArray(assets) ? assets.find((a: any) => a.currency === "USDT") : null
-    availableBalance = usdt ? Number(usdt.availableBalance) : 0
-  } catch {
-    availableBalance = 0
+    const cfgRows = await db.select().from(botConfig).limit(1)
+    if (cfgRows.length > 0) {
+      mode = cfgRows[0].mode
+      paperBalance = Number(cfgRows[0].paperBalance || 0)
+    }
+  } catch {}
+
+  let availableBalance = 0
+  if (mode === "paper") {
+    // Paper mode: use configured paper balance
+    availableBalance = paperBalance
+    console.log(`[Grid Sizing] Paper mode: using paperBalance=${availableBalance.toFixed(2)}`)
+  } else {
+    // Live mode: fetch from MEXC API
+    try {
+      const assets = (await getAccountAssets()) as any[]
+      const usdt = Array.isArray(assets) ? assets.find((a: any) => a.currency === "USDT") : null
+      availableBalance = usdt ? Number(usdt.availableBalance) : 0
+      console.log(`[Grid Sizing] Live mode: using MEXC balance=${availableBalance.toFixed(2)}`)
+    } catch {
+      availableBalance = 0
+      console.log(`[Grid Sizing] Live mode: API error, availableBalance=0`)
+    }
   }
 
   const enabledRows = await db.select({ symbol: gridConfigs.symbol }).from(gridConfigs).where(eq(gridConfigs.enabled, true))
