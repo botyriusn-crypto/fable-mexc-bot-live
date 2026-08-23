@@ -46,20 +46,42 @@ export async function computeSafeGridSettings(
 ): Promise<SafeGridSettings & { availableBalance: number; totalPairs: number }> {
   // Get current mode from bot_config to decide balance source
   let mode = "paper"
-  let paperBalance = 0
+  let availableBalance = 0
   try {
     const cfgRows = await db.select().from(botConfig).limit(1)
     if (cfgRows.length > 0) {
       mode = cfgRows[0].mode
-      paperBalance = Number(cfgRows[0].paperBalance || 0)
     }
   } catch {}
 
-  let availableBalance = 0
   if (mode === "paper") {
-    // Paper mode: use configured paper balance
-    availableBalance = paperBalance
-    console.log(`[Grid Sizing] Paper mode: using paperBalance=${availableBalance.toFixed(2)}`)
+    console.log(`[Grid Sizing] VERBOSE: Detected mode=paper, attempting to read equity snapshot...`)
+    // Paper mode: use latest equity snapshot (updated every tick with unrealized PnL)
+    try {
+      console.log(`[Grid Sizing] VERBOSE: Querying equity snapshots table...`)
+      const snapshots = await db
+        .select({ equity: equitySnapshots.equity })
+        .from(equitySnapshots)
+        .orderBy(desc(equitySnapshots.createdAt))
+        .limit(1)
+      
+      console.log(`[Grid Sizing] VERBOSE: Got ${snapshots.length} snapshot(s)`)
+      
+      if (snapshots.length > 0) {
+        availableBalance = Number(snapshots[0].equity || 0)
+        console.log(`[Grid Sizing] VERBOSE: Using snapshot equity=${availableBalance}`)
+      } else {
+        console.log(`[Grid Sizing] VERBOSE: No snapshots found, falling back to bot_config.paperBalance`)
+        // Fallback to bot_config.paperBalance if no snapshots yet
+        const cfgRows = await db.select({ paperBalance: botConfig.paperBalance }).from(botConfig).limit(1)
+        availableBalance = cfgRows.length > 0 ? Number(cfgRows[0].paperBalance || 0) : 0
+        console.log(`[Grid Sizing] VERBOSE: Fallback paperBalance=${availableBalance}`)
+      }
+      console.log(`[Grid Sizing] Paper mode: using latest equity snapshot=${availableBalance.toFixed(2)}`)
+    } catch (e) {
+      console.log(`[Grid Sizing] Paper mode: error reading equity snapshot: ${e.message}`)
+      availableBalance = 0
+    }
   } else {
     // Live mode: fetch from MEXC API
     try {
