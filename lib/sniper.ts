@@ -46,6 +46,12 @@ export interface SniperOverrides {
   volumeSurgeMult?: number
   minStopPct?: number
   tpSlRatio?: number
+  // A/B test toggles (defaults match current production behavior)
+  bearishPrevCloseConfirm?: boolean   // default true: bearishReclaim requires prevCandle.close < swingHigh
+  shortAllowNeutral?: boolean         // default true: exhaustedUp allows trendDown || trendNeutral
+  longStopBufferAtr?: boolean         // default false: long stop uses * 0.998 (pct), not + atrBuffer
+  shortStopBufferPct?: boolean        // default false: short stop uses + atrBuffer, not * 1.002 (pct)
+  tpSlRatioSigma?: number             // if set, sigma signals use this R:R instead of tpSlRatio
 }
 
 export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, fundingRate = 0, overrides: SniperOverrides = {}): SniperSignal {
@@ -54,6 +60,10 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
 
   const sigmaExtreme = overrides.sigmaExtreme ?? SIGMA_EXTREME
   const volumeSurgeMult = overrides.volumeSurgeMult ?? VOLUME_SURGE_MULT
+  const bearishPrevCloseConfirm = overrides.bearishPrevCloseConfirm ?? true
+  const shortAllowNeutral = overrides.shortAllowNeutral ?? true
+  const longStopBufferAtr = overrides.longStopBufferAtr ?? false
+  const shortStopBufferPct = overrides.shortStopBufferPct ?? false
 
   const last = candles[candles.length - 1]
   const prev = candles.slice(-SWEEP_LOOKBACK - 1, -1)
@@ -64,7 +74,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
 
   const bullishReclaim = last.low < swingLow && last.close > swingLow && last.close > last.open && volSurge >= volumeSurgeMult
   const prevCandle = candles[candles.length - 2];
-  const bearishReclaim = last.high > swingHigh && last.close < swingHigh && last.close < last.open && prevCandle.close < swingHigh && volSurge >= volumeSurgeMult
+  const bearishReclaim = last.high > swingHigh && last.close < swingHigh && last.close < last.open && (!bearishPrevCloseConfirm || prevCandle.close < swingHigh) && volSurge >= volumeSurgeMult
 
   const closes = candles.map(c => c.close)
   const window = closes.slice(-100)
@@ -86,7 +96,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
 
   const exhaustedDown = z < -sigmaExtreme && last.close > last.open && trendUp
   const trendNeutral = Math.abs(mean - olderMean) / olderMean < 0.05;
-  const exhaustedUp = z > sigmaExtreme && last.close < last.open && (trendDown || trendNeutral)
+  const exhaustedUp = z > sigmaExtreme && last.close < last.open && (trendDown || (shortAllowNeutral && trendNeutral))
   // Sigma confidence scales with how far |z| exceeds the threshold, so the
   // confidence floor and the "top N by confidence" sort actually discriminate
   // (weak sigma ~0.5 -> rejected by a 0.6 floor; strong sigma ~0.9 -> kept).
@@ -119,7 +129,9 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
 
   const entry = last.close
   const atrBuffer = snap.atr * 0.5;
-  const structuralStop = direction === "long" ? Math.min(extreme, last.low) * 0.998 : Math.max(extreme, last.high) + atrBuffer
+  const structuralStop = direction === "long"
+    ? (longStopBufferAtr ? Math.min(extreme, last.low) + atrBuffer : Math.min(extreme, last.low) * 0.998)
+    : (shortStopBufferPct ? Math.max(extreme, last.high) * 1.002 : Math.max(extreme, last.high) + atrBuffer)
   const minStopPct = overrides.minStopPct ?? SNIPER_PARAMS.minStopPct
   // REJECT sub-noise signals (validated): a structural stop tighter than
   // minStopPct means spread+slippage+wicks kill the trade. Do NOT widen —
@@ -130,7 +142,9 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const risk = Math.abs(entry - stopLoss)
   if (risk <= 0) return none
   const tpSlRatio = overrides.tpSlRatio ?? SNIPER_PARAMS.tpSlRatio
-  const takeProfit = direction === "long" ? entry + risk * tpSlRatio : entry - risk * tpSlRatio
+  const tpSlRatioSigma = overrides.tpSlRatioSigma ?? tpSlRatio
+  const effectiveTpSlRatio = signalType === "sigma" ? tpSlRatioSigma : tpSlRatio
+  const takeProfit = direction === "long" ? entry + risk * effectiveTpSlRatio : entry - risk * effectiveTpSlRatio
 
   return { direction, reason, confidence: Math.min(confidence, 0.95), stopLoss, takeProfit, signalType, volSurge, z, fundingRate }
 }
