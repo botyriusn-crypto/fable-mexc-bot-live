@@ -347,6 +347,46 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     const candles = await fetchKlines(symbol, timeframe, 200).catch(() => null)
     if (!candles || candles.length < 60) continue
 
+    // SNIPER DNA PRE-FILTER (validated 2026-08-23): skip oscillating coins
+    // Winners: ATR 0.3-0.7%, σRev 15-32% (trending-with-pullbacks)
+    // Losers (PEPE, ZEN): high σRev >33% (oscillates, kills 4R follow-through)
+    try {
+      const closes = candles.map((k: any) => k.close)
+      const highs = candles.map((k: any) => k.high)
+      const lows = candles.map((k: any) => k.low)
+      const n = closes.length
+      const lastClose = closes[n - 1]
+      
+      // ATR% (14-period)
+      let trSum = 0
+      for (let i = n - 14; i < n; i++) {
+        const tr = Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i-1]), Math.abs(lows[i] - closes[i-1]))
+        trSum += tr
+      }
+      const atrPct = (trSum / 14 / lastClose) * 100
+      
+      // Sigma reversion rate (>3.5σ move reverts ≥50% in 6 bars)
+      let sigEvents = 0, sigRevert = 0
+      for (let i = 100; i < n - 6; i++) {
+        let m = 0; const rets: number[] = []
+        for (let j = i - 100; j < i; j++) rets.push((closes[j + 1] - closes[j]) / closes[j])
+        m = rets.reduce((a, b) => a + b, 0) / 100
+        const sd = Math.sqrt(rets.reduce((a, b) => a + (b - m) ** 2, 0) / 100)
+        const r = (closes[i] - closes[i - 1]) / closes[i - 1]
+        if (sd > 0 && Math.abs(r) > 3.5 * sd) {
+          sigEvents++
+          const move = closes[i] - closes[i - 1], back = closes[i + 6] - closes[i]
+          if (Math.sign(back) === -Math.sign(move) && Math.abs(back) >= 0.5 * Math.abs(move)) sigRevert++
+        }
+      }
+      const sigmaRevertRate = sigEvents > 0 ? (sigRevert / sigEvents) * 100 : 50
+      
+      // DNA gate: ATR 0.3-0.7%, σRev 15-32%
+      if (!(atrPct >= 0.3 && atrPct <= 0.7 && sigmaRevertRate >= 15 && sigmaRevertRate <= 32)) {
+        continue
+      }
+    } catch { continue }
+
     const sig = detectSniper(candles as Candle[], {} as IndicatorSnapshot, t.fundingRate, { sigmaExtreme, volumeSurgeMult })
     if (!sig.direction) continue
 
