@@ -175,17 +175,20 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         // moves in EITHER direction, so reject both pumps and dumps (>2.5%).
         if (Math.abs(momentum3h) > 2.5) { gateStats.momentumGate++; continue }
 
-        let score = 0
-        score += (chop - 50) * 2
-        score += bbTouches * 3
-        score += atrPct * 5
-        score -= (lastAdx - 20) * 1.5
+        // ONDO-DNA scoring (validated 2026-08-23): grid edge lives in an
+        // ATR sweet spot (~0.6-1.2%), not raw chop. Winners averaged ATR
+        // 0.95%, losers 2.15% — the old linear atrPct*5 rewarded trending
+        // coins that break the range (TAO scored -9 yet made +$7.8k).
+        const atrSweet = Math.max(0, 100 - Math.abs(atrPct - 0.9) * 70)
+        const chopScore = Math.min(chop, 120) * 0.5
+        const adxPen = Math.max(0, lastAdx - 25) * 4
+        let score = atrSweet + chopScore - adxPen
 
         const dna = comboDna(candles, 0.6, lastAdx)
         const params = comboParams(dna, lastClose, t.amount24)
         console.log(`[LevDebug] ${t.symbol} vol=$${Math.round(t.amount24)} atrPct=${atrPct.toFixed(2)}% lev=${params.suggestedLeverage}x`)
         if (dna.rejected) { gateStats.dnaRejected++; continue }
-        const blendedScore = Math.round(Math.min(score, 100) * 0.35 + dna.score * 0.65)
+        const blendedScore = Math.round(Math.max(0, Math.min(100, score / 1.5)) * 0.35 + dna.score * 0.65)
 
         scoredMarkets.push({
           symbol: t.symbol,
