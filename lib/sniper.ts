@@ -61,7 +61,8 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const volSurge = avgVol > 0 ? last.volume / avgVol : 1
 
   const bullishReclaim = last.low < swingLow && last.close > swingLow && last.close > last.open && volSurge >= volumeSurgeMult
-  const bearishReclaim = last.high > swingHigh && last.close < swingHigh && last.close < last.open && volSurge >= volumeSurgeMult
+  const prevCandle = candles[candles.length - 2];
+  const bearishReclaim = last.high > swingHigh && last.close < swingHigh && last.close < last.open && prevCandle.close < swingHigh && volSurge >= volumeSurgeMult
 
   const closes = candles.map(c => c.close)
   const window = closes.slice(-100)
@@ -82,7 +83,8 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const trendDown = mean < olderMean
 
   const exhaustedDown = z < -sigmaExtreme && last.close > last.open && trendUp
-  const exhaustedUp = z > sigmaExtreme && last.close < last.open && trendDown
+  const trendNeutral = Math.abs(mean - olderMean) / olderMean < 0.05;
+  const exhaustedUp = z > sigmaExtreme && last.close < last.open && (trendDown || trendNeutral)
   // Sigma confidence scales with how far |z| exceeds the threshold, so the
   // confidence floor and the "top N by confidence" sort actually discriminate
   // (weak sigma ~0.5 -> rejected by a 0.6 floor; strong sigma ~0.9 -> kept).
@@ -114,7 +116,8 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   if (direction === "long" && fundingRate < -SNIPER_PARAMS.fundingThreshold) { confidence += 0.1; reason += " + crowded shorts (funding)" }
 
   const entry = last.close
-  const structuralStop = direction === "long" ? Math.min(extreme, last.low) * 0.998 : Math.max(extreme, last.high) * 1.002
+  const atrBuffer = snap.atr * 0.5;
+  const structuralStop = direction === "long" ? Math.min(extreme, last.low) * 0.998 : Math.max(extreme, last.high) + atrBuffer
   const minStopPct = overrides.minStopPct ?? SNIPER_PARAMS.minStopPct
   // REJECT sub-noise signals (validated): a structural stop tighter than
   // minStopPct means spread+slippage+wicks kill the trade. Do NOT widen —
