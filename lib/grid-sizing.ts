@@ -1,7 +1,7 @@
 import { getAccountAssets } from "./mexc/private"
 import { db } from "./db"
-import { gridConfigs } from "./db/schema"
-import { eq } from "drizzle-orm"
+import { gridConfigs , equitySnapshots } from "./db/schema"
+import { eq , desc } from "drizzle-orm"
 
 export interface SafeGridSettings {
   levels: number
