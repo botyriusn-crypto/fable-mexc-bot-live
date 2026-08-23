@@ -47,11 +47,15 @@ export function comboDna(candles: Candle[], spacingPct = 0.6, lastAdx?: number):
   // already drifted more than 8% over the lookback (was 15%). A COMBO grid
   // entering after an 8%+ move is very likely to keep going and bleed the
   // account before it can mean-revert.
-  if (absDrift > 8) {
+  // ONDO-DNA bypass (validated 2026-08-23): coins with perfect ATR 0.6-1.2%
+  // and ADX < 25 can handle 8-15% drift because they're in ideal grid fuel.
+  const isOndoDna = atrPct >= 0.6 && atrPct <= 1.2 && (lastAdx ?? 99) < 25
+  const driftThreshold = isOndoDna ? 15 : 8
+  if (absDrift > driftThreshold && !isOndoDna) {
     return {
       chop, revRate, rangePct, driftPct, atrPct, touches, score: 0,
       rejected: true,
-      rejectionReason: `High drift: ${driftPct.toFixed(1)}% (max 8%)`,
+      rejectionReason: `High drift: ${driftPct.toFixed(1)}% (max ${driftThreshold}%)`,
     }
   }
 
