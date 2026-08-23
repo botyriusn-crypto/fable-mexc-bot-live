@@ -621,6 +621,30 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
 
     const tickerCache = new Map()
     const exchange = getExchangeClient(cfg.exchange as Exchange)
+    // ── Sniper scan (decoupled universe) ──
+    // Runs every tick (~5min). DNA pre-filter in sniper.ts skips oscillating
+    // coins. Only detects on trending-with-pullbacks regimes.
+    try {
+      const sniperCandidates = await runSniperCycle()
+      if (sniperCandidates.length > 0) {
+        await log("info", `Sniper cycle found ${sniperCandidates.length} candidate(s): ${sniperCandidates.map(c => c.symbol).join(', ')}`)
+      }
+    } catch (err) {
+      await log("error", `Sniper cycle error: ${err instanceof Error ? err.message : 'unknown'}`)
+    }
+
+    // ── Sniper scan (decoupled universe) ──
+    // Runs every tick (~5min). DNA pre-filter in sniper.ts skips oscillating
+    // coins. Only detects on trending-with-pullbacks regimes.
+    try {
+      const sniperCandidates = await runSniperCycle()
+      if (sniperCandidates.length > 0) {
+        await log("info", `Sniper cycle found ${sniperCandidates.length} candidate(s): ${sniperCandidates.map(c => c.symbol).join(', ')}`)
+      }
+    } catch (err) {
+      await log("error", `Sniper cycle error: ${err instanceof Error ? err.message : 'unknown'}`)
+    }
+
     // ── Multi-pair grid execution ──
     const gridCfgs = await getGridConfigs()
 
