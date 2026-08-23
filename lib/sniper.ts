@@ -382,13 +382,20 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
       const sigmaRevertRate = sigEvents > 0 ? (sigRevert / sigEvents) * 100 : 50
       
       // DNA gate: ATR 0.3-0.7%, σRev 15-32%
-      if (!(atrPct >= 0.3 && atrPct <= 0.7 && sigmaRevertRate >= 15 && sigmaRevertRate <= 32)) {
+      const dnaPass = atrPct >= 0.3 && atrPct <= 0.7 && sigmaRevertRate >= 15 && sigmaRevertRate <= 32;
+      if (!dnaPass) {
+        console.log(`[Sniper DNA] ${symbol} rejected: ATR=${atrPct.toFixed(2)}% σRev=${sigmaRevertRate.toFixed(1)}%`);
         continue
       }
+      console.log(`[Sniper DNA] ${symbol} passed: ATR=${atrPct.toFixed(2)}% σRev=${sigmaRevertRate.toFixed(1)}%`);
     } catch { continue }
 
+    console.log(`[Sniper] Running detectSniper on ${symbol}...`);
     const sig = detectSniper(candles as Candle[], {} as IndicatorSnapshot, t.fundingRate, { sigmaExtreme, volumeSurgeMult })
-    if (!sig.direction) continue
+    if (!sig.direction) {
+      console.log(`[Sniper] ${symbol}: no signal (confidence too low or no valid setup)`);
+      continue;
+    }
 
     if (sig.reason.includes("funding")) {
       try {
