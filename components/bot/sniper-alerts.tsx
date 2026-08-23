@@ -88,6 +88,7 @@ export function SniperAlertBubble() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [test, setTest] = useState<any>(null)
   const [dismissed, setDismissed] = useState<Record<string, number>>({})
+  const [executing, setExecuting] = useState(false)
 
   useEffect(() => {
     const sync = () => {
@@ -138,6 +139,39 @@ export function SniperAlertBubble() {
     setOpen(false)
   }
 
+  const execute = async () => {
+    if (!top) return
+    setExecuting(true)
+    try {
+      const response = await fetch("/api/bot/sniper-execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: top.symbol,
+          direction: top.direction,
+          entryPrice: top.entry || top.entryPrice,
+          stopLoss: top.stopLoss,
+          takeProfit: top.takeProfit,
+          confidence: top.confidence,
+          timeframe: top.timeframe || "Min5",
+        }),
+      })
+
+      const result = await response.json()
+      
+      if (result.success) {
+        alert(`✅ ${top.direction.toUpperCase()} ${top.symbol} opened!`)
+        acknowledge() // Auto-dismiss after successful execution
+      } else {
+        alert(`❌ Failed: ${result.error}`)
+      }
+    } catch (e: any) {
+      alert(`❌ Error: ${e.message}`)
+    } finally {
+      setExecuting(false)
+    }
+  }
+
   const isStale = elapsedSeconds > 600 // dim after 10 minutes
 
   if (!active) return null
@@ -150,16 +184,20 @@ export function SniperAlertBubble() {
           🎯 {top.symbol} {(top?.direction || "unknown").toUpperCase()} {(top.confidence * 100).toFixed(0)}% · SNIPER{timeAgo ? ` · ${timeAgo}` : ""}
         </button>
       ) : (
-        <Card className={`w-72 transition-all duration-500 ${isStale ? "border-yellow-400/20 bg-black/60 opacity-50 grayscale" : "border-yellow-400/60 bg-black/90 shadow-[0_0_24px_rgba(250,204,21,0.4)]"}`}>
+        <Card className={`w-80 transition-all duration-500 ${isStale ? "border-yellow-400/20 bg-black/60 opacity-50 grayscale" : "border-yellow-400/60 bg-black/90 shadow-[0_0_24px_rgba(250,204,21,0.4)]"}`}>
           <CardContent className="flex flex-col gap-2 p-3">
             <span className="text-sm font-bold text-yellow-300">🎯 Sniper Candidate</span>
             <div className="font-mono text-lg text-yellow-200">{top.symbol} <span className={top.direction === "long" ? "text-success" : "text-danger"}>{(top?.direction || "unknown").toUpperCase()}</span></div>
             <div className="text-xs text-yellow-200/80">Confidence: {(top.confidence * 100).toFixed(0)}% · Source: Sniper rule</div>
+            {top.entry && <div className="text-[10px] text-yellow-200/60">Entry: {Number(top.entry).toFixed(4)} · SL: {Number(top.stopLoss).toFixed(4)} · TP: {Number(top.takeProfit).toFixed(4)}</div>}
             {timeAgo && <div className="text-[10px] font-mono text-yellow-200/60">⏱ Detected {timeAgo} ago</div>}
-            <div className="text-[10px] text-yellow-200/60">Sniper rule flagged this setup. Review the pair before entering manually.</div>
+            <div className="text-[10px] text-yellow-200/60">Click EXECUTE to open position manually (respects PAPER/LIVE mode).</div>
             <div className="flex gap-2">
               <Button size="sm" variant="outline" className="flex-1 text-xs" onClick={() => setOpen(false)}>Keep watching</Button>
-              <Button size="sm" className="flex-1 bg-yellow-400 text-black text-xs" onClick={acknowledge}>Acknowledge</Button>
+              <Button size="sm" variant="outline" className="flex-1 text-xs" onClick={acknowledge}>Acknowledge</Button>
+              <Button size="sm" className="flex-1 bg-green-600 hover:bg-green-700 text-white text-xs font-bold" onClick={execute} disabled={executing}>
+                {executing ? "..." : "🎯 EXECUTE"}
+              </Button>
             </div>
           </CardContent>
         </Card>

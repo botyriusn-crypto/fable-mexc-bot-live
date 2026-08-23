@@ -196,7 +196,7 @@ async function reconcilePositions(cfg: BotConfig): Promise<void> {
   }
 }
 
-async function openPosition(
+export async function openPosition(
   cfg: BotConfig,
   direction: "long" | "short",
   snap: IndicatorSnapshot,
@@ -985,11 +985,14 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         // Option B: enter only the top N candidates by confidence, not every
         // signal. The margin cap inside openPosition still applies on top.
         const floor = cfg.sniperConfidenceFloor ?? 0.6
+        console.log(`[Sniper Auto] fresh=${fresh.length}, floor=${floor}, candidates:`, fresh.map(c => `${c.symbol}(${c.confidence.toFixed(2)})`).join(', '))
         const ranked = [...fresh]
           .filter((c) => c.confidence >= floor)
           .sort((a, b) => b.confidence - a.confidence)
+        console.log(`[Sniper Auto] after confidence filter: ${ranked.length} signals`)
         const heldSymbols = new Set((await getOpenPositions()).map((p) => p.symbol))
         let remainingBudget = marginBudgetRemaining()
+        console.log(`[Sniper] auto-exec: ranked=${ranked.length} budget=${remainingBudget.toFixed(2)}`)
 
         // ── Correlation dedup ──
         // Fetch klines for all ranked candidates up front and compute pairwise
@@ -1002,13 +1005,14 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
           try {
             const k = await exchange.fetchKlines(toExchangeSymbol(c.symbol), c.timeframe, 200)
             if (k.length >= 60) klineMap.set(c.symbol, k)
-          } catch { /* skip on fetch failure */ }
+          } catch { console.log(`[Sniper] kline fetch failed for ${c.symbol}`) }
         }
+        console.log(`[Sniper Auto] held symbols: ${Array.from(heldSymbols).join(', ') || 'none'}`)
         const picked: string[] = []
         for (const c of ranked) {
           if (heldSymbols.has(c.symbol)) continue
           const k = klineMap.get(c.symbol)
-          if (!k) continue
+          if (!k) { console.log(`[Sniper] no klines for ${c.symbol}, skip`); continue }
           let bestCorr = 0
           let bestSym = ""
           for (const sym of picked) {
@@ -1046,7 +1050,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
             const used = await openPosition(marketCfg, c.direction, snap, c.confidence, features, "sniper", {
               stopLoss: c.stopLoss,
               takeProfit: c.takeProfit,
-              sizeUsdtOverride: remainingBudget,
+              sizeUsdtOverride: remainingBudget > 0 ? remainingBudget : (cfg.sniperPositionSizeUsdt ?? cfg.positionSizeUsdt),
             })
             remainingBudget -= Math.min(used, remainingBudget)
           } catch (err) {

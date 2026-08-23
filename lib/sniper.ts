@@ -7,6 +7,8 @@ import { fetchTicker, fetchAllTickers, fetchKlines, type BulkTicker } from "./me
 import { recordOutcome, type SniperFeatures } from "./advisor"
 
 // Tunable rule parameters (Option A: exposed for display + advisor tuning).
+export const MIN_CONFIDENCE = 0.7
+
 export const SNIPER_PARAMS = {
   sweepLookback: 20,
   volumeSurgeMult: 2.0,
@@ -133,7 +135,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   return { direction, reason, confidence: Math.min(confidence, 0.95), stopLoss, takeProfit, signalType, volSurge, z, fundingRate }
 }
 
-export async function recordSniperCandidate(symbol: string, timeframe: string, candleTime: number, entry: number, sig: SniperSignal) {
+export async function recordSniperCandidate(symbol: string, timeframe: string, candleTime: number, entry: number, sig: SniperSignal, entryTime: number) {
   if (!sig.direction) return
   try {
     await db.insert(classifierDecisions).values({
@@ -150,7 +152,7 @@ export async function recordSniperCandidate(symbol: string, timeframe: string, c
       lorentzianConfidence: sig.confidence,
       lorentzianAllowed: true,
       // Store signal characteristics so the advisor can grade counterfactually.
-      lorentzianFilters: { signalType: sig.signalType, volSurge: sig.volSurge, z: sig.z, fundingRate: sig.fundingRate },
+      lorentzianFilters: { signalType: sig.signalType, volSurge: sig.volSurge, z: sig.z, fundingRate: sig.fundingRate, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, entryTime },
       finalAllowed: true,
       reason: sig.reason,
     }).onConflictDoNothing()
@@ -162,7 +164,10 @@ function tfSeconds(tf: string): number {
   return m ? parseInt(m[1], 10) * 60 : 300
 }
 
-// Resolve sniper candidates after N buckets, mirroring the shadow resolver.
+// Resolve sniper candidates by walking forward candle-by-candle from entry and
+// checking which level was actually hit first — the real stop-loss or the real
+// take-profit — rather than sampling price at a fixed 30-minute mark. This is
+// the only resolution that tells the truth about a 4:1 reward:risk trade.
 // Returns the number of decisions resolved this pass.
 export async function resolveSniperDecisions(): Promise<number> {
   const unresolved = await db.select().from(classifierDecisions).where(
@@ -173,25 +178,75 @@ export async function resolveSniperDecisions(): Promise<number> {
     const tfSec = tfSeconds(d.timeframe)
     const curBucket = Math.floor(Date.now() / 1000 / tfSec)
     if (curBucket - d.candleTime < SNIPER_PARAMS.resolveAfterBuckets) continue
-    const ticker: any = await fetchTicker(d.symbol).catch(() => null)
-    const price = ticker?.lastPrice ?? ticker?.price
-    if (!price) continue
-    const ret = ((price - d.entryPrice) / d.entryPrice) * 100
-    const actual = ret > 0.05 ? "long" : ret < -0.05 ? "short" : "neutral"
-    const correct = d.candidateDirection === actual
+
+    // Stored stop/take levels (added to lorentzianFilters at record time).
+    const filters = (d.lorentzianFilters ?? null) as any as (SniperFeatures & { stopLoss?: number; takeProfit?: number; entryTime?: number }) | null
+    const stopLoss = filters?.stopLoss
+    const takeProfit = filters?.takeProfit
+
+    // Legacy rows (recorded before stop/take were stored) fall back to the old
+    // ticker check so they still resolve rather than hanging forever.
+    if (stopLoss == null || takeProfit == null) {
+      const ticker: any = await fetchTicker(d.symbol).catch(() => null)
+      const price = ticker?.lastPrice ?? ticker?.price
+      if (!price) continue
+      const ret = ((price - d.entryPrice) / d.entryPrice) * 100
+      const actual = ret > 0.05 ? "long" : ret < -0.05 ? "short" : "neutral"
+      const correct = d.candidateDirection === actual
+      await db.update(classifierDecisions).set({
+        outcomeDirection: actual,
+        outcomeReturn: ret,
+        outcomeCorrectLogistic: correct,
+        outcomeCorrectLorentzian: correct,
+        resolvedAt: sql`NOW()`,
+      }).where(eq(classifierDecisions.id, d.id))
+      const sig = (d.lorentzianFilters ?? null) as any as SniperFeatures | null
+      if (sig) await recordOutcome(sig, d.candidateDirection, d.logisticConfidence, correct, ret).catch(() => {})
+      resolved++
+      continue
+    }
+
+    // Walk forward from the entry candle to determine which level hit first.
+    const candles = await fetchKlines(d.symbol, d.timeframe, 200).catch(() => null)
+    if (!candles || candles.length < 2) continue
+    const sorted = [...candles].sort((a, b) => a.time - b.time)
+    const entryIdx = filters?.entryTime != null
+      ? sorted.findIndex((c) => c.time === filters.entryTime)
+      : sorted.findIndex((c) => Math.floor(c.time / tfSec) === d.candleTime)
+    if (entryIdx < 0) continue
+
+    const isLong = d.candidateDirection === "long"
+    let outcome: "tp" | "sl" | "open" = "open"
+    let exitPrice = d.entryPrice
+
+    for (let i = entryIdx + 1; i < sorted.length; i++) {
+      const c = sorted[i]
+      if (isLong) {
+        // Conservative: if both levels are inside one candle, assume SL first.
+        if (c.low <= stopLoss) { outcome = "sl"; exitPrice = stopLoss; break }
+        if (c.high >= takeProfit) { outcome = "tp"; exitPrice = takeProfit; break }
+      } else {
+        if (c.high >= stopLoss) { outcome = "sl"; exitPrice = stopLoss; break }
+        if (c.low <= takeProfit) { outcome = "tp"; exitPrice = takeProfit; break }
+      }
+    }
+
+    if (outcome === "open") continue // neither level hit yet — leave for next pass
+
+    const risk = Math.abs(d.entryPrice - stopLoss)
+    const rMultiple = risk > 0 ? ((exitPrice - d.entryPrice) / risk) * (isLong ? 1 : -1) : 0
+    const correct = outcome === "tp"
+
     await db.update(classifierDecisions).set({
-      outcomeDirection: actual,
-      outcomeReturn: ret,
+      outcomeDirection: correct ? d.candidateDirection : (isLong ? "short" : "long"),
+      outcomeReturn: rMultiple, // R-multiple (not raw %), so sumReturn = total R
       outcomeCorrectLogistic: correct,
       outcomeCorrectLorentzian: correct,
       resolvedAt: sql`NOW()`,
     }).where(eq(classifierDecisions.id, d.id))
 
-    // Feed the advisor so variants grade this outcome counterfactually.
     const sig = (d.lorentzianFilters ?? null) as any as SniperFeatures | null
-    if (sig) {
-      await recordOutcome(sig, d.candidateDirection, d.logisticConfidence, correct, ret).catch(() => {})
-    }
+    if (sig) await recordOutcome(sig, d.candidateDirection, d.logisticConfidence, correct, rMultiple).catch(() => {})
     resolved++
   }
   return resolved
@@ -350,9 +405,21 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     const candles = await fetchKlines(symbol, timeframe, 200).catch(() => null)
     if (!candles || candles.length < 60) continue
 
+    // Build minimal snapshot with inline ATR (detectSniper only needs snap.atr
+    // for the short-side ATR stop buffer). Avoids needing a full BotConfig here.
+    const _cl = candles as Candle[]
+    let _trSum = 0
+    for (let _i = _cl.length - 14; _i < _cl.length; _i++) {
+      _trSum += Math.max(
+        _cl[_i].high - _cl[_i].low,
+        Math.abs(_cl[_i].high - _cl[_i - 1].close),
+        Math.abs(_cl[_i].low - _cl[_i - 1].close)
+      )
+    }
+    const snap = { atr: _trSum / 14, price: _cl[_cl.length - 1].close } as IndicatorSnapshot
 
-    console.log(`[Sniper] Running detectSniper on ${symbol}...`);
-    const sig = detectSniper(candles as Candle[], {} as IndicatorSnapshot, t.fundingRate, { sigmaExtreme, volumeSurgeMult })
+    console.log(`[Sniper] Running detectSniper on ${symbol}... (atr=${snap.atr})`);
+    const sig = detectSniper(_cl, snap, t.fundingRate, { sigmaExtreme, volumeSurgeMult })
     if (!sig.direction) {
       console.log(`[Sniper] ${symbol}: no signal (confidence too low or no valid setup)`);
       continue;
@@ -364,10 +431,14 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
       } catch { /* best-effort */ }
     }
 
-    await recordSniperCandidate(symbol, timeframe, bucket, t.lastPrice, sig)
-    fresh.push({ symbol, timeframe, direction: sig.direction, entry: t.lastPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence })
+    const entryPrice = _cl[_cl.length - 1].close
+    const entryTime = _cl[_cl.length - 1].time
+    await recordSniperCandidate(symbol, timeframe, bucket, entryPrice, sig, entryTime)
+      console.log(`[Sniper] ${symbol}: candidate recorded in database, bucket=${bucket}`);
+    fresh.push({ symbol, timeframe, direction: sig.direction, entry: entryPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence })
   }
 
   await resolveSniperDecisions()
+  console.log(`[Sniper] resolveSniperDecisions completed`);
   return fresh
 }
