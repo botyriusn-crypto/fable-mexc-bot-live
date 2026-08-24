@@ -17,6 +17,7 @@ import { and, eq, isNull, sql } from "drizzle-orm"
 import { type Candle, fetchDeals, computeTakerFlow } from "./mexc/public"
 import { getExchangeClient, type Exchange } from "./exchange"
 import { classifyLorentzian, combineConfirmation } from "./lorentzian"
+import { evaluateTrendRider, detectTrendState } from "./trend-rider"
 import { computeSnapshot, type FeatureVector, type IndicatorSnapshot } from "./indicators"
 import { loadModelFor, trainOnTrade, gateEntry, MODEL_IDS } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
@@ -202,7 +203,7 @@ export async function openPosition(
   snap: IndicatorSnapshot,
   confidence: number,
   features: FeatureVector,
-  strategy: "trend" | "range" | "webhook" | "scalp" | "sniper" = "trend",
+  strategy: "trend" | "range" | "webhook" | "scalp" | "sniper" | "trend_rider" = "trend",
   opts?: { sizeUsdtOverride?: number; stopLoss?: number; takeProfit?: number },
 ): Promise<number> {
   // ── Portfolio risk gate ── never ADD risk while halted / over caps.
@@ -1039,6 +1040,157 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       }
     } catch (err) {
       console.error("[Sniper] cycle error:", err)
+    }
+
+    // ── Trend Rider (4H detection + mainbar entry + daily regime gate) ──
+    // Only evaluates if enabled. Applies to the mainbar selection (cfg.symbol/cfg.timeframe).
+    if (cfg.trendRiderEnabled) {
+      try {
+        const symbol = cfg.symbol
+        const entryTf = cfg.timeframe
+        
+        // Fetch the three timeframes: entry (mainbar), signal (4H), regime (1D)
+        const [entryCandles, signalCandles, regimeCandles] = await Promise.all([
+          exchange.fetchKlines(toExchangeSymbol(symbol), entryTf, 200),
+          exchange.fetchKlines(toExchangeSymbol(symbol), "Hour4", 200),
+          exchange.fetchKlines(toExchangeSymbol(symbol), "Day1", 120),
+        ])
+
+        if (entryCandles.length < 60 || signalCandles.length < 30 || regimeCandles.length < 20) {
+          await log("warn", `TrendRider: insufficient data for ${symbol}`)
+        } else {
+          // Build no-lookahead slices (same pointer logic as backtest harness)
+          const entryTime = entryCandles[entryCandles.length - 1].time
+          const sigTfSec = 14400 // 4H in seconds
+          const regTfSec = 86400 // 1D in seconds
+
+          // Signal pointer: only include 4H candles fully closed before entryTime
+          let sigIdx = 0
+          while (sigIdx < signalCandles.length && signalCandles[sigIdx].time + sigTfSec <= entryTime) {
+            sigIdx++
+          }
+          const signalSlice = signalCandles.slice(0, sigIdx)
+
+          // Regime pointer: only include 1D candles fully closed before entryTime
+          let regIdx = 0
+          while (regIdx < regimeCandles.length && regimeCandles[regIdx].time + regTfSec <= entryTime) {
+            regIdx++
+          }
+          const regimeSlice = regimeCandles.slice(0, regIdx)
+
+          // Build the config object for evaluateTrendRider
+          const trCfg = {
+            swingLookback: 5,
+            structureWindow: 30,
+            emaSlowPeriod: 50,
+            adxPeriod: 14,
+            adxMinFloor: 22,
+            atrPeriod: 14,
+            atrStopBuffer: 0.5,
+            pullbackEmaPeriod: 21,
+            minStrength: 0.75,
+            invalidationGraceCandles: 3,
+            minTrendAge: cfg.trendRiderMinTrendAge,
+            pullbackTouchAtr: cfg.trendRiderPullbackAtr,
+            requireRejectionCandle: true,
+            chandelierAtrMult: cfg.trendRiderChandelierMult,
+            breakevenAtr: 1.0,
+            htfTrailUseSwing: true,
+            regimeAdxMin: cfg.trendRiderRegimeAdxMin,
+            regimeEmaPeriod: 20,
+          }
+
+          // Check if we have an open Trend Rider position for this symbol
+          const trPosition = openPositions.find(
+            (p) => p.symbol === symbol && p.timeframe === entryTf && p.strategy === "trend_rider"
+          )
+
+          // Reconstruct the position state from entryFeatures if it exists
+          let positionState: any = null
+          if (trPosition && trPosition.entryFeatures) {
+            positionState = {
+              side: trPosition.side as "long" | "short",
+              entryPrice: trPosition.entryPrice,
+              entryTime: trPosition.openedAt.getTime() / 1000,
+              stopPrice: trPosition.stopLoss ?? trPosition.entryPrice,
+              atrAtEntry: (trPosition.entryFeatures as any).atrAtEntry ?? 0,
+              weakStreak: (trPosition.entryFeatures as any).weakStreak ?? 0,
+              peakPrice: (trPosition.entryFeatures as any).peakPrice ?? trPosition.entryPrice,
+            }
+          }
+
+          // Evaluate the signal
+          const signal = evaluateTrendRider(
+            entryCandles,
+            signalSlice.length ? signalSlice : null,
+            positionState,
+            trCfg,
+            regimeSlice.length ? regimeSlice : null
+          )
+
+          await log("info", `TrendRider ${symbol}: ${signal.action} ${signal.side || ""} ${signal.reason}`)
+
+          // Handle the signal
+          if (signal.action === "enter" && !trPosition && signal.side) {
+            // Open a new position with Trend Rider leverage
+            const trMarketCfg = { ...cfg, leverage: cfg.trendRiderLeverage ?? cfg.leverage } as BotConfig
+            const snap = computeSnapshot(entryCandles, trMarketCfg)
+            snap.price = entryCandles[entryCandles.length - 1].close
+
+            // Compute initial structure stop (mirrors backtest harness)
+            const stateNow = detectTrendState(signalSlice.length ? signalSlice : entryCandles, null, trCfg)
+            const entryAtr = (snap.features as any).atr ?? 0
+            const initialStop =
+              stateNow.structureStopPrice != null
+                ? signal.side === "long"
+                  ? stateNow.structureStopPrice - entryAtr * trCfg.atrStopBuffer
+                  : stateNow.structureStopPrice + entryAtr * trCfg.atrStopBuffer
+                : undefined
+
+            const features: FeatureVector = {
+              ...snap.features,
+              sideLong: signal.side === "long" ? 1 : -1,
+            }
+
+            await openPosition(trMarketCfg, signal.side, snap, 0.8, features, "trend_rider", {
+              stopLoss: initialStop,
+              sizeUsdtOverride: cfg.trendRiderPositionSizeUsdt,
+            })
+            await log("trade", `TrendRider opened ${signal.side} ${symbol} stop=${initialStop?.toFixed(6) ?? "none"}`)
+          } else if (signal.action === "exit" && trPosition) {
+            // Close the position
+            const snap = computeSnapshot(entryCandles, cfg)
+            snap.price = entryCandles[entryCandles.length - 1].close
+            // Map TrendRider exit reasons to the allowed closePosition reason types
+            const exitReasonMap: Record<string, "signal" | "manual" | "partial" | "tp" | "sl" | "trail"> = {
+              "structure_stop_hit": "sl",
+              "trend_reversed": "signal",
+              "trend_invalidated": "signal",
+              "chandelier_trailed": "trail",
+              "stop_trailed_up": "trail",
+              "in_trend": "trail",
+            }
+            const mappedReason = exitReasonMap[signal.reason] || "signal"
+            await closePosition(trPosition, snap.price, mappedReason, cfg)
+            await log("trade", `TrendRider closed ${symbol}: ${signal.reason}`)
+          } else if (signal.action === "hold" && trPosition && positionState) {
+            // Update the position state (peakPrice, stopPrice, weakStreak)
+            await db
+              .update(positions)
+              .set({
+                stopLoss: positionState.stopPrice,
+                entryFeatures: {
+                  ...(trPosition.entryFeatures as any),
+                  weakStreak: positionState.weakStreak,
+                  peakPrice: positionState.peakPrice,
+                },
+              })
+              .where(eq(positions.id, trPosition.id))
+          }
+        }
+      } catch (err) {
+        await log("error", `TrendRider error: ${err instanceof Error ? err.message : String(err)}`)
+      }
     }
 
     return { status: "ok" }

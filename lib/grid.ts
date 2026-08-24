@@ -836,18 +836,28 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
 // Maker tick: fills are detected from REAL MEXC order status, not price
 // crossing. v1 intentionally omits auto-pause and auto-recenter — watch it.
 async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: BotConfig, reason: "stop-loss" | "max-hold"): Promise<void> {
-  if (order.mexcOrderId) {
-    try {
-      await cancelOrders([order.mexcOrderId])
-    } catch (err) {
-      await log("error", `Grid ${order.symbol} (maker): failed cancelling resting sell before ${reason}: ${dbErr(err)}`)
+  // PAPER MODE: no real position exists on the exchange, so skip the exchange
+  // round-trip entirely and settle locally. Hitting the exchange here would
+  // always return 2009 "Position is nonexistent" and loop forever.
+  if (cfg.mode !== "paper") {
+    if (order.mexcOrderId) {
+      try {
+        await cancelOrders([order.mexcOrderId])
+      } catch (err) {
+        await log("error", `Grid ${order.symbol} (maker): failed cancelling resting sell before ${reason}: ${dbErr(err)}`)
+      }
     }
-  }
-  try {
-    await makerMarketOrder({ symbol: order.symbol, side: 4, volume: order.quantity, leverage: order.leverage })
-  } catch (err) {
-    await log("error", `Grid ${order.symbol} (maker): ${reason} market close FAILED, will retry next tick: ${dbErr(err)}`)
-    return
+    try {
+      await makerMarketOrder({ symbol: order.symbol, side: 4, volume: order.quantity, leverage: order.leverage })
+    } catch (err) {
+      const errMsg = dbErr(err)
+      if (errMsg.includes("2009") || errMsg.includes("nonexistent")) {
+        await log("info", `Grid ${order.symbol} (maker): ${reason} close — position already gone on exchange (2009), reconciling local state`)
+      } else {
+        await log("error", `Grid ${order.symbol} (maker): ${reason} market close FAILED, will retry next tick: ${errMsg}`)
+        return
+      }
+    }
   }
 
   const buyPrice = order.buyPrice ?? order.price
@@ -902,18 +912,28 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
 
 // Maker SHORT stop-loss settlement: cancel resting buy-to-close, then close short at market.
 async function settleMakerShortStopLoss(order: GridOrder, exitPrice: number, cfg: BotConfig, reason: "stop-loss" | "max-hold"): Promise<void> {
-if (order.mexcOrderId) {
-try {
-await cancelOrders([order.mexcOrderId])
-} catch (err) {
-await log("error", `Grid ${order.symbol} (maker short): failed cancelling resting buy before ${reason}: ${dbErr(err)}`)
-}
-}
-try {
-await makerMarketOrder({ symbol: order.symbol, side: 2, volume: order.quantity, leverage: order.leverage })
-} catch (err) {
-await log("error", `Grid ${order.symbol} (maker short): ${reason} market close FAILED, will retry next tick: ${dbErr(err)}`)
-return
+// PAPER MODE: no real position exists on the exchange, so skip the exchange
+// round-trip entirely and settle locally. Hitting the exchange here would
+// always return 2009 "Position is nonexistent" and loop forever.
+if (cfg.mode !== "paper") {
+  if (order.mexcOrderId) {
+    try {
+      await cancelOrders([order.mexcOrderId])
+    } catch (err) {
+      await log("error", `Grid ${order.symbol} (maker short): failed cancelling resting buy before ${reason}: ${dbErr(err)}`)
+    }
+  }
+  try {
+    await makerMarketOrder({ symbol: order.symbol, side: 2, volume: order.quantity, leverage: order.leverage })
+  } catch (err) {
+    const errMsg = dbErr(err)
+    if (errMsg.includes("2009") || errMsg.includes("nonexistent")) {
+      await log("info", `Grid ${order.symbol} (maker short): ${reason} close — position already gone on exchange (2009), reconciling local state`)
+    } else {
+      await log("error", `Grid ${order.symbol} (maker short): ${reason} market close FAILED, will retry next tick: ${errMsg}`)
+      return
+    }
+  }
 }
 const entryPrice = order.buyPrice ?? order.price
 const sizeUsdt = (entryPrice * order.quantity) / order.leverage

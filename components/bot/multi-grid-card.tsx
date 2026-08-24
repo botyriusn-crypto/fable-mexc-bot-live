@@ -643,7 +643,14 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
         <div className="flex items-center gap-1 mr-2" title="Available balance vs equity">
           {(() => {
             const live = state.liveAccount && !("error" in state.liveAccount) ? state.liveAccount : null
-            const available = live ? live.availableBalance : state.config.paperBalance
+            const committedMargin =
+              (state.openPositions ?? []).reduce((s, p) => s + Number(p.sizeUsdt ?? 0), 0) +
+              (state.grid?.allOrders ?? []).reduce((s, o) => {
+                const lev = Number(o.leverage ?? 1) || 1
+                const notional = (o.buyPrice != null ? Number(o.buyPrice) : Number(o.price)) * Number(o.quantity)
+                return s + notional / lev
+              }, 0)
+            const available = live ? live.availableBalance : Math.max(0, state.config.paperBalance - committedMargin)
             const equity = live ? live.equity : state.equity
             const availPct = equity > 0 ? Math.round((available / equity) * 100) : 0
             const color = availPct >= 40 ? "text-success border-success/40 bg-success/10" : availPct >= 20 ? "text-chart-3 border-chart-3/40 bg-chart-3/10" : "text-danger border-danger/40 bg-danger/10"

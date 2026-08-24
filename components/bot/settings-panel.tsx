@@ -91,6 +91,15 @@ const SNIPER_FIELDS: FieldDef[] = [
     { key: "sniperTpSlRatio", label: "Sniper TP:SL ratio (R)", step: "0.5" },
 ]
 
+const TREND_RIDER_FIELDS: FieldDef[] = [
+  { key: "trendRiderPositionSizeUsdt", label: "Position size (USDT)" },
+  { key: "trendRiderLeverage", label: "Leverage", step: "1" },
+  { key: "trendRiderPullbackAtr", label: "Pullback depth (× ATR)", step: "0.1" },
+  { key: "trendRiderMinTrendAge", label: "Min trend age (4H candles)", step: "1" },
+  { key: "trendRiderChandelierMult", label: "Chandelier trail (× ATR)", step: "0.5" },
+  { key: "trendRiderRegimeAdxMin", label: "Regime ADX floor (daily)", step: "1" },
+]
+
 export function SettingsPanel({ state }: { state: BotState }) {
   const { mutate } = useSWRConfig()
   const cfg = state.config
@@ -187,40 +196,30 @@ export function SettingsPanel({ state }: { state: BotState }) {
         <CardTitle className="text-sm font-medium text-muted-foreground">Strategy Settings</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        <div className="flex flex-col gap-1">
-          <Label className="text-xs text-muted-foreground">Strategy mode</Label>
-          <div className="flex gap-1">
-            {STRATEGY_MODES.map((m) => (
-              <Button
-                key={m.value}
-                size="sm"
-                variant={cfg.strategyMode === m.value ? "default" : "outline"}
-                className="h-7 flex-1 px-2 text-xs"
-                onClick={async () => {
-                  try {
-                    await updateConfig({ strategyMode: m.value })
-                    await mutate("/api/bot/status")
-                  } catch (err) {
-                    setError(err instanceof Error ? err.message : "Update failed")
-                  }
-                }}
-              >
-                {m.label}
-              </Button>
-            ))}
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-xs font-medium text-muted-foreground block">🎯 Trend Rider</span>
+            <span className="text-xs leading-relaxed text-muted-foreground">4H trend detection + 15m entry + daily regime gate</span>
           </div>
-          <span className="text-xs leading-relaxed text-muted-foreground">
-            Auto: EMA crossover when trending (ADX high), Bollinger mean-reversion when ranging (ADX low)
-          </span>
+          <Switch
+            id="trendRiderEnabled"
+            checked={Boolean(cfg.trendRiderEnabled)}
+            onCheckedChange={(c) => toggleBool("trendRiderEnabled", c)}
+          />
         </div>
-
-        {renderFields(STRATEGY_FIELDS)}
-        <Separator />
-        <span className="text-xs font-medium text-muted-foreground">Regime detection & range strategy</span>
-        {renderFields(REGIME_FIELDS)}
-        <Separator />
-        <span className="text-xs font-medium text-muted-foreground">Adaptive exits</span>
-        {renderFields(EXIT_FIELDS)}
+        {cfg.trendRiderEnabled && renderFields(TREND_RIDER_FIELDS)}
+        {cfg.trendRiderEnabled && (
+          <div className="flex items-center justify-between">
+            <Label htmlFor="trendRiderRegimeGate" className="text-xs text-muted-foreground">
+              Regime gate (sit out ranging coins)
+            </Label>
+            <Switch
+              id="trendRiderRegimeGate"
+              checked={Boolean(cfg.trendRiderRegimeGate)}
+              onCheckedChange={(c) => toggleBool("trendRiderRegimeGate", c)}
+            />
+          </div>
+        )}
         <Separator />
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between gap-3">
@@ -291,55 +290,6 @@ export function SettingsPanel({ state }: { state: BotState }) {
               </div>
             </div>
           )}
-        </div>
-        <Separator />
-        <span className="text-xs font-medium text-muted-foreground">Logistic model</span>
-        {renderFields(ML_FIELDS)}
-        <Separator />
-        <div className="flex flex-col gap-2">
-          <div className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-muted-foreground">Entry confirmation</span>
-            <span className="text-xs leading-relaxed text-muted-foreground">
-              Independent from Trend/Range. Observe records Lorentzian decisions while logistic still controls entries.
-            </span>
-          </div>
-          <div className="grid grid-cols-2 gap-1">
-            {CONFIRMATION_MODES.map((mode) => (
-              <Button
-                key={mode.value}
-                size="sm"
-                variant={cfg.confirmationMode === mode.value ? "default" : "outline"}
-                className="h-7 px-2 text-xs"
-                onClick={async () => {
-                  try {
-                    await updateConfig({ confirmationMode: mode.value })
-                    await mutate("/api/bot/status")
-                  } catch (err) {
-                    setError(err instanceof Error ? err.message : "Update failed")
-                  }
-                }}
-              >
-                {mode.label}
-              </Button>
-            ))}
-          </div>
-          {renderFields(LORENTZIAN_FIELDS)}
-          {[
-            ["lorentzianUseVolatilityFilter", "Volatility filter"],
-            ["lorentzianUseRegimeFilter", "Regime filter"],
-            ["lorentzianUseAdxFilter", "ADX filter"],
-            ["lorentzianKernelFilter", "Kernel direction filter"],
-            ["lorentzianWebhooks", "Apply confirmation to webhooks"],
-          ].map(([key, label]) => (
-            <div key={key} className="flex items-center justify-between gap-3">
-              <Label htmlFor={key} className="text-xs text-muted-foreground">{label}</Label>
-              <Switch
-                id={key}
-                checked={Boolean((cfg as unknown as Record<string, unknown>)[key])}
-                onCheckedChange={(checked) => toggleBool(key, checked)}
-              />
-            </div>
-          ))}
         </div>
         <Separator />
         {renderFields(SIZE_FIELDS)}

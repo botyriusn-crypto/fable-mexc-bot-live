@@ -157,7 +157,8 @@ export async function GET() {
       grid: { unrealized: 0, count: 0 },
       sniper: { unrealized: 0, count: 0 },
       swing: { unrealized: 0, count: 0 },
-      trend: { unrealized: 0, count: 0 }
+      trend: { unrealized: 0, count: 0 },
+      trend_rider: { unrealized: 0, count: 0 }
     }
     
     for (const p of filteredOpenPosRows) {

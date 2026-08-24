@@ -46,6 +46,12 @@ const NUMERIC_FIELDS = [
   "sniperMomentumThreshold",
   "sniperTrailAtrMult",
   "sniperTargetRiskUsdt",
+  "trendRiderPositionSizeUsdt",
+  "trendRiderLeverage",
+  "trendRiderPullbackAtr",
+  "trendRiderMinTrendAge",
+  "trendRiderChandelierMult",
+  "trendRiderRegimeAdxMin",
 ] as const
 
 const STRATEGY_MODES = ["auto", "trend", "range"] as const
@@ -63,6 +69,8 @@ const BOOL_FIELDS = [
   "lorentzianWebhooks",
   "aiAdvisorEnabled",
   "sniperLive",
+  "trendRiderEnabled",
+  "trendRiderRegimeGate",
 ] as const
 
 export async function POST(request: Request) {
