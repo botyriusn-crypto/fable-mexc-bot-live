@@ -1128,7 +1128,10 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
             regimeSlice.length ? regimeSlice : null
           )
 
-          await log("info", `TrendRider ${symbol}: ${signal.action} ${signal.side || ""} ${signal.reason}`)
+          // Only log actionable signals to avoid spamming the activity log
+          if (signal.action !== "none") {
+            await log("info", `TrendRider ${symbol}: ${signal.action} ${signal.side || ""} ${signal.reason}`)
+          }
 
           // Handle the signal
           if (signal.action === "enter" && !trPosition && signal.side) {
