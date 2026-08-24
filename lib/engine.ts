@@ -743,13 +743,13 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
                 finalAllowed: confirmation.allowed,
                 reason,
               }).onConflictDoNothing()
-              await log("info", `SCALP ${scalp.direction.toUpperCase()} candidate: ${reason}`, {
-                scalpConfluence: scalp.confidence,
-                mlConfidence: mlConf,
-                lorentzianConfidence: lorentzian.confidence,
-                rMultiple: scalp.rMultiple,
-              })
               if (confirmation.allowed) {
+                await log("info", `SCALP ${scalp.direction.toUpperCase()} candidate: ${reason}`, {
+                  scalpConfluence: scalp.confidence,
+                  mlConfidence: mlConf,
+                  lorentzianConfidence: lorentzian.confidence,
+                  rMultiple: scalp.rMultiple,
+                })
                 await openPosition(marketCfg, scalp.direction, snap, blended, scalpFeatures, "scalp", {
                   sizeUsdtOverride: scalp.suggestedSizeUsdt ?? undefined,
                   stopLoss: scalp.stopLoss ?? undefined,
@@ -790,13 +790,13 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
               finalAllowed: confirmation.allowed,
               reason,
             }).onConflictDoNothing()
-            await log("info", `${signal.candidateDirection.toUpperCase()} [${signal.strategy}] candidate: ${reason}`, {
-              logisticConfidence: signal.confidence,
-              lorentzianConfidence: lorentzian.confidence,
-              lorentzianVote: lorentzian.vote,
-              confirmationMode: marketCfg.confirmationMode,
-            })
             if (confirmation.allowed) {
+              await log("info", `${signal.candidateDirection.toUpperCase()} [${signal.strategy}] candidate: ${reason}`, {
+                logisticConfidence: signal.confidence,
+                lorentzianConfidence: lorentzian.confidence,
+                lorentzianVote: lorentzian.vote,
+                confirmationMode: marketCfg.confirmationMode,
+              })
               const advCfg = advancedConfigFromBot(marketCfg)
               const candlesByTf: Record<string, Candle[]> = { [timeframe]: candles }
               if (advCfg.mtfEnabled && advCfg.htfTimeframe && advCfg.htfTimeframe !== timeframe) {
