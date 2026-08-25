@@ -1,3 +1,4 @@
+let _lastRiskHaltState: string | null = null
 // Tick orchestration: data → features → ML-gated signal → exit management →
 // paper/live execution → model update → persistence.
 
@@ -137,7 +138,7 @@ async function getOpenPosition(symbol?: string, timeframe?: string): Promise<Pos
   return rows.find((p) => (!symbol || p.symbol === symbol) && (!timeframe || p.timeframe === timeframe)) ?? null
 }
 
-function unrealizedPnl(position: Position, markPrice: number): number {
+export function unrealizedPnl(position: Position, markPrice: number): number {
   const dir = position.side === "long" ? 1 : -1
   const qty = position.remainingQuantity ?? position.quantity
   return (markPrice - position.entryPrice) * dir * qty
@@ -607,10 +608,18 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     // exits / stop-losses / teardowns below still run normally.
     const risk = await evaluatePortfolioRisk(cfg)
     if (risk.tradingHalted) {
-      await log(
-        "info",
-        `⚠️ Risk layer HALTED new trades — ${risk.reasons.join("; ")} | equity ${risk.equity.toFixed(2)} day ${risk.dailyPnlPct >= 0 ? "+" : ""}${(risk.dailyPnlPct * 100).toFixed(1)}% dd ${(risk.drawdownPct * 100).toFixed(1)}%`,
-      )
+      // Only log when halt state changes (dedup spam)
+      const currentHaltState = risk.reasons.join("|")
+      if (currentHaltState !== _lastRiskHaltState) {
+        await log(
+          "info",
+          `⚠️ Risk layer HALTED new trades — ${risk.reasons.join("; ")} | equity ${risk.equity.toFixed(2)} day ${risk.dailyPnlPct >= 0 ? "+" : ""}${(risk.dailyPnlPct * 100).toFixed(1)}% dd ${(risk.drawdownPct * 100).toFixed(1)}%`,
+        )
+        _lastRiskHaltState = currentHaltState
+      }
+    } else {
+      // Reset when trading resumes
+      _lastRiskHaltState = null
     }
 
     // Separate models per entry style so each learns its own edge (see MODEL_IDS):
@@ -881,9 +890,13 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       if (mark != null) totalUnrealized += await gridUnrealizedPnl(mark, symbol, timeframe)
     }
 
-    try {
-      await maybeRunGridAiAdvisorAuto()
-    } catch (err) { /* best-effort */ }
+    // DISABLED: auto grid advisor. This was auto-building + enabling new grids
+    // on every tick (runGridAiAdvisor(true) with autoApply), which kept adding
+    // coins and over-budgeting. Manual AI Advisor (the UI button) still works.
+    // Re-enable by uncommenting the call below.
+    // try {
+    //   await maybeRunGridAiAdvisorAuto()
+    // } catch (err) { /* best-effort */ }
 
     // ── AI Advisor: run analysis on schedule ──
     if (cfg.aiAdvisorEnabled && cfg.aiAnalysisSchedule !== "manual") {

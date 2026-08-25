@@ -102,6 +102,19 @@ export async function PATCH(request: Request) {
     if (!symbol || !timeframe) {
       return NextResponse.json({ error: "symbol and timeframe required" }, { status: 400 })
     }
+
+    // Guard: budgetPct is a PERCENTAGE (0-100). A dollar amount (e.g. 6387.7)
+    // written here caused the 2.25M-coin over-sizing. Reject out-of-range values.
+    if (updates.budgetPct !== undefined) {
+      const b = Number(updates.budgetPct)
+      if (!Number.isFinite(b) || b <= 0 || b > 100) {
+        return NextResponse.json(
+          { error: `budgetPct must be a percentage between 0 and 100 (got ${updates.budgetPct})` },
+          { status: 400 }
+        )
+      }
+      updates.budgetPct = b
+    }
     const cfg = await db.select().from(gridConfigs)
       .where(and(eq(gridConfigs.symbol, symbol), eq(gridConfigs.timeframe, timeframe)))
       .limit(1)

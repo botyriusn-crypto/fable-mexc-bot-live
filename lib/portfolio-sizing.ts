@@ -193,8 +193,14 @@ export async function computePortfolioRebalance(timeframe = "Min15"): Promise<Re
       : totalBudgetCap / risks.length
 
     // Dampen: clamp the move to +/- MAX_DELTA_PCT_PER_RUN from where it is now.
-    const dampedLo = r.currentBudgetPct - MAX_DELTA_PCT_PER_RUN
-    const dampedHi = r.currentBudgetPct + MAX_DELTA_PCT_PER_RUN
+    // Sanitize the anchor first: a corrupted currentBudgetPct (e.g. a dollar
+    // amount like 6387.7 stored in a percent field) must not anchor the
+    // dampening window, or the rebalancer can never pull it back down.
+    const saneCurrent = Number.isFinite(r.currentBudgetPct) && r.currentBudgetPct > 0 && r.currentBudgetPct <= MAX_BUDGET_PCT
+      ? r.currentBudgetPct
+      : MAX_BUDGET_PCT
+    const dampedLo = saneCurrent - MAX_DELTA_PCT_PER_RUN
+    const dampedHi = saneCurrent + MAX_DELTA_PCT_PER_RUN
     target = clamp(target, dampedLo, dampedHi)
 
     const gc = enabled.find((g) => g.symbol === r.symbol)!
