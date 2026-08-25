@@ -52,6 +52,13 @@ const NUMERIC_FIELDS = [
   "trendRiderMinTrendAge",
   "trendRiderChandelierMult",
   "trendRiderRegimeAdxMin",
+  "fundingCarryThreshold",
+  "fundingCarryMomentumLookbackSec",
+  "fundingCarryHorizonSec",
+  "fundingCarrySizeUsdt",
+  "fundingCarryLeverage",
+  "fundingCarryTpBps",
+  "fundingCarrySlBps",
 ] as const
 
 const STRATEGY_MODES = ["auto", "trend", "range"] as const
@@ -71,6 +78,7 @@ const BOOL_FIELDS = [
   "sniperLive",
   "trendRiderEnabled",
   "trendRiderRegimeGate",
+  "fundingCarryEnabled",
 ] as const
 
 export async function POST(request: Request) {

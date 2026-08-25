@@ -77,28 +77,6 @@ const EXCHANGES = [
 ] as const
 
 const SIZE_FIELDS: FieldDef[] = [{ key: "positionSizeUsdt", label: "Position size (USDT)" }]
-const SNIPER_FIELDS: FieldDef[] = [
-  { key: "sniperMaxEntries", label: "Sniper max entries", step: "1" },
-  { key: "sniperPositionSizeUsdt", label: "Sniper position size (USDT)" },
-  { key: "sniperLeverage", label: "Sniper leverage", step: "1" },
-  { key: "sniperConfidenceFloor", label: "Sniper min confidence", step: "0.05" },
-  { key: "sniperCorrThreshold", label: "Sniper correlation threshold", step: "0.05" },
-  { key: "sniperSigmaExtreme", label: "Sniper sigma extreme", step: "0.1" },
-  { key: "sniperVolumeSurgeMult", label: "Sniper volume surge ×", step: "0.1" },
-  { key: "sniperMinVolumeUsdt", label: "Sniper min volume (USDT)" },
-  { key: "sniperTargetRiskUsdt", label: "Sniper target risk (USDT)", step: "0.5" },
-    { key: "sniperMinStopPct", label: "Sniper min stop distance (%)", step: "0.1", multiplier: 100 },
-    { key: "sniperTpSlRatio", label: "Sniper TP:SL ratio (R)", step: "0.5" },
-]
-
-const TREND_RIDER_FIELDS: FieldDef[] = [
-  { key: "trendRiderPositionSizeUsdt", label: "Position size (USDT)" },
-  { key: "trendRiderLeverage", label: "Leverage", step: "1" },
-  { key: "trendRiderPullbackAtr", label: "Pullback depth (× ATR)", step: "0.1" },
-  { key: "trendRiderMinTrendAge", label: "Min trend age (4H candles)", step: "1" },
-  { key: "trendRiderChandelierMult", label: "Chandelier trail (× ATR)", step: "0.5" },
-  { key: "trendRiderRegimeAdxMin", label: "Regime ADX floor (daily)", step: "1" },
-]
 
 export function SettingsPanel({ state }: { state: BotState }) {
   const { mutate } = useSWRConfig()
@@ -107,10 +85,11 @@ export function SettingsPanel({ state }: { state: BotState }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
-  const [applying, setApplying] = useState(false)
   const [aiResult, setAiResult] = useState<any>(null)
   const [aiError, setAiError] = useState<string | null>(null)
   const [confirmLive, setConfirmLive] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<any>(null)
 
   const value = (key: string) =>
     form[key] ?? String((cfg as unknown as Record<string, unknown>)[key] ?? "")
@@ -196,30 +175,54 @@ export function SettingsPanel({ state }: { state: BotState }) {
         <CardTitle className="text-sm font-medium text-muted-foreground">Strategy Settings</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <span className="text-xs font-medium text-muted-foreground block">🎯 Trend Rider</span>
-            <span className="text-xs leading-relaxed text-muted-foreground">4H trend detection + 15m entry + daily regime gate</span>
+        <div className="flex flex-col gap-1">
+          <Label className="text-xs text-muted-foreground">Strategy mode</Label>
+          <div className="flex gap-1">
+            {STRATEGY_MODES.map((m) => (
+              <Button
+                key={m.value}
+                size="sm"
+                variant={cfg.strategyMode === m.value ? "default" : "outline"}
+                className="h-7 flex-1 px-2 text-xs"
+                onClick={async () => {
+                  try {
+                    await updateConfig({ strategyMode: m.value })
+                    await mutate("/api/bot/status")
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : "Update failed")
+                  }
+                }}
+              >
+                {m.label}
+              </Button>
+            ))}
           </div>
-          <Switch
-            id="trendRiderEnabled"
-            checked={Boolean(cfg.trendRiderEnabled)}
-            onCheckedChange={(c) => toggleBool("trendRiderEnabled", c)}
-          />
+          <span className="text-xs leading-relaxed text-muted-foreground">
+            Auto: EMA crossover when trending (ADX high), Bollinger mean-reversion when ranging (ADX low)
+          </span>
         </div>
-        {cfg.trendRiderEnabled && renderFields(TREND_RIDER_FIELDS)}
-        {cfg.trendRiderEnabled && (
-          <div className="flex items-center justify-between">
-            <Label htmlFor="trendRiderRegimeGate" className="text-xs text-muted-foreground">
-              Regime gate (sit out ranging coins)
-            </Label>
+
+        {renderFields(STRATEGY_FIELDS)}
+        <Separator />
+        <span className="text-xs font-medium text-muted-foreground">Regime detection & range strategy</span>
+        {renderFields(REGIME_FIELDS)}
+        <Separator />
+        <span className="text-xs font-medium text-muted-foreground">Adaptive exits</span>
+        {renderFields(EXIT_FIELDS)}
+        <Separator />
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <span className="text-xs font-medium text-muted-foreground block">Bybit Funding Trading</span>
+              <span className="text-xs leading-relaxed text-muted-foreground">Fades extreme funding when it rolls over (live-only, settlement-triggered)</span>
+            </div>
             <Switch
-              id="trendRiderRegimeGate"
-              checked={Boolean(cfg.trendRiderRegimeGate)}
-              onCheckedChange={(c) => toggleBool("trendRiderRegimeGate", c)}
+              id="fundingCarryEnabled"
+              checked={Boolean(cfg.fundingCarryEnabled)}
+              onCheckedChange={(checked) => toggleBool("fundingCarryEnabled", checked)}
             />
           </div>
-        )}
+        </div>
         <Separator />
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between gap-3">
@@ -233,20 +236,6 @@ export function SettingsPanel({ state }: { state: BotState }) {
                 {aiResult.recommendations.map((rec: any, i: number) => (
                   <div key={i} className="text-xs"><span className="font-medium">{rec.field}:</span> {String(rec.current)} → {String(rec.suggested)} — {rec.reason}</div>
                 ))}
-                <Button size="sm" variant="default" className="h-6 px-2 text-xs mt-1" disabled={applying} onClick={async () => {
-                  setApplying(true); setAiError(null)
-                  try {
-                    const res = await fetch("/api/bot/ai-apply", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ recommendations: aiResult.recommendations }),
-                    })
-                    const data = await res.json()
-                    if (data.error) { setAiError(data.error) }
-                    else { setAiResult(null); await mutate("/api/bot/status") }
-                  } catch (err) { setAiError(err instanceof Error ? err.message : "Apply failed") }
-                  finally { setApplying(false) }
-                }}>{applying ? "Applying…" : "Apply Recommendations"}</Button>
               </div>
             )}
             </div>
@@ -292,6 +281,55 @@ export function SettingsPanel({ state }: { state: BotState }) {
           )}
         </div>
         <Separator />
+        <span className="text-xs font-medium text-muted-foreground">Logistic model</span>
+        {renderFields(ML_FIELDS)}
+        <Separator />
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-muted-foreground">Entry confirmation</span>
+            <span className="text-xs leading-relaxed text-muted-foreground">
+              Independent from Trend/Range. Observe records Lorentzian decisions while logistic still controls entries.
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-1">
+            {CONFIRMATION_MODES.map((mode) => (
+              <Button
+                key={mode.value}
+                size="sm"
+                variant={cfg.confirmationMode === mode.value ? "default" : "outline"}
+                className="h-7 px-2 text-xs"
+                onClick={async () => {
+                  try {
+                    await updateConfig({ confirmationMode: mode.value })
+                    await mutate("/api/bot/status")
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : "Update failed")
+                  }
+                }}
+              >
+                {mode.label}
+              </Button>
+            ))}
+          </div>
+          {renderFields(LORENTZIAN_FIELDS)}
+          {[
+            ["lorentzianUseVolatilityFilter", "Volatility filter"],
+            ["lorentzianUseRegimeFilter", "Regime filter"],
+            ["lorentzianUseAdxFilter", "ADX filter"],
+            ["lorentzianKernelFilter", "Kernel direction filter"],
+            ["lorentzianWebhooks", "Apply confirmation to webhooks"],
+          ].map(([key, label]) => (
+            <div key={key} className="flex items-center justify-between gap-3">
+              <Label htmlFor={key} className="text-xs text-muted-foreground">{label}</Label>
+              <Switch
+                id={key}
+                checked={Boolean((cfg as unknown as Record<string, unknown>)[key])}
+                onCheckedChange={(checked) => toggleBool(key, checked)}
+              />
+            </div>
+          ))}
+        </div>
+        <Separator />
         {renderFields(SIZE_FIELDS)}
 
         <div className="flex items-center justify-between">
@@ -306,13 +344,6 @@ export function SettingsPanel({ state }: { state: BotState }) {
           </Label>
           <Switch id="allow-short" checked={cfg.allowShort} onCheckedChange={(c) => toggleBool("allowShort", c)} />
         </div>
-        <div className="flex items-center justify-between">
-          <Label htmlFor="sniper-live" className="text-xs text-muted-foreground">
-            Sniper live
-          </Label>
-          <Switch id="sniper-live" checked={Boolean(cfg.sniperLive)} onCheckedChange={(c) => toggleBool("sniperLive", c)} />
-        </div>
-        {renderFields(SNIPER_FIELDS)}
 
         <Button size="sm" onClick={handleSave} disabled={saving || Object.keys(form).length === 0}>
           {saving ? "Saving…" : "Save Settings"}
@@ -346,6 +377,34 @@ export function SettingsPanel({ state }: { state: BotState }) {
               </Button>
             ))}
           </div>
+
+          <Button
+            size="sm"
+            variant="secondary"
+            className="h-7 px-2 text-xs"
+            disabled={testing}
+            onClick={async () => {
+              setTesting(true)
+              setTestResult(null)
+              try {
+                const res = await fetch("/api/bot/diagnose")
+                const data = await res.json()
+                setTestResult(data)
+              } catch (err) {
+                setTestResult({ error: err instanceof Error ? err.message : "Test failed" })
+              } finally {
+                setTesting(false)
+              }
+            }}
+          >
+            {testing ? "Testing…" : "Test connection"}
+          </Button>
+
+          {testResult && (
+            <div className="rounded-md border border-muted bg-muted/20 p-2 text-xs font-mono whitespace-pre-wrap">
+              {JSON.stringify(testResult, null, 2)}
+            </div>
+          )}
         </div>
 
         <Separator />

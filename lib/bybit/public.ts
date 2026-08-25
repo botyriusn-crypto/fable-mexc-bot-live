@@ -52,3 +52,24 @@ function convertInterval(interval: string): string {
   }
   return map[interval] ?? "5"
 }
+
+// Current funding rate for a linear symbol (decimal, e.g. 0.0001 = 0.01%).
+export async function getFundingRate(symbol: string): Promise<number> {
+  const url = `${BASE_URL}/market/tickers?category=linear&symbol=${toBybitSymbol(symbol)}`
+  const res = await fetch(url, { cache: "no-store", headers: HEADERS })
+  if (!res.ok) throw new Error(`Bybit funding fetch failed: ${res.status}`)
+  const json = await res.json() as any
+  const t = json.result?.list?.[0]
+  if (!t) throw new Error("Bybit funding response invalid")
+  return Number(t.fundingRate || 0)
+}
+
+// Recent funding history, oldest -> newest (decimal rates).
+export async function getFundingHistory(symbol: string, limit = 20): Promise<number[]> {
+  const url = `${BASE_URL}/market/funding/history?category=linear&symbol=${toBybitSymbol(symbol)}&limit=${limit}`
+  const res = await fetch(url, { cache: "no-store", headers: HEADERS })
+  if (!res.ok) throw new Error(`Bybit funding history fetch failed: ${res.status}`)
+  const json = await res.json() as any
+  const list = json.result?.list || []
+  return list.map((e: any) => Number(e.fundingRate)).reverse()
+}
