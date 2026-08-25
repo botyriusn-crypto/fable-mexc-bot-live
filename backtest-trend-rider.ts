@@ -7,7 +7,7 @@
 //   tsx backtest-trend-rider.ts --symbol WLD_USDT --timeframe Min15 --days 10 --leverage 3
 
 import { evaluateTrendRider, detectTrendState, DEFAULT_TREND_RIDER_CONFIG, type TrendRiderPosition, type TrendRiderConfig } from "./lib/trend-rider"
-import { atr } from "./lib/indicators"
+import { atr, adx } from "./lib/indicators"
 import type { Candle } from "./lib/mexc/public"
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -30,6 +30,7 @@ interface CliArgs {
   htfSwing: boolean
   regimeTf: string
   adxFloor: number
+  sweep: boolean
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -52,6 +53,7 @@ function parseArgs(argv: string[]): CliArgs {
     htfSwing: true,
     regimeTf: "Day1",
     adxFloor: 22,
+    sweep: false,
   }
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i]
@@ -78,6 +80,7 @@ function parseArgs(argv: string[]): CliArgs {
       case "--min-trend-age": a.minTrendAge = Number(v); i++; break
       case "--htf-swing": a.htfSwing = v === "true"; i++; break
       case "--regime-tf": a.regimeTf = v; i++; break
+      case "--sweep": a.sweep = true; break
     }
   }
   return a
@@ -149,6 +152,9 @@ interface TradeRecord {
   exitTime: number
   pnl: number
   reason: string
+  entryAdx: number
+  entryRegime: "trending" | "ranging" | "unknown"
+  entryTrendAge: number
 }
 
 function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCandles: Candle[], args: CliArgs): TradeRecord[] {
@@ -178,6 +184,9 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
   let sigIdx = 0
   let regIdx = 0
   let verificationCount = 0
+  let entryAdx = 0
+  let entryRegime: "trending" | "ranging" | "unknown" = "unknown"
+  let entryTrendAge = 0
   
   for (let i = minStart; i < entryCandles.length; i++) {
     const entrySlice = entryCandles.slice(0, i + 1)
@@ -237,6 +246,18 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
           ? stateNow.structureStopPrice - lastAtrAtEntry * cfg.atrStopBuffer
           : stateNow.structureStopPrice + lastAtrAtEntry * cfg.atrStopBuffer
 
+      // Diagnostic capture (step 1): ADX + regime + trend age at entry
+      const entryAdxArr = adx(signalSlice.length ? signalSlice : entrySlice, cfg.adxPeriod)
+      entryAdx = entryAdxArr[entryAdxArr.length - 1] ?? 0
+      entryRegime = "unknown"
+      if (regimeSlice.length >= cfg.regimeEmaPeriod + cfg.adxPeriod) {
+        const rAdx = adx(regimeSlice, cfg.adxPeriod)
+        const rLastAdx = rAdx[rAdx.length - 1] ?? 0
+        entryRegime = rLastAdx >= cfg.regimeAdxMin ? "trending" : "ranging"
+      }
+      const ageMatch = /age=(\d+)/.exec(signal.reason)
+      entryTrendAge = ageMatch ? Number(ageMatch[1]) : 0
+
       position = {
         side: signal.side,
         entryPrice: entryFillPrice,
@@ -265,6 +286,9 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
         exitTime: entryTime,
         pnl,
         reason: signal.reason,
+        entryAdx,
+        entryRegime,
+        entryTrendAge,
       })
       position = null
     }
@@ -350,6 +374,95 @@ function report(trades: TradeRecord[], label: string, notional: number) {
     const pnl = arr.reduce((s, t) => s + t.pnl, 0)
     console.log(`    ${side.padEnd(20)} n=${arr.length}  win=${wr.toFixed(1)}%  pnl=${pnl.toFixed(2)}`)
   }
+
+  console.log("\n  Per-side x regime:")
+  for (const side of ["long", "short"] as const) {
+    for (const regime of ["trending", "ranging", "unknown"] as const) {
+      const arr = trades.filter((t) => t.side === side && t.entryRegime === regime)
+      if (arr.length === 0) continue
+      const wr = (arr.filter((t) => t.pnl > 0).length / arr.length) * 100
+      const pnl = arr.reduce((s, t) => s + t.pnl, 0)
+      console.log(`    ${side.padEnd(6)} ${regime.padEnd(9)} n=${arr.length}  win=${wr.toFixed(1)}%  pnl=${pnl.toFixed(2)}`)
+    }
+  }
+
+  console.log("\n  Per-side x ADX bucket (signal-TF ADX at entry):")
+  const buckets = [
+    { label: "<22", lo: -Infinity, hi: 22 },
+    { label: "22-30", lo: 22, hi: 30 },
+    { label: "30-40", lo: 30, hi: 40 },
+    { label: ">40", lo: 40, hi: Infinity },
+  ]
+  for (const side of ["long", "short"] as const) {
+    for (const b of buckets) {
+      const arr = trades.filter((t) => t.side === side && t.entryAdx >= b.lo && t.entryAdx < b.hi)
+      if (arr.length === 0) continue
+      const wr = (arr.filter((t) => t.pnl > 0).length / arr.length) * 100
+      const pnl = arr.reduce((s, t) => s + t.pnl, 0)
+      console.log(`    ${side.padEnd(6)} ADX${b.label.padEnd(6)} n=${arr.length}  win=${wr.toFixed(1)}%  pnl=${pnl.toFixed(2)}`)
+    }
+  }
+}
+
+function summarize(trades: TradeRecord[], notional: number) {
+  if (trades.length === 0) return null
+  const wins = trades.filter((t) => t.pnl > 0)
+  const losses = trades.filter((t) => t.pnl <= 0)
+  const winRate = wins.length / trades.length
+  const totalPnl = trades.reduce((s, t) => s + t.pnl, 0)
+  const grossWin = wins.reduce((s, t) => s + t.pnl, 0)
+  const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0))
+  const pf = grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? Infinity : 0
+  const expectancy = totalPnl / trades.length
+  let equity = notional
+  let peak = notional
+  let maxDD = 0
+  for (const t of trades) {
+    equity += t.pnl
+    peak = Math.max(peak, equity)
+    maxDD = Math.max(maxDD, peak > 0 ? (peak - equity) / peak : 0)
+  }
+  return { n: trades.length, winRate, pf, expectancy, totalPnl, maxDD }
+}
+
+function runSweep(entryCandles: Candle[], signalCandles: Candle[], regimeCandles: Candle[], args: CliArgs) {
+  // Focused grid on the two "ride the trend" levers. pullbackAtr and
+  // minTrendAge are entry filters (not exit/ride levers), so hold them fixed
+  // at the validated values to keep the sweep tractable.
+  const chandelierMults = [2.5, 3.0, 4.0, 5.0, 6.0]
+  const breakevenAtrs = [1.0, 2.0, 3.0, 4.0]
+
+  console.log("\n" + "═".repeat(96))
+  console.log("  PARAMETER SWEEP - chandelierMult x breakevenAtr (pullback=0.3, age=3 fixed)")
+  console.log("═".repeat(96))
+  console.log("  chand  beAtr   n    win%    PF     exp    PnL     maxDD")
+  console.log("  " + "─".repeat(88))
+
+  let best: { ch: number; be: number; pf: number; totalPnl: number } | null = null
+
+  for (const ch of chandelierMults) {
+    for (const be of breakevenAtrs) {
+      const a: CliArgs = { ...args, chandelierMult: ch, breakevenAtr: be, pullbackAtr: 0.3, minTrendAge: 3 }
+      const trades = runBacktest(entryCandles, signalCandles, regimeCandles, a)
+      const s = summarize(trades, 1000)
+      if (!s) {
+        console.log(`  ${ch.toFixed(1).padStart(5)}  ${be.toFixed(1).padStart(5)}   ${"0".padStart(3)}  ${"0.0%".padStart(6)}  ${"0.00".padStart(6)}  ${"0.00".padStart(6)}  ${"0.00".padStart(7)}  ${"0.0%".padStart(6)}`)
+        continue
+      }
+      console.log(
+        `  ${ch.toFixed(1).padStart(5)}  ${be.toFixed(1).padStart(5)}   ${String(s.n).padStart(3)}  ${(s.winRate * 100).toFixed(1).padStart(5)}%  ${s.pf.toFixed(2).padStart(6)}  ${s.expectancy.toFixed(2).padStart(6)}  ${s.totalPnl.toFixed(2).padStart(7)}  ${(s.maxDD * 100).toFixed(1).padStart(5)}%`
+      )
+      if (s.pf > 1.0 && s.n >= 5 && (!best || s.pf > best.pf)) {
+        best = { ch, be, pf: s.pf, totalPnl: s.totalPnl }
+      }
+    }
+  }
+  if (best) {
+    console.log("  " + "─".repeat(88))
+    console.log(`  BEST PF: chandelierMult=${best.ch} breakevenAtr=${best.be}  PF=${best.pf.toFixed(2)}  PnL=${best.totalPnl.toFixed(2)}`)
+  } else {
+    console.log("  No combo with PF > 1.0 and >= 5 trades - the edge is not in these two levers alone.")
+  }
 }
 
 async function main() {
@@ -372,6 +485,11 @@ async function main() {
       `emaSlow=${DEFAULT_TREND_RIDER_CONFIG.emaSlowPeriod} adxFloor=${args.adxFloor} minStrength=${args.minStrength} ` +
       `lev=${args.leverage}x fees=${(args.feePct * 100).toFixed(3)}% slip=${(args.slipPct * 100).toFixed(3)}%`
   )
+
+  if (args.sweep) {
+    runSweep(entryCandles, signalCandles, regimeCandles, args)
+    return
+  }
 
   const trades = runBacktest(entryCandles, signalCandles, regimeCandles, args)
   report(trades, `TREND RIDER [${args.symbol} entry=${args.entryTf} signal=${args.signalTf} ${args.days}d]`, 1000)

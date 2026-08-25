@@ -221,22 +221,24 @@ export async function openPosition(
 
   // Determine SL/TP first — risk-based sizing needs the stop distance.
   // Explicit overrides (scalper/sniper) win; otherwise strategy default.
-  let stopLoss: number
-  let takeProfit: number
+  let stopLoss: number | null = null
+  let takeProfit: number | null = null
   let rangeTarget: number | null = null
-  if (opts?.stopLoss != null && opts?.takeProfit != null) {
-    stopLoss = opts.stopLoss
-    takeProfit = opts.takeProfit
-  } else if (strategy === "range") {
+  // Apply overrides independently. Trend Rider passes only a structure stop
+  // (no fixed TP by design), so requiring BOTH here silently discarded its
+  // stop and fell through to a generic ATR stop + fixed TP.
+  if (opts?.stopLoss != null) stopLoss = opts.stopLoss
+  if (opts?.takeProfit != null) takeProfit = opts.takeProfit
+  if (strategy === "range") {
     // Mean-reversion targets — TP at the middle of the range, tight SL just
     // beyond the range boundary (breakout = premise dead).
     rangeTarget = snap.bbMiddle
-    takeProfit = snap.bbMiddle
-    stopLoss = direction === "long" ? price - snap.atr * 1.0 : price + snap.atr * 1.0
-  } else {
+    if (takeProfit == null) takeProfit = snap.bbMiddle
+    if (stopLoss == null) stopLoss = direction === "long" ? price - snap.atr * 1.0 : price + snap.atr * 1.0
+  } else if (strategy !== "trend_rider") {
     const stops = computeInitialStops(direction, price, snap.atr, cfg)
-    stopLoss = stops.stopLoss
-    takeProfit = stops.takeProfit
+    if (stopLoss == null) stopLoss = stops.stopLoss
+    if (takeProfit == null) takeProfit = stops.takeProfit
   }
 
   // Effective margin for this position: honor a risk-based size override when
@@ -250,7 +252,7 @@ export async function openPosition(
   // sizeUsdt = targetRiskUsdt * entry / (leverage * risk), capped at the
   // per-position ceiling and the remaining margin budget. A wide-stop coin
   // gets less margin, a tight-stop coin gets more — same dollars at risk.
-  if (strategy === "sniper" && cfg.sniperTargetRiskUsdt != null && cfg.sniperTargetRiskUsdt > 0) {
+  if (strategy === "sniper" && stopLoss != null && cfg.sniperTargetRiskUsdt != null && cfg.sniperTargetRiskUsdt > 0) {
     const risk = Math.abs(price - stopLoss)
     if (risk > 0) {
       const riskSized = (cfg.sniperTargetRiskUsdt * price) / (cfg.leverage * risk)
@@ -316,7 +318,7 @@ export async function openPosition(
 
   await log(
     "trade",
-    `Opened ${direction.toUpperCase()} [${strategy}] @ ${price.toFixed(2)} | size ${sizeUsdt.toFixed(2)} USDT x${cfg.leverage} | SL ${stopLoss.toFixed(2)} TP ${takeProfit.toFixed(2)} | confidence ${(confidence * 100).toFixed(1)}%`,
+    `Opened ${direction.toUpperCase()} [${strategy}] @ ${price.toFixed(2)} | size ${sizeUsdt.toFixed(2)} USDT x${cfg.leverage} | SL ${stopLoss != null ? stopLoss.toFixed(2) : "none"} TP ${takeProfit != null ? takeProfit.toFixed(2) : "none"} | confidence ${(confidence * 100).toFixed(1)}%`,
   )
 
   return sizeUsdt
@@ -690,7 +692,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         marks.set(symbol, snap.price)
 
         const marketPosition = openPositions.find((p) => p.symbol === symbol && p.timeframe === timeframe)
-        if (marketPosition) {
+        if (marketPosition && marketPosition.strategy !== "trend_rider") {
           const opposite =
             (marketPosition.strategy === "trend" || marketPosition.strategy === "scalp") &&
             isOppositeSignal(snap, marketPosition.side as "long" | "short")
@@ -1108,7 +1110,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
             requireRejectionCandle: true,
             chandelierAtrMult: cfg.trendRiderChandelierMult,
             breakevenAtr: 1.0,
-            htfTrailUseSwing: true,
+            htfTrailUseSwing: cfg.trendRiderHtfTrailUseSwing,
             regimeAdxMin: cfg.trendRiderRegimeAdxMin,
             regimeEmaPeriod: 20,
           }
@@ -1126,7 +1128,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
               entryPrice: trPosition.entryPrice,
               entryTime: trPosition.openedAt.getTime() / 1000,
               stopPrice: trPosition.stopLoss ?? trPosition.entryPrice,
-              atrAtEntry: (trPosition.entryFeatures as any).atrAtEntry ?? 0,
+              atrAtEntry: trPosition.atrAtEntry ?? 0,
               weakStreak: (trPosition.entryFeatures as any).weakStreak ?? 0,
               peakPrice: (trPosition.entryFeatures as any).peakPrice ?? trPosition.entryPrice,
             }
@@ -1138,7 +1140,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
             signalSlice.length ? signalSlice : null,
             positionState,
             trCfg,
-            regimeSlice.length ? regimeSlice : null
+            cfg.trendRiderRegimeGate && regimeSlice.length ? regimeSlice : null
           )
 
           // Only log actionable signals to avoid spamming the activity log

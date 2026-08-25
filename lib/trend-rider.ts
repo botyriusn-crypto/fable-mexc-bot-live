@@ -194,7 +194,11 @@ export function detectTrendState(
     direction: confirmed ? structDir : null,
     rawStructureDirection: structDir,
     strength,
-    structureStopPrice: confirmed ? (structDir === "long" ? lastSwingLow : lastSwingHigh) : null,
+    structureStopPrice: confirmed
+  ? cfg.htfTrailUseSwing
+    ? structDir === "long" ? lastSwingLow : lastSwingHigh
+    : lastEmaSlow
+  : null,
     trendAge,
     reasons: confirmed ? ["confirmed"] : reasons,
   }
@@ -216,6 +220,14 @@ export function evaluateTrendRider(
   const lastClose = closes[closes.length - 1]
   const atrVals = atr(candles, cfg.atrPeriod)
   const lastAtr = atrVals[atrVals.length - 1]
+  // HTF (signal-timeframe) ATR — the trail must breathe on the SAME timeframe
+  // the trend lives on. Min15 ATR is far too tight: it turns the chandelier
+  // into a scalp stop and the breakeven ratchet into an instant lock, which is
+  // why winners never run (avg hold 3.8h, avg win ~11 USDT). Anchor the trail
+  // to the 4H ATR so 2.5x chandelier actually means "2.5x a 4H candle range".
+  const htfAtrVals = htfCandles && htfCandles.length ? atr(htfCandles, cfg.atrPeriod) : null
+  const lastHtfAtr = htfAtrVals && htfAtrVals.length ? htfAtrVals[htfAtrVals.length - 1] : null
+  const trailAtr = lastHtfAtr || lastAtr
 
   if (position) {
     // Hard stop check ALWAYS runs first, regardless of confirmation state or
@@ -288,15 +300,15 @@ export function evaluateTrendRider(
 
     const chandelier =
       position.side === "long"
-        ? position.peakPrice - lastAtr * cfg.chandelierAtrMult
-        : position.peakPrice + lastAtr * cfg.chandelierAtrMult
+        ? position.peakPrice - trailAtr * cfg.chandelierAtrMult
+        : position.peakPrice + trailAtr * cfg.chandelierAtrMult
 
     // Breakeven ratchet: once price has advanced breakevenAtr ATR in our favor,
     // the stop may never sit worse than entry.
     const advancedAtr =
       position.side === "long"
-        ? (lastClose - position.entryPrice) / (lastAtr || 1)
-        : (position.entryPrice - lastClose) / (lastAtr || 1)
+        ? (lastClose - position.entryPrice) / (trailAtr || 1)
+        : (position.entryPrice - lastClose) / (trailAtr || 1)
     const beFloor = advancedAtr >= cfg.breakevenAtr ? position.entryPrice : null
 
     let candidate = chandelier
