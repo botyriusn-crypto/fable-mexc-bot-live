@@ -1,3 +1,4 @@
+import { fetchTicker } from "./mexc/public"
 // Portfolio-level risk layer.
 //
 // Purpose: protect a SMALL account (<$500) from the two ways it usually dies —
@@ -16,6 +17,7 @@
 
 import { db } from "./db"
 import { trades, positions, gridOrders, equitySnapshots, type BotConfig } from "./db/schema"
+import { unrealizedPnl } from "./engine"
 import { and, eq, gte, lt, desc, sql } from "drizzle-orm"
 
 // ── Configurable limits ─────────────────────────────────────────────────────
@@ -103,15 +105,28 @@ export async function evaluatePortfolioRisk(cfg: BotConfig, liveUnrealized?: num
     .where(gte(trades.closedAt, dayStart))
   const dailyRealizedPnl = Number(dailyRow?.total ?? 0)
 
-  // ── Unrealized PnL (from caller, else last snapshot) ──
+  // ── Unrealized PnL (from caller, else compute from live positions) ──
   let unrealized = liveUnrealized
   if (unrealized == null) {
-    const [lastSnap] = await db
-      .select()
-      .from(equitySnapshots)
-      .orderBy(desc(equitySnapshots.createdAt))
-      .limit(1)
-    unrealized = lastSnap ? Number(lastSnap.unrealizedPnl) : 0
+    // Compute from live positions + live mark prices (matching dashboard logic)
+    const openPositions = await db.select().from(positions).where(eq(positions.status, "open"))
+    const symbols = [...new Set(openPositions.map(p => p.symbol))]
+    
+    // Fetch mark prices for all open position symbols
+    const marks = new Map<string, number>()
+    for (const symbol of symbols) {
+      try {
+        const ticker = await fetchTicker(symbol)
+        if (ticker?.lastPrice != null) marks.set(symbol, Number(ticker.lastPrice))
+      } catch { /* best-effort */ }
+    }
+    
+    // Sum unrealized across all open positions
+    unrealized = openPositions.reduce((sum, pos) => {
+      const mark = marks.get(pos.symbol)
+      if (mark == null) return sum
+      return sum + unrealizedPnl(pos, mark)
+    }, 0)
   }
 
   const balance = Number(cfg.paperBalance ?? 0)
