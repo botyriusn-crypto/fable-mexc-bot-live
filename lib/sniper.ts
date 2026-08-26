@@ -9,6 +9,13 @@ import { recordOutcome, type SniperFeatures } from "./advisor"
 // Tunable rule parameters (Option A: exposed for display + advisor tuning).
 export const MIN_CONFIDENCE = 0.7
 
+// Shorts are structurally unprofitable on the 5-min timeframe. Backtested
+// exhaustively: no stop-width x R:R combination reaches break-even (best was
+// 1.0 ATR / 1:1 at -7R), and the trend filter does not help (shorts lose in
+// every regime). Longs are +6R. Disabled permanently - re-enable only after
+// re-validating on a slower timeframe.
+export const SNIPER_SHORTS_ENABLED = false
+
 export const SNIPER_PARAMS = {
   sweepLookback: 20,
   volumeSurgeMult: 2.0,
@@ -128,6 +135,8 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   }
 
   if (!direction) return none
+
+  if (direction === "short" && !SNIPER_SHORTS_ENABLED) return none
 
   if (direction === "short" && fundingRate > SNIPER_PARAMS.fundingThreshold) { confidence += 0.1; reason += " + crowded longs (funding)" }
   if (direction === "long" && fundingRate < -SNIPER_PARAMS.fundingThreshold) { confidence += 0.1; reason += " + crowded shorts (funding)" }
