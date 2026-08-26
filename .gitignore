@@ -37,3 +37,8 @@ dist/
 /0
 /long
 /short
+
+# local artifacts (not source)
+logs/
+*.log
+*.csv
