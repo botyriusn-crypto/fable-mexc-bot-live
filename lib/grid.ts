@@ -12,6 +12,7 @@ import { fetchTicker } from "./mexc/public"
 import { roundMexcQuantity, roundMexcPrice, getMexcSpec, getMexcSpecAsync, getMexcFeeRates } from "./mexc/precision"
 import { livePrices } from "./mexc/ws"
 import { isTradingHalted, marginBudgetRemaining, getRiskState } from "./risk-manager"
+import { shouldGateEntry, recordShadowEntry, resolveShadowEntries, evaluateKillSwitch } from "./grid-flow"
 
 
 // Global cooldown to prevent duplicate setups
@@ -39,6 +40,7 @@ const MAKER_FEE = 0.0000
 // Maker mode risk controls: protect held inventory regardless of pause state.
 const MAKER_STOP_LOSS_PCT = 0.04   // close at market if price moves 4% against entry
 const MAKER_MAX_HOLD_MINUTES = 240 // force-close after 4 hours regardless of price
+const TREND_MAX_HOLD_MINUTES = 60 // when paused (trending), give up on mean reversion fast
 const MAKER_RECENTER_DRIFT_PCT = 0.15 // rebuild buy ladder if price drifts 15% from all resting buys
 
 // MEXC's order/create returns the id nested (e.g. { data: { orderId } }) or as a
@@ -216,7 +218,7 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
       const { takerFeeRate: rtf1 } = getMexcFeeRates(o.symbol)
       const fees = (o.buyPrice! + price) * o.quantity * rtf1
       if (cfg.mode === "paper") {
-        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * rtf1)}` }).where(eq(botConfig.id, 1))
+        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - fees}` }).where(eq(botConfig.id, 1))
       }
       const claimedLongStop = await db.update(gridOrders).set({ status: "filled" }).where(and(eq(gridOrders.id, o.id), eq(gridOrders.status, "pending"))).returning({ id: gridOrders.id })
       if (claimedLongStop.length === 0) return false
@@ -235,7 +237,7 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
       const { takerFeeRate: rtf2 } = getMexcFeeRates(o.symbol)
       const fees = (o.buyPrice! + price) * o.quantity * rtf2
       if (cfg.mode === "paper") {
-        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (price * o.quantity * rtf2)}` }).where(eq(botConfig.id, 1))
+        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - fees}` }).where(eq(botConfig.id, 1))
       }
       await cancelOtherPendingOrders(active, o.id)
       await db.update(gridOrders).set({ status: "filled" }).where(eq(gridOrders.id, o.id))
@@ -701,7 +703,7 @@ async function settleGridSell(
   }
 
   const buyPrice = order.buyPrice ?? order.price
-  const sizeUsdt = (buyPrice * order.quantity) / order.leverage
+  const sizeUsdt = buyPrice * order.quantity
   const grossPnl = (exitPrice - buyPrice) * order.quantity
   const { takerFeeRate: sgsRate } = getMexcFeeRates(order.symbol)
   const buyFee = buyPrice * order.quantity * sgsRate
@@ -728,12 +730,12 @@ async function settleGridSell(
 
   // Order already marked as filled during atomic claim above
 
-  // The buy fee was deducted when the rung filled. Add only gross PnL minus
-  // the sell fee here, otherwise the buy fee is charged twice.
+  // Add net PnL (gross minus BOTH buy and sell fees). The buy fee is NOT
+  // deducted at fill time, so it must be accounted for here.
   if (cfg.mode === "paper") {
     await db
       .update(botConfig)
-      .set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - sellFee}` })
+      .set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` })
       .where(eq(botConfig.id, 1))
   }
 
@@ -774,7 +776,7 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
   if (claimed.length === 0) return // Already claimed by another process
 
   const buyPrice = order.buyPrice ?? order.price
-  const sizeUsdt = (buyPrice * order.quantity) / order.leverage
+  const sizeUsdt = buyPrice * order.quantity
   const grossPnl = (exitPrice - buyPrice) * order.quantity
   // Both legs were resting post-only (maker) fills in this settlement path.
   const { makerFeeRate: smsRate } = getMexcFeeRates(order.symbol)
@@ -805,7 +807,7 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
   if (cfg.mode === "paper") {
     await db
       .update(botConfig)
-      .set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - sellFee}` })
+      .set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` })
       .where(eq(botConfig.id, 1))
   }
 
@@ -861,7 +863,7 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
   }
 
   const buyPrice = order.buyPrice ?? order.price
-  const sizeUsdt = (buyPrice * order.quantity) / order.leverage
+  const sizeUsdt = buyPrice * order.quantity
   const grossPnl = (exitPrice - buyPrice) * order.quantity
   // Entry was a resting post-only (maker) buy fill; this exit is a forced
   // market order (stop-loss/max-hold), which always crosses as taker.
@@ -883,7 +885,7 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
 
   await db.update(gridOrders).set({ status: "filled", exchangeStatus: "cancelled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, order.id))
   if (cfg.mode === "paper") {
-    await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - sellFee}` }).where(eq(botConfig.id, 1))
+    await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
   }
 
   if (trade && order.entryFeatures) {
@@ -936,7 +938,7 @@ if (cfg.mode !== "paper") {
   }
 }
 const entryPrice = order.buyPrice ?? order.price
-const sizeUsdt = (entryPrice * order.quantity) / order.leverage
+const sizeUsdt = entryPrice * order.quantity
 const grossPnl = (entryPrice - exitPrice) * order.quantity
 // Entry was a resting post-only (maker) sell fill (short open); this exit is
 // a forced market order (stop-loss/max-hold), which always crosses as taker.
@@ -953,7 +955,7 @@ exitReason: reason, strategy: "grid", live: cfg.mode === "live",
 .returning({ id: trades.id })
 await db.update(gridOrders).set({ status: "filled", exchangeStatus: "cancelled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, order.id))
 if (cfg.mode === "paper") {
-  await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (exitPrice * order.quantity * getMexcFeeRates(order.symbol).takerFeeRate)}` }).where(eq(botConfig.id, 1))
+  await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
 }
 if (trade && order.entryFeatures) {
 try {
@@ -992,6 +994,12 @@ export async function checkAllHeldPositionsRisk(): Promise<void> {
   const cfg = cfgRows[0]
   if (!cfg) return
 
+  // Regime-aware max-hold: read each grid's persisted pause state so a
+  // trending pair (auto-paused) cuts losers fast instead of waiting 4h.
+  const gridRows = await db.select().from(gridConfigs)
+  const pausedBySymbol = new Map<string, boolean>()
+  for (const g of gridRows) pausedBySymbol.set(g.symbol, g.paused)
+
   const held = await db.select().from(gridOrders).where(
     and(eq(gridOrders.status, "pending"), isNotNull(gridOrders.buyPrice))
   )
@@ -1008,7 +1016,7 @@ export async function checkAllHeldPositionsRisk(): Promise<void> {
       if (adverseMove <= -effectiveMakerStopPct(o.leverage)) {
         await log("info", `Grid ${o.symbol} (maker, fast-check): stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% below entry ${entryPrice.toFixed(6)}`)
         await settleMakerStopLoss(o, currentPrice, cfg, "stop-loss")
-      } else if (heldMinutes >= MAKER_MAX_HOLD_MINUTES) {
+      } else if (heldMinutes >= (pausedBySymbol.get(o.symbol) ? TREND_MAX_HOLD_MINUTES : MAKER_MAX_HOLD_MINUTES)) {
         await log("info", `Grid ${o.symbol} (maker, fast-check): max-hold triggered — held ${heldMinutes.toFixed(0)}m, closing at market`)
         await settleMakerStopLoss(o, currentPrice, cfg, "max-hold")
       }
@@ -1018,7 +1026,7 @@ export async function checkAllHeldPositionsRisk(): Promise<void> {
       if (adverseMove >= effectiveMakerStopPct(o.leverage)) {
         await log("info", `Grid ${o.symbol} (maker, fast-check): short stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% above entry ${entryPrice.toFixed(6)}`)
         await settleMakerShortStopLoss(o, currentPrice, cfg, "stop-loss")
-      } else if (heldMinutes >= MAKER_MAX_HOLD_MINUTES) {
+      } else if (heldMinutes >= (pausedBySymbol.get(o.symbol) ? TREND_MAX_HOLD_MINUTES : MAKER_MAX_HOLD_MINUTES)) {
         await log("info", `Grid ${o.symbol} (maker, fast-check): short max-hold triggered — held ${heldMinutes.toFixed(0)}m, closing at market`)
         await settleMakerShortStopLoss(o, currentPrice, cfg, "max-hold")
       }
@@ -1029,6 +1037,9 @@ export async function checkAllHeldPositionsRisk(): Promise<void> {
 async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): Promise<void> {
   if (gc.direction === "short" || (gc as any)._autoSide === "short") { return handleShortGridTickMaker(cfg, gc, snap, regime) }
   let active = await getActiveOrders(gc.symbol, gc.timeframe)
+  // ── Adaptive flow gate: resolve shadow positions + periodic kill-switch ──
+  await resolveShadowEntries(gc.symbol, snap.price)
+  await evaluateKillSwitch(gc.symbol)
   const volatility = detectVolatilitySurge(gc.symbol, snap)
   const gridAdxThreshold = 32 // Grids handle mild trends better than single positions
 const paused = gc.autoPause && snap.adx >= gridAdxThreshold
@@ -1064,6 +1075,20 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
   if (active.length === 0) {
     if (!gc.enabled) return
     if (paused) return
+    // ── Adaptive flow gate: block new entries when trailing 6h PnL < 0 ──
+    if (await shouldGateEntry(gc.symbol)) {
+      await recordShadowEntry({
+        symbol: gc.symbol,
+        side: "long",
+        entryPrice: snap.price,
+        quantity: 1,
+        leverage: gc.leverage,
+        tpPrice: snap.price + snap.atr * gc.rangeAtrMult,
+        slPrice: snap.price * (1 - effectiveGridStopPct(gc.leverage)),
+      })
+      await log("info", `Grid ${gc.symbol} (maker): flow gate active (6h PnL < 0) — skipping new entries`)
+      return
+    }
     await log("info", `Grid ${gc.symbol} (maker): setting up fresh resting ladder`)
     await setupGrid(cfg, gc, snap, volatility, undefined, true)
     return
@@ -1136,7 +1161,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
         const { makerFeeRate: scRate } = getMexcFeeRates(o.symbol)
         const fees = (entryPrice + fillPrice) * o.quantity * scRate
         const netPnl = grossPnl - fees
-        const sizeUsdt = (entryPrice * o.quantity) / o.leverage
+        const sizeUsdt = entryPrice * o.quantity
         await db.update(gridOrders)
           .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
           .where(eq(gridOrders.id, o.id))
@@ -1146,7 +1171,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
           exitReason: "tp", strategy: "grid", live: cfg.mode === "live",
         })
         if (cfg.mode === "paper") {
-          await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - (fillPrice * o.quantity * scRate)}` }).where(eq(botConfig.id, 1))
+          await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
         }
         await log("trade", `Grid ${o.symbol} (maker) COMBO short closed @ ${fillPrice.toFixed(6)} (shorted ${entryPrice.toFixed(6)}) | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
         // Re-arm a fresh naked sell at the original short entry level
@@ -1261,7 +1286,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
         if (adverseMove <= -effectiveMakerStopPct(o.leverage)) {
           await log("info", `Grid ${o.symbol} (maker): stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% below entry ${buyPrice.toFixed(6)}`)
           await settleMakerStopLoss(o, currentPrice, cfg, "stop-loss")
-        } else if (heldMinutes >= MAKER_MAX_HOLD_MINUTES) {
+        } else if (heldMinutes >= (paused ? TREND_MAX_HOLD_MINUTES : MAKER_MAX_HOLD_MINUTES)) {
           await log("info", `Grid ${o.symbol} (maker): max-hold triggered — held ${heldMinutes.toFixed(0)}m, closing at market`)
           await settleMakerStopLoss(o, currentPrice, cfg, "max-hold")
         }
@@ -1289,6 +1314,9 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
 
   const active = await getActiveOrders(gc.symbol, gc.timeframe)
   if (await checkGridStopLoss(cfg, gc, snap.price, exchange)) return
+  // ── Adaptive flow gate: resolve shadow positions + periodic kill-switch ──
+  await resolveShadowEntries(gc.symbol, snap.price)
+  await evaluateKillSwitch(gc.symbol)
   if (gc.direction === "short" || (gc as any)._autoSide === "short") { return handleShortGridTick(cfg, gc, snap, exchange) }
 
   // Detect volatility surge for adaptive spacing
@@ -1297,6 +1325,20 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
   // No active orders for this pair — set up a fresh ladder
   if (active.length === 0) {
     if (!gc.enabled) return
+    // ── Adaptive flow gate: block new entries when trailing 6h PnL < 0 ──
+    if (await shouldGateEntry(gc.symbol)) {
+      await recordShadowEntry({
+        symbol: gc.symbol,
+        side: "long",
+        entryPrice: snap.price,
+        quantity: 1,
+        leverage: gc.leverage,
+        tpPrice: snap.price + snap.atr * gc.rangeAtrMult,
+        slPrice: snap.price * (1 - effectiveGridStopPct(gc.leverage)),
+      })
+      await log("info", `Grid ${gc.symbol}: flow gate active (6h PnL < 0) — skipping new entries`)
+      return
+    }
     // Track how many ticks the grid has been empty
     const emptyTicks = (gc as any)._emptyTicks || 0
     if (emptyTicks >= 2) {
@@ -1458,7 +1500,7 @@ if (o.buyPrice != null && (gc as any).direction === "neutral") {
   const netPnl = grossPnl - fees
   await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
 await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
-await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: (entry * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: false })
+await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: entry * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: false })
 await log("trade", `Grid ${o.symbol} COMBO short closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
 await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: entry, quantity: o.quantity, status: "pending" })
 continue
@@ -1507,7 +1549,24 @@ if (cfg.mode === "live") {
 
 async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): Promise<void> {
   let active = await getActiveOrders(gc.symbol, gc.timeframe)
+  // ── Adaptive flow gate: resolve shadow positions + periodic kill-switch ──
+  await resolveShadowEntries(gc.symbol, snap.price)
+  await evaluateKillSwitch(gc.symbol)
   if (active.length === 0) {
+    // ── Adaptive flow gate: block new short entries when trailing 6h PnL < 0 ──
+    if (await shouldGateEntry(gc.symbol)) {
+      await recordShadowEntry({
+        symbol: gc.symbol,
+        side: "short",
+        entryPrice: snap.price,
+        quantity: 1,
+        leverage: gc.leverage,
+        tpPrice: snap.price - snap.atr * gc.rangeAtrMult,
+        slPrice: snap.price * (1 + effectiveGridStopPct(gc.leverage)),
+      })
+      await log("info", `Grid ${gc.symbol} (short maker): flow gate active (6h PnL < 0) — skipping new entries`)
+      return
+    }
     await setupGrid(cfg, gc, snap, undefined, undefined)
     return
   }
@@ -1545,7 +1604,7 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
       if (cfg.mode === "paper") {
         await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
       }
-      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice, sizeUsdt: (entryPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
+      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice, sizeUsdt: entryPrice * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
       await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(6)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
       try {
         const res: any = await placeRoundedMakerOrder(o.symbol, 3, entryPrice, o.quantity, o.leverage)
@@ -1568,6 +1627,20 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
 async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, exchange?: ExchangeClient): Promise<void> {
   let active = await getActiveOrders(gc.symbol, gc.timeframe)
   if (active.length === 0) {
+    // ── Adaptive flow gate: block new short entries when trailing 6h PnL < 0 ──
+    if (await shouldGateEntry(gc.symbol)) {
+      await recordShadowEntry({
+        symbol: gc.symbol,
+        side: "short",
+        entryPrice: snap.price,
+        quantity: 1,
+        leverage: gc.leverage,
+        tpPrice: snap.price - snap.atr * gc.rangeAtrMult,
+        slPrice: snap.price * (1 + effectiveGridStopPct(gc.leverage)),
+      })
+      await log("info", `Grid ${gc.symbol} (short): flow gate active (6h PnL < 0) — skipping new entries`)
+      return
+    }
     await setupGrid(cfg, gc, snap, undefined, exchange)
     return
   }
@@ -1615,7 +1688,7 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
         if (cfg.mode === "paper") {
           await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
         }
-        await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice, sizeUsdt: (entryPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
+        await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice, sizeUsdt: entryPrice * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
         await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
         const newSellPrice = entryPrice
         if (cfg.mode === "live") {
@@ -1642,7 +1715,7 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
       if (cfg.mode === "paper") {
         await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
       }
-      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice: o.price, sizeUsdt: (entryPrice * o.quantity) / o.leverage, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
+      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice: o.price, sizeUsdt: entryPrice * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
       await log("trade", `Short ${o.symbol} closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
       const newSellPrice = entryPrice
       if (cfg.mode === "live") {

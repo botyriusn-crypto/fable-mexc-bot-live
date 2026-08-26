@@ -49,6 +49,7 @@ export interface SniperOverrides {
   // A/B test toggles (defaults match current production behavior)
   bearishPrevCloseConfirm?: boolean   // default true: bearishReclaim requires prevCandle.close < swingHigh
   shortAllowNeutral?: boolean         // default true: exhaustedUp allows trendDown || trendNeutral
+  sweepAllowNeutral?: boolean         // default true: sweeps allow trendNeutral (but never counter-trend)
   longStopBufferAtr?: boolean         // default false: long stop uses * 0.998 (pct), not + atrBuffer
   shortStopBufferPct?: boolean        // default false: short stop uses + atrBuffer, not * 1.002 (pct)
   tpSlRatioSigma?: number             // if set, sigma signals use this R:R instead of tpSlRatio
@@ -62,6 +63,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const volumeSurgeMult = overrides.volumeSurgeMult ?? VOLUME_SURGE_MULT
   const bearishPrevCloseConfirm = overrides.bearishPrevCloseConfirm ?? true
   const shortAllowNeutral = overrides.shortAllowNeutral ?? true
+  const sweepAllowNeutral = overrides.sweepAllowNeutral ?? true
   const longStopBufferAtr = overrides.longStopBufferAtr ?? false
   const shortStopBufferPct = overrides.shortStopBufferPct ?? false
 
@@ -71,10 +73,6 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const swingHigh = Math.max(...prev.map(c => c.high))
   const avgVol = avg(prev.map(c => c.volume))
   const volSurge = avgVol > 0 ? last.volume / avgVol : 1
-
-  const bullishReclaim = last.low < swingLow && last.close > swingLow && last.close > last.open && volSurge >= volumeSurgeMult
-  const prevCandle = candles[candles.length - 2];
-  const bearishReclaim = last.high > swingHigh && last.close < swingHigh && last.close < last.open && (!bearishPrevCloseConfirm || prevCandle.close < swingHigh) && volSurge >= volumeSurgeMult
 
   const closes = candles.map(c => c.close)
   const window = closes.slice(-100)
@@ -93,9 +91,16 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const olderMean = older.length > 0 ? avg(older) : mean
   const trendUp = mean > olderMean
   const trendDown = mean < olderMean
+  const trendNeutral = Math.abs(mean - olderMean) / olderMean < 0.05;
+
+  // Sweeps now carry the SAME trend gate as sigma. A bearish sweep (pierce
+  // swing high -> reject) in an uptrend is just a pullback, not a reversal:
+  // shorting it is how the short-sweep bucket collapsed to 4.5% accuracy.
+  const bullishReclaim = last.low < swingLow && last.close > swingLow && last.close > last.open && volSurge >= volumeSurgeMult && (trendUp || (sweepAllowNeutral && trendNeutral))
+  const prevCandle = candles[candles.length - 2];
+  const bearishReclaim = last.high > swingHigh && last.close < swingHigh && last.close < last.open && (!bearishPrevCloseConfirm || prevCandle.close < swingHigh) && volSurge >= volumeSurgeMult && (trendDown || (sweepAllowNeutral && trendNeutral))
 
   const exhaustedDown = z < -sigmaExtreme && last.close > last.open && trendUp
-  const trendNeutral = Math.abs(mean - olderMean) / olderMean < 0.05;
   const exhaustedUp = z > sigmaExtreme && last.close < last.open && (trendDown || (shortAllowNeutral && trendNeutral))
   // Sigma confidence scales with how far |z| exceeds the threshold, so the
   // confidence floor and the "top N by confidence" sort actually discriminate

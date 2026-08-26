@@ -308,6 +308,32 @@ export const advisorVariants = pgTable("advisor_variants", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 })
 
+export const gridFlowState = pgTable("grid_flow_state", {
+  id: serial("id").primaryKey(),
+  symbol: text("symbol").notNull().unique(),
+  timeframe: text("timeframe").notNull().default("Min15"),
+  gateEnabled: boolean("gate_enabled").notNull().default(true),
+  windowMs: integer("window_ms").notNull().default(21600000),
+  killSwitchWindowMs: integer("kill_switch_window_ms").notNull().default(86400000),
+  lastEvalAt: timestamp("last_eval_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const gridFlowShadow = pgTable("grid_flow_shadow", {
+  id: serial("id").primaryKey(),
+  symbol: text("symbol").notNull(),
+  side: text("side").notNull(), // 'long' | 'short'
+  entryPrice: doublePrecision("entry_price").notNull(),
+  quantity: doublePrecision("quantity").notNull().default(1),
+  leverage: integer("leverage").notNull().default(2),
+  tpPrice: doublePrecision("tp_price"),
+  slPrice: doublePrecision("sl_price"),
+  status: text("status").notNull().default("open"), // 'open' | 'resolved'
+  resolvedPnl: doublePrecision("resolved_pnl"),
+  openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+})
+
 export type BotConfig = typeof botConfig.$inferSelect
 export type GridConfigRow = typeof gridConfigs.$inferSelect
 export type GridOrder = typeof gridOrders.$inferSelect
@@ -315,3 +341,5 @@ export type Position = typeof positions.$inferSelect
 export type Trade = typeof trades.$inferSelect
 export type MlModelRow = typeof mlModel.$inferSelect
 export type AiRecommendation = typeof aiRecommendations.$inferSelect
+export type GridFlowState = typeof gridFlowState.$inferSelect
+export type GridFlowShadow = typeof gridFlowShadow.$inferSelect
