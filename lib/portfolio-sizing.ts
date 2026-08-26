@@ -193,18 +193,36 @@ export async function computePortfolioRebalance(timeframe = "Min15"): Promise<Re
       : totalBudgetCap / risks.length
 
     // Dampen: clamp the move to +/- MAX_DELTA_PCT_PER_RUN from where it is now.
-    const dampedLo = r.currentBudgetPct - MAX_DELTA_PCT_PER_RUN
-    const dampedHi = r.currentBudgetPct + MAX_DELTA_PCT_PER_RUN
+    // Sanitize the anchor first: a corrupted currentBudgetPct (e.g. a dollar
+    // amount like 6387.7 stored in a percent field) must not anchor the
+    // dampening window, or the rebalancer can never pull it back down.
+    const saneCurrent = Number.isFinite(r.currentBudgetPct) && r.currentBudgetPct > 0 && r.currentBudgetPct <= MAX_BUDGET_PCT
+      ? r.currentBudgetPct
+      : MAX_BUDGET_PCT
+    const dampedLo = saneCurrent - MAX_DELTA_PCT_PER_RUN
+    const dampedHi = saneCurrent + MAX_DELTA_PCT_PER_RUN
     target = clamp(target, dampedLo, dampedHi)
 
-    // Then apply the absolute floor/ceiling.
-    target = clamp(target, MIN_BUDGET_PCT, MAX_BUDGET_PCT)
-    r.proposedBudgetPct = Math.round(target * 10) / 10
-
     const gc = enabled.find((g) => g.symbol === r.symbol)!
-    const budget = (availableBalance * r.proposedBudgetPct) / 100
     const sidesPerLevel = gc.direction === "neutral" ? 2 : 1
     const levels = Math.max(1, Math.min(4, Math.floor(gc.levels / 2)))
+
+    // MINIMUM-NOTIONAL FLOOR: a budgetPct that can't place even ONE order per
+    // side at MEXC's minimum notional is useless — it produces "budget too
+    // small" backoffs despite free balance. Raise the floor to the smallest %
+    // that clears the minimum, so no pair is ever sized into dust.
+    //   budget * leverage / (levels * sidesPerLevel) >= MIN_NOTIONAL
+    //   availableBalance * budgetPct/100 * leverage >= MIN_NOTIONAL * levels * sidesPerLevel
+    //   budgetPct >= MIN_NOTIONAL * levels * sidesPerLevel * 100 / (availableBalance * leverage)
+    const minBudgetPctForNotional = availableBalance > 0
+      ? (MIN_NOTIONAL * sidesPerLevel * 100) / availableBalance
+      : MIN_BUDGET_PCT
+
+    // Then apply the absolute floor/ceiling (floor is now notional-aware).
+    target = clamp(target, minBudgetPctForNotional, MAX_BUDGET_PCT)
+    r.proposedBudgetPct = Math.round(target * 10) / 10
+
+    const budget = (availableBalance * r.proposedBudgetPct) / 100
     const notionalPerLevel = (budget * gc.leverage) / (levels * sidesPerLevel)
     if (notionalPerLevel < MIN_NOTIONAL) {
       r.viable = false

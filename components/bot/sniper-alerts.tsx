@@ -1,5 +1,5 @@
 "use client"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useBotState } from "@/lib/use-bot-state"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -19,11 +19,35 @@ function writeLS(key: string, val: string) {
   try { window.localStorage.setItem(key, val) } catch {}
 }
 
+// Two-tone chime via Web Audio API — no asset file needed.
+function playAlertSound() {
+  if (typeof window === "undefined") return
+  try {
+    const Ctx = window.AudioContext || (window as any).webkitAudioContext
+    const ctx = new Ctx()
+    const now = ctx.currentTime
+    const tones = [880, 1174.66] // A5, D6
+    tones.forEach((freq, i) => {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = "sine"
+      osc.frequency.value = freq
+      const t = now + i * 0.18
+      gain.gain.setValueAtTime(0.0001, t)
+      gain.gain.exponentialRampToValueAtTime(0.3, t + 0.02)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.35)
+      osc.connect(gain).connect(ctx.destination)
+      osc.start(t)
+      osc.stop(t + 0.4)
+    })
+  } catch {}
+}
+
 // Control block that lives at the top of Strategy Settings
 export function SniperCommand({ state }: { state: any }) {
   const [enabled, setEnabled] = useState(readLS(LS_ENABLED, "true") === "true")
   const [threshold, setThreshold] = useState(Number(readLS(LS_THRESHOLD, "0.55")))
-  const top = state?.shadowStats?.topCandidate
+  const top = state?.sniperStats?.topCandidate
 
   useEffect(() => { writeLS(LS_ENABLED, String(enabled)); window.dispatchEvent(new Event("sniper-config")) }, [enabled])
   useEffect(() => { writeLS(LS_THRESHOLD, String(threshold)); window.dispatchEvent(new Event("sniper-config")) }, [threshold])
@@ -64,6 +88,7 @@ export function SniperAlertBubble() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [test, setTest] = useState<any>(null)
   const [dismissed, setDismissed] = useState<Record<string, number>>({})
+  const [executing, setExecuting] = useState(false)
 
   useEffect(() => {
     const sync = () => {
@@ -78,7 +103,7 @@ export function SniperAlertBubble() {
     return () => { window.removeEventListener("sniper-config", sync); window.removeEventListener("sniper-test", onTest) }
   }, [])
 
-  const top = test ?? state?.shadowStats?.topCandidate
+  const top = test ?? state?.sniperStats?.topCandidate
   const key = top ? `${top.symbol}-${top.direction}` : ""
   const inCooldown = Boolean(key && dismissed[key] && (Date.now() - dismissed[key] < COOLDOWN_MS))
   
@@ -97,11 +122,54 @@ export function SniperAlertBubble() {
 
   const active = Boolean(enabled && top && top.confidence >= threshold && !inCooldown)
 
+  // Play a chime once per new candidate (keyed on symbol+direction) so you
+  // hear the alert even when working in another window.
+  const lastPlayedKey = useRef("")
+  useEffect(() => {
+    if (active && key && key !== lastPlayedKey.current) {
+      lastPlayedKey.current = key
+      playAlertSound()
+    }
+  }, [active, key])
+
   const acknowledge = () => {
     const next = { ...dismissed, [key]: Date.now() }
     setDismissed(next); writeLS(LS_DISMISSED, JSON.stringify(next))
     window.dispatchEvent(new Event("sniper-config"))
     setOpen(false)
+  }
+
+  const execute = async () => {
+    if (!top) return
+    setExecuting(true)
+    try {
+      const response = await fetch("/api/bot/sniper-execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: top.symbol,
+          direction: top.direction,
+          entryPrice: top.entry || top.entryPrice,
+          stopLoss: top.stopLoss,
+          takeProfit: top.takeProfit,
+          confidence: top.confidence,
+          timeframe: top.timeframe || "Min5",
+        }),
+      })
+
+      const result = await response.json()
+      
+      if (result.success) {
+        alert(`✅ ${top.direction.toUpperCase()} ${top.symbol} opened!`)
+        acknowledge() // Auto-dismiss after successful execution
+      } else {
+        alert(`❌ Failed: ${result.error}`)
+      }
+    } catch (e: any) {
+      alert(`❌ Error: ${e.message}`)
+    } finally {
+      setExecuting(false)
+    }
   }
 
   const isStale = elapsedSeconds > 600 // dim after 10 minutes
@@ -113,19 +181,23 @@ export function SniperAlertBubble() {
       {!open ? (
         <button onClick={() => setOpen(true)}
           className={`rounded-full border-2 border-yellow-400 bg-yellow-400/20 px-4 py-3 text-sm font-bold text-yellow-300 backdrop-blur transition-all duration-500 ${isStale ? "opacity-40 grayscale" : "animate-pulse shadow-[0_0_20px_rgba(250,204,21,0.5)]"}`}>
-          🎯 {top.symbol} {(top?.direction || "unknown").toUpperCase()} {(top.confidence * 100).toFixed(0)}% · {top.source === "ml" ? "ML" : "SETUP"}{timeAgo ? ` · ${timeAgo}` : ""}
+          🎯 {top.symbol} {(top?.direction || "unknown").toUpperCase()} {(top.confidence * 100).toFixed(0)}% · SNIPER{timeAgo ? ` · ${timeAgo}` : ""}
         </button>
       ) : (
-        <Card className={`w-72 transition-all duration-500 ${isStale ? "border-yellow-400/20 bg-black/60 opacity-50 grayscale" : "border-yellow-400/60 bg-black/90 shadow-[0_0_24px_rgba(250,204,21,0.4)]"}`}>
+        <Card className={`w-80 transition-all duration-500 ${isStale ? "border-yellow-400/20 bg-black/60 opacity-50 grayscale" : "border-yellow-400/60 bg-black/90 shadow-[0_0_24px_rgba(250,204,21,0.4)]"}`}>
           <CardContent className="flex flex-col gap-2 p-3">
             <span className="text-sm font-bold text-yellow-300">🎯 Sniper Candidate</span>
             <div className="font-mono text-lg text-yellow-200">{top.symbol} <span className={top.direction === "long" ? "text-success" : "text-danger"}>{(top?.direction || "unknown").toUpperCase()}</span></div>
-            <div className="text-xs text-yellow-200/80">Confidence: {(top.confidence * 100).toFixed(0)}% · Source: {top.source === "ml" ? "Learned ML" : "Momentum setup"}</div>
+            <div className="text-xs text-yellow-200/80">Confidence: {(top.confidence * 100).toFixed(0)}% · Source: Sniper rule</div>
+            {top.entry && <div className="text-[10px] text-yellow-200/60">Entry: {Number(top.entry).toFixed(4)} · SL: {Number(top.stopLoss).toFixed(4)} · TP: {Number(top.takeProfit).toFixed(4)}</div>}
             {timeAgo && <div className="text-[10px] font-mono text-yellow-200/60">⏱ Detected {timeAgo} ago</div>}
-            <div className="text-[10px] text-yellow-200/60">Shadow ML flagged this setup. Review the pair before entering manually.</div>
+            <div className="text-[10px] text-yellow-200/60">Click EXECUTE to open position manually (respects PAPER/LIVE mode).</div>
             <div className="flex gap-2">
               <Button size="sm" variant="outline" className="flex-1 text-xs" onClick={() => setOpen(false)}>Keep watching</Button>
-              <Button size="sm" className="flex-1 bg-yellow-400 text-black text-xs" onClick={acknowledge}>Acknowledge</Button>
+              <Button size="sm" variant="outline" className="flex-1 text-xs" onClick={acknowledge}>Acknowledge</Button>
+              <Button size="sm" className="flex-1 bg-green-600 hover:bg-green-700 text-white text-xs font-bold" onClick={execute} disabled={executing}>
+                {executing ? "..." : "🎯 EXECUTE"}
+              </Button>
             </div>
           </CardContent>
         </Card>

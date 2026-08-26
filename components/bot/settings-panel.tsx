@@ -88,6 +88,8 @@ export function SettingsPanel({ state }: { state: BotState }) {
   const [aiResult, setAiResult] = useState<any>(null)
   const [aiError, setAiError] = useState<string | null>(null)
   const [confirmLive, setConfirmLive] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<any>(null)
 
   const value = (key: string) =>
     form[key] ?? String((cfg as unknown as Record<string, unknown>)[key] ?? "")
@@ -207,6 +209,20 @@ export function SettingsPanel({ state }: { state: BotState }) {
         <Separator />
         <span className="text-xs font-medium text-muted-foreground">Adaptive exits</span>
         {renderFields(EXIT_FIELDS)}
+        <Separator />
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <span className="text-xs font-medium text-muted-foreground block">Bybit Funding Trading</span>
+              <span className="text-xs leading-relaxed text-muted-foreground">Fades extreme funding when it rolls over (live-only, settlement-triggered)</span>
+            </div>
+            <Switch
+              id="fundingCarryEnabled"
+              checked={Boolean(cfg.fundingCarryEnabled)}
+              onCheckedChange={(checked) => toggleBool("fundingCarryEnabled", checked)}
+            />
+          </div>
+        </div>
         <Separator />
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between gap-3">
@@ -361,6 +377,34 @@ export function SettingsPanel({ state }: { state: BotState }) {
               </Button>
             ))}
           </div>
+
+          <Button
+            size="sm"
+            variant="secondary"
+            className="h-7 px-2 text-xs"
+            disabled={testing}
+            onClick={async () => {
+              setTesting(true)
+              setTestResult(null)
+              try {
+                const res = await fetch("/api/bot/diagnose")
+                const data = await res.json()
+                setTestResult(data)
+              } catch (err) {
+                setTestResult({ error: err instanceof Error ? err.message : "Test failed" })
+              } finally {
+                setTesting(false)
+              }
+            }}
+          >
+            {testing ? "Testing…" : "Test connection"}
+          </Button>
+
+          {testResult && (
+            <div className="rounded-md border border-muted bg-muted/20 p-2 text-xs font-mono whitespace-pre-wrap">
+              {JSON.stringify(testResult, null, 2)}
+            </div>
+          )}
         </div>
 
         <Separator />

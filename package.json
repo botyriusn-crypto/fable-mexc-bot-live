@@ -21,6 +21,7 @@
     "pg": "^8.22.0",
     "react": "^19",
     "react-dom": "^19",
+    "react-is": "^19",
     "recharts": "^3.10.0",
     "shadcn": "^4.8.0",
     "swr": "^2.4.2",
@@ -36,9 +37,11 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/ws": "^8.18.1",
+    "dotenv-cli": "^11.0.0",
     "drizzle-kit": "^0.31.10",
     "postcss": "^8.5",
     "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.12",
     "typescript": "5.7.3",
     "vitest": "^4.1.10"
   }

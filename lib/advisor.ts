@@ -3,13 +3,22 @@ import { db } from "./db"
 import { sql } from "drizzle-orm"
 import type { FeatureVector } from "./indicators"
 
-export interface VariantParams { minConf: number; adxMin: number; needVolSurge: boolean; needTrendAlign: boolean }
+// Sniper signal characteristics (stored in classifierDecisions.lorentzianFilters).
+export interface SniperFeatures {
+  signalType: "sweep" | "sigma" | null
+  volSurge: number
+  z: number
+  fundingRate: number
+}
+
+// Variants now tune the sniper's ACTUAL rule parameters (Option A).
+export interface VariantParams { minConf: number; volSurgeMult: number; sigmaExtreme: number }
 export interface VariantStats { allowed: number; correct: number; sumReturn: number }
 interface VariantRow { id: number; name: string; params: VariantParams; stats: VariantStats }
 
 const sigmoid = (z: number) => 1 / (1 + Math.exp(-z))
 
-// Hand-built setup score so variants have signal even before the ML matures
+// Legacy setup score (still used by the shadow evaluator's top-candidate read).
 export function heuristicScore(f: FeatureVector, direction: string): number {
   const trendAlign = direction === "long" ? (f.crossover ?? 0) : 1 - (f.crossover ?? 0)
   const rocSign = direction === "long" ? Math.tanh((f.roc ?? 0) * 40) : Math.tanh(-(f.roc ?? 0) * 40)
@@ -18,15 +27,11 @@ export function heuristicScore(f: FeatureVector, direction: string): number {
   return sigmoid(trendAlign * 1.2 + rocSign * 0.8 + vol + adx)
 }
 
-export function variantAllowed(p: VariantParams, f: FeatureVector, direction: string, mlConf: number): boolean {
-  const score = Math.max(mlConf ?? 0, heuristicScore(f, direction))
-  if (score < p.minConf) return false
-  if ((f.adx ?? 0) < p.adxMin) return false
-  if (p.needVolSurge && (f.volSurge ?? 0) * 100 < 1.8) return false
-  if (p.needTrendAlign) {
-    const align = direction === "long" ? (f.crossover ?? 0) === 1 : (f.crossover ?? 0) === 0
-    if (!align) return false
-  }
+// Grade a variant against a sniper signal: does this param set allow the signal?
+export function variantAllowed(p: VariantParams, sig: SniperFeatures, direction: string, conf: number): boolean {
+  if (conf < p.minConf) return false
+  if (sig.signalType === "sweep" && (sig.volSurge ?? 0) < p.volSurgeMult) return false
+  if (sig.signalType === "sigma" && Math.abs(sig.z ?? 0) < p.sigmaExtreme) return false
   return true
 }
 
@@ -37,9 +42,6 @@ export async function getVariants(): Promise<VariantRow[]> {
 }
 
 // Deterministic ranking: Wilson lower confidence bound (95%).
-// Ranks by PROVEN win rate, penalizing tiny samples. Fixes the old
-// volume-biased formula that let loose (50% win, 165 tries) outrank
-// trendRider (64% win, 25 tries).
 export function scoreVariant(s: VariantStats): number {
   const n = s.allowed
   if (n <= 0) return 0
@@ -51,8 +53,7 @@ export function scoreVariant(s: VariantStats): number {
   return parseFloat(Math.max(0, center - margin).toFixed(3))
 }
 
-// Thompson sampling: exploration engine. Draws a candidate leader from
-// each variant's Beta posterior. Explore with TS, rank with LCB.
+// Thompson sampling: exploration engine.
 export function thompsonLeader(variants: Array<{ name: string; stats: VariantStats }>): string | null {
   let best: string | null = null
   let bestDraw = -1
@@ -86,11 +87,11 @@ function sampleGamma(shape: number): number {
   }
 }
 
-// Called on every resolved shadow decision — grades all variants counterfactually
-export async function recordOutcome(f: FeatureVector, direction: string, mlConf: number, correct: boolean, ret: number): Promise<void> {
+// Called on every resolved sniper decision — grades all variants counterfactually.
+export async function recordOutcome(sig: SniperFeatures, direction: string, conf: number, correct: boolean, ret: number): Promise<void> {
   const variants = await getVariants()
   for (const v of variants) {
-    if (!variantAllowed(v.params, f, direction, mlConf)) continue
+    if (!variantAllowed(v.params, sig, direction, conf)) continue
     const s: VariantStats = {
       allowed: (v.stats.allowed ?? 0) + 1,
       correct: (v.stats.correct ?? 0) + (correct ? 1 : 0),

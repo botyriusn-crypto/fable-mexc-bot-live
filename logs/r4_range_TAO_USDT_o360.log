@@ -1,0 +1,30 @@
+[DB] Connecting to: postgres://PASTE_THE_FULL_URL_HERE
+Fetching TAO_USDT Min60 for 180 days...
+Fetched 4320 candles
+  Config: EMA 9/21  RSI 35/65  ADX t/r 25/29  SL/TP 1.5/2.5xATR  trail 1.2xATR  lev 3x  fees 0.020%  slip 0.030%  (live parity; ML gate neutral)
+  !! F9 WARNING: adxRangeThreshold (29) >= adxTrendThreshold (25)
+     -> "neutral" regime is IMPOSSIBLE; the live bot never stands aside.
+     -> Re-run with --adx-range 20 to quantify what the neutral zone restores.
+
+══════════════════════════════════════════════════════
+  BASE+FIXED+RANGE+MK  [TAO_USDT Min60 180d]
+══════════════════════════════════════════════════════
+  Trades:            172
+  Win rate:          33.7%
+  Avg win:           318.64 USDT
+  Avg loss:          180.83 USDT
+  Expectancy:        -12.41 USDT/trade
+  Avg R:             -0.123R
+  Profit factor:     0.90
+  Total PnL:         -2133.99 USDT (-21.3%)
+  Total fees:        375.17 USDT
+  Sharpe (per-trade):-0.050
+  Max drawdown (MTM):43.4%
+
+  Per-strategy:
+    range    n=172   win=33.7%  pnl=-2133.99  avgR=-0.12
+  Per-exit-reason:
+    sl       n=114   win=0.0%  pnl=-20615.02
+    tp       n=58    win=100.0%  pnl=18481.03
+
+Per-trade CSVs: r4_range_TAO_USDT_o360_*.csv

@@ -1,7 +1,7 @@
 import { ema, atr, adx, bollinger } from "./indicators"
 import { comboDna, comboParams } from "./combo-score"
 import { db } from "./db"
-import { botLogs, gridConfigs } from "./db/schema"
+import { botLogs, gridConfigs, botConfig } from "./db/schema"
 import { livePrices } from "./mexc/ws"
 import { fetchDepth, depthNotionalNearMid } from "./mexc/public"
 import type { Candle } from "./mexc/public"
@@ -18,6 +18,38 @@ const LEVERAGED_ETF_DENYLIST = new Set([
   "LABU_USDT", "LABD_USDT", "FAS_USDT", "FAZ_USDT",
   "TMF_USDT", "TMV_USDT", "UVXY_USDT", "SVXY_USDT",
 ])
+
+// ============================================================================
+// 1.1 FEEDBACK LOOP — stop re-picking symbols that just lost money.
+// A module-level store of recent grid outcomes. The bot runs as a long-lived
+// Next.js server, so this survives across advisor runs. If the server
+// restarts it resets, which is acceptable (the cool-off is only 48h anyway).
+// ============================================================================
+interface GridOutcome { pnl: number; ts: number }
+const recentGridOutcomes = new Map<string, GridOutcome>()
+const LOSER_COOLOFF_MS = 48 * 60 * 60 * 1000 // 48 hours
+
+/**
+ * Record a grid's realized P&L when it is torn down / rotated out. Called by
+ * the portfolio rotator when it kills a dead grid.
+ */
+export function recordGridOutcome(symbol: string, pnl: number): void {
+  recentGridOutcomes.set(symbol, { pnl, ts: Date.now() })
+}
+
+/**
+ * True if this symbol lost money within the last 48h (cool-off blacklist).
+ * Expired entries are cleaned up lazily on read.
+ */
+export function isRecentLoser(symbol: string): boolean {
+  const o = recentGridOutcomes.get(symbol)
+  if (!o) return false
+  if (Date.now() - o.ts > LOSER_COOLOFF_MS) {
+    recentGridOutcomes.delete(symbol)
+    return false
+  }
+  return o.pnl < 0
+}
 
 function calcChop(candles: Candle[], period: number = 14): number {
   if (candles.length < period) return 50
@@ -90,21 +122,26 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
     } catch (e) { console.error("Watchlist override error:", e) }
 
     const scoredMarkets: any[] = []
+    const gateStats = { total: candidates.length, recentLoser: 0, feeGate: 0, klineFail: 0, tooFewCandles: 0, momentumGate: 0, dnaRejected: 0, scored: 0 }
 
     for (const t of candidates) {
       try {
+        // 1.1 Feedback loop: skip any symbol that lost money in a grid within
+        // the last 48h (cool-off blacklist to avoid re-picking repeat losers).
+        if (isRecentLoser(t.symbol)) { gateStats.recentLoser++; continue }
+
         const end = Math.floor(Date.now() / 1000)
         const start = end - (3 * 24 * 3600)
         const klineRes = await fetch(`https://contract.mexc.com/api/v1/contract/kline/${t.symbol}?interval=Min15&start=${start}&end=${end}`, { cache: "no-store" })
         const klineJson = await klineRes.json() as any
-        if (!klineJson.success || !klineJson.data?.time?.length) continue
+        if (!klineJson.success || !klineJson.data?.time?.length) { gateStats.klineFail++; continue }
 
         const { time, open, high, low, close, vol } = klineJson.data
         const candles: Candle[] = []
         for (let i = 0; i < time.length; i++) {
           candles.push({ time: time[i], open: open[i], high: high[i], low: low[i], close: close[i], volume: vol[i] ?? 0 })
         }
-        if (candles.length < 50) continue
+        if (candles.length < 50) { gateStats.tooFewCandles++; continue }
 
         const closes = candles.map(c => c.close)
         const lastClose = closes[closes.length - 1]
@@ -113,6 +150,12 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         const lastAtr = atrArr[atrArr.length - 1]
         const lastAdx = adxArr[adxArr.length - 1]
         const atrPct = (lastAtr / lastClose) * 100
+
+        // 1.2 Fee-adjusted profitability gate: a COMBO grid only profits when
+        // per-level spacing clears the round-trip fee (~0.06% on MEXC). With
+        // ~10 levels, average spacing ≈ atrPct/10; if that's below 0.08% the
+        // grid can't reliably beat fees, so skip it.
+        if (atrPct / 10 < 0.03) { gateStats.feeGate++; continue }
 
         const chop = calcChop(candles, 14)
 
@@ -128,18 +171,24 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         }
 
         const momentum3h = closes.length >= 13 ? ((closes[closes.length - 1] - closes[closes.length - 13]) / closes[closes.length - 13]) * 100 : 0
-        if (momentum3h < -3.0) continue
+        // 1.3 Symmetric momentum filter: a neutral COMBO grid is hurt by strong
+        // moves in EITHER direction, so reject both pumps and dumps (>2.5%).
+        if (Math.abs(momentum3h) > 2.5) { gateStats.momentumGate++; continue }
 
-        let score = 0
-        score += (chop - 50) * 2
-        score += bbTouches * 3
-        score += atrPct * 5
-        score -= (lastAdx - 20) * 1.5
+        // ONDO-DNA scoring (validated 2026-08-23): grid edge lives in an
+        // ATR sweet spot (~0.6-1.2%), not raw chop. Winners averaged ATR
+        // 0.95%, losers 2.15% — the old linear atrPct*5 rewarded trending
+        // coins that break the range (TAO scored -9 yet made +$7.8k).
+        const atrSweet = Math.max(0, 100 - Math.abs(atrPct - 0.9) * 70)
+        const chopScore = Math.min(chop, 120) * 0.5
+        const adxPen = Math.max(0, lastAdx - 25) * 4
+        let score = atrSweet + chopScore - adxPen
 
         const dna = comboDna(candles, 0.6, lastAdx)
-        const params = comboParams(dna, lastClose)
-        if (dna.rejected) continue
-        const blendedScore = Math.round(Math.min(score, 100) * 0.35 + dna.score * 0.65)
+        const params = comboParams(dna, lastClose, t.amount24)
+        console.log(`[LevDebug] ${t.symbol} vol=$${Math.round(t.amount24)} atrPct=${atrPct.toFixed(2)}% lev=${params.suggestedLeverage}x`)
+        if (dna.rejected) { gateStats.dnaRejected++; continue }
+        const blendedScore = Math.round(Math.max(0, Math.min(100, score / 1.5)) * 0.35 + dna.score * 0.65)
 
         scoredMarkets.push({
           symbol: t.symbol,
@@ -159,11 +208,17 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
           suggestedLevels: params.levels,
           blendedScore,
         })
+        gateStats.scored++
 
         await new Promise(r => setTimeout(r, 100))
       } catch (err) { continue }
     }
 
+    console.log("[AI Advisor Gate Stats]", JSON.stringify(gateStats))
+    await db.insert(botLogs).values({
+      level: "info",
+      message: `AI Advisor gate stats: ${JSON.stringify(gateStats)}`,
+    }).catch(() => {})
     const shortlist = scoredMarkets.sort((a, b) => b.blendedScore - a.blendedScore).slice(0, 8)
     const safeSizingPreview = await computeSafeGridSettings(3)
     const depthChecked: typeof shortlist = []
@@ -190,13 +245,60 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
     }
     const topPicks = depthChecked
 
-    const finalSizing = await computeSafeGridSettings(topPicks.length)
-    const recommendations: GridAiRecommendation[] = topPicks.map(m => ({
+    // CAP PAIR COUNT TO FREE BALANCE: greedily take the highest-scoring picks
+    // until the free USDT can no longer fund another pair's minimum margin
+    // (one-sided, since auto grids trend). Mirrors grid.ts.s backoff condition
+    // (budget * leverage >= MIN_NOTIONAL * sidesPerLevel) and reserves the
+    // same SAFETY_FACTOR headroom computeSafeGridSettings uses, so the
+    // advisor never recommends more pairs than the account can actually place.
+    const MIN_NOTIONAL = 1.0
+    const COMBO_SIDES = 1
+    const SAFETY_FACTOR = 0.7
+    const cappedPicks: typeof topPicks = []
+    let remaining = safeSizingPreview.availableBalance * SAFETY_FACTOR
+    for (const m of topPicks) {
+      const minMargin = (MIN_NOTIONAL * COMBO_SIDES) / Math.max(1, m.suggestedLeverage)
+      if (remaining >= minMargin) {
+        cappedPicks.push(m)
+        remaining -= minMargin
+      }
+    }
+    if (cappedPicks.length < topPicks.length) {
+      await db.insert(botLogs).values({
+        level: "info",
+        message: `AI Advisor: capped ${topPicks.length} picks to ${cappedPicks.length} — free balance $${safeSizingPreview.availableBalance.toFixed(2)} funds at most ${cappedPicks.length} pair(s)`,
+      }).catch(() => {})
+    }
+
+    const finalSizing = await computeSafeGridSettings(cappedPicks.length)
+
+    // Budget-aware guard: drop any pick whose ACTUAL order notional (using
+    // its own suggested levels/leverage, not the sizing defaults) would fall
+    // below MEXC's minimum. Prevents auto-rotating into a pair that
+    // immediately hits "budget too small" backoffs.
+    const MIN_ORDER_NOTIONAL = 1.0
+    const viablePicks = cappedPicks.filter(m => {
+      const leverage = m.suggestedLeverage
+      // Only drop picks that can't fund even ONE level (one order per side).
+      // grid.ts already reduces levels at setup when the full suggested count
+      // exceeds budget, so re-checking the full count here double-penalizes
+      // small accounts and strands large caps. Check the 1-level floor only.
+      const notionalPerOrder = finalSizing.availableBalance * finalSizing.budgetPct / 100 * leverage / 2
+      return notionalPerOrder >= MIN_ORDER_NOTIONAL
+    })
+    if (viablePicks.length < cappedPicks.length) {
+      await db.insert(botLogs).values({
+        level: "info",
+        message: `AI Advisor: dropped ${cappedPicks.length - viablePicks.length} pick(s) — notional below $${MIN_ORDER_NOTIONAL} per order after budget sizing`,
+      }).catch(() => {})
+    }
+
+    const recommendations: GridAiRecommendation[] = viablePicks.map(m => ({
       symbol: m.symbol,
       reason: `DNA: ${m.dnaScore} | Blend: ${m.blendedScore} | Chop: ${m.chopRatio} | Rev: ${m.revRate} | Drift: ${m.driftPct}% | Sized for ${finalSizing.totalPairs} pairs @ $${finalSizing.availableBalance.toFixed(2)} available`,
       levels: Math.min(m.suggestedLevels, finalSizing.levels),
       atrMult: parseFloat(Math.min(3, Math.max(0.3, m.suggestedSpacingPct / Math.max(m.atrPct, 0.1))).toFixed(2)),
-      leverage: Math.max(1, Math.min(m.suggestedLeverage, finalSizing.leverage)),
+      leverage: m.suggestedLeverage,
       budgetPct: finalSizing.budgetPct,
       dnaScore: m.dnaScore,
       blendedScore: m.blendedScore,
@@ -218,7 +320,9 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
     }
 
     const applied: string[] = []
-    if (autoApply) {
+    const cfgRows = await db.select({ gridEnabled: botConfig.gridEnabled }).from(botConfig).where(eq(botConfig.id, 1))
+    const gridsEnabled = cfgRows[0]?.gridEnabled ?? false
+    if (autoApply && gridsEnabled) {
       for (const rec of recommendations) {
         try {
           const existing = await db.select().from(gridConfigs).where(eq(gridConfigs.symbol, rec.symbol)).limit(1)
@@ -226,7 +330,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
           await db.insert(gridConfigs).values({
             symbol: rec.symbol,
             timeframe: "Min15",
-            direction: "neutral",
+            direction: "auto",
             levels: rec.levels,
             rangeAtrMult: rec.atrMult,
             leverage: rec.leverage,
@@ -244,7 +348,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
           applied.push(rec.symbol)
           await db.insert(botLogs).values({
             level: "trade",
-            message: `AI Advisor auto-built and enabled COMBO grid for ${rec.symbol}: levels=${rec.levels} atrMult=${rec.atrMult}x leverage=${rec.leverage}x budget=${rec.budgetPct}%`,
+            message: `AI Advisor auto-built and enabled AUTO grid for ${rec.symbol}: levels=${rec.levels} atrMult=${rec.atrMult}x leverage=${rec.leverage}x budget=${rec.budgetPct}%`,
           }).catch(() => {})
         } catch (err) {
           console.error(`AI Advisor auto-apply failed for ${rec.symbol}:`, err)

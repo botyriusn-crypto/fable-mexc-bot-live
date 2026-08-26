@@ -14,6 +14,8 @@ import { SettingsPanel } from "./settings-panel"
 import { SniperAlertBubble, SniperCommand } from "./sniper-alerts"
 import { AdvisorCard } from "./advisor-card"
 import { MultiGridCard } from "./multi-grid-card"
+import { OpenPositionsCard } from "./open-positions-card"
+import { SwingCard } from "./swing-card"
 import { PerformanceAnalyzer } from "./performance-analyzer"
 import { MarketBar } from "./market-bar"
 import { MlCard } from "./ml-card"
@@ -169,17 +171,15 @@ export function DashboardV2() {
   const live = isLive && state.liveAccount && !("error" in state.liveAccount) ? state.liveAccount : null
   const balance = live ? live.availableBalance : state.config.paperBalance
   const equity = live ? live.equity : state.equity
-  const upnl = live ? live.unrealized : state.unrealizedPnl
-  const liveStats = (state as any).liveStats
+  const modeStats = (state as any).modeStats ?? (state as any).liveStats
   const todayStats = (state as any).todayStats
-  const totalPnl = liveStats?.totalPnl ?? 0
-  const winRate = liveStats?.winRate ?? 0
-  const totalTrades = liveStats?.totalTrades ?? 0
+  const winRate = modeStats?.winRate ?? 0
+  const totalTrades = modeStats?.totalTrades ?? 0
+  const modeLabel = isLive ? "LIVE" : "PAPER"
   const todayPnl = todayStats?.pnl ?? 0
   const todayTrades = todayStats?.trades ?? 0
 
   const grids = (state as any).gridConfigs || []
-  const totalRealized = totalPnl
   
 
   const pnlTone = (v: number) => v > 0 ? "pos" : v < 0 ? "neg" : "neutral"
@@ -220,15 +220,17 @@ export function DashboardV2() {
           <MarketBar state={state} />
         </div>
 
+        <div className="p-3 pb-0">
+          <OpenPositionsCard state={state} />
+        </div>
+
         {/* STATS ROW */}
         <div className="flex gap-3 p-3 overflow-x-auto">
           <StatCard label="Available" value={`${fmt(balance)} USDT`} tone="neutral" />
           <StatCard label="Equity" value={`${fmt(equity)} USDT`} tone="neutral" />
-          <StatCard label="Unreal. PnL" value={`${(upnl ?? 0) >= 0 ? "+" : ""}${fmt(upnl)}`} tone={pnlTone(upnl ?? 0)} />
-          <StatCard label="Realized (LIVE)" value={`${totalRealized >= 0 ? "+" : ""}${fmt(totalRealized)}`} tone={pnlTone(totalRealized)} />
-          <StatCard label="Today" value={`${todayPnl >= 0 ? "+" : ""}${fmt(todayPnl)}`} tone={pnlTone(todayPnl)} />
-          <StatCard label="Win Rate (LIVE)" value={totalTrades > 0 ? `${(winRate * 100).toFixed(0)}%` : "—"} tone="neutral" />
-          <StatCard label="Trades (LIVE)" value={String(totalTrades)} tone="neutral" />
+          <StatCard label={`Today (${modeLabel})`} value={`${todayPnl >= 0 ? "+" : ""}${fmt(todayPnl)}`} tone={pnlTone(todayPnl)} />
+          <StatCard label={`Win Rate (${modeLabel})`} value={totalTrades > 0 ? `${(winRate * 100).toFixed(0)}%` : "—"} tone="neutral" />
+          <StatCard label={`Trades (${modeLabel})`} value={String(totalTrades)} tone="neutral" />
           <StatCard label="Today Trades" value={String(todayTrades)} tone="neutral" />
         </div>
 
@@ -238,6 +240,9 @@ export function DashboardV2() {
           {/* LEFT 65% */}
           <div className="w-[65%] flex flex-col gap-3 pr-3">
             <MultiGridCard />
+            <CollapsibleSection title="Swing Breakout (4H)" defaultOpen={false}>
+              <SwingCard state={state} />
+            </CollapsibleSection>
 
             <CollapsibleSection title="Charts" defaultOpen={true}>
               <div>

@@ -19,7 +19,10 @@ const marketsFetcher = async (url: string) => {
 }
 
 function AddPairControl({ existingSymbols, onAdded }: { existingSymbols: string[]; onAdded: () => void }) {
-  const { data } = useSWR("/api/bot/market", marketsFetcher, { revalidateOnFocus: false })
+  const { data, error: swrError, isLoading } = useSWR("/api/bot/market", marketsFetcher, { 
+    revalidateOnFocus: false,
+    onError: (err) => console.error("[AddPairControl] SWR error:", err)
+  })
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState("")
   const [adding, setAdding] = useState(false)
@@ -82,9 +85,11 @@ function AddPairControl({ existingSymbols, onAdded }: { existingSymbols: string[
             <ChevronsUpDown aria-hidden="true" className="pointer-events-none absolute right-4 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           </div>
           <div className="max-h-56 overflow-y-auto">
-            {error && <div className="px-3 py-2 text-xs text-danger">{error}</div>}
-            {filtered.length === 0 ? (
-              <div className="px-3 py-2 text-xs text-muted-foreground">No matching contracts</div>
+            {error && <div className="px-3 py-2 text-xs text-danger">Add error: {error}</div>}
+            {swrError && <div className="px-3 py-2 text-xs text-danger">Failed to load markets: {swrError.message}</div>}
+            {isLoading && <div className="px-3 py-2 text-xs text-muted-foreground">Loading markets...</div>}
+            {!isLoading && !swrError && filtered.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground">No matching contracts (total: {data?.markets?.length || 0})</div>
             ) : (
               filtered.map((m) => (
                 <button
@@ -183,8 +188,6 @@ function GridRow({ grid, onRefresh }: { grid: GridState; onRefresh: () => void }
   const [makerBusy, setMakerBusy] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [directionBusy, setDirectionBusy] = useState(false)
-const [comboBusy, setComboBusy] = useState(false)
-const isCombo = grid.direction === "neutral"
 const [livePrice, setLivePrice] = useState<number | null>(null)
 const [priceDir, setPriceDir] = useState<"up" | "down" | null>(null)
 const prevPriceRef = useRef<number | null>(null)
@@ -207,27 +210,11 @@ load()
 const t = setInterval(load, 5000)
 return () => { alive = false; clearInterval(t) }
 }, [grid.symbol])
-const handleToggleCombo = async () => {
-setComboBusy(true)
-try {
-await fetch("/api/bot/grid-config", {
-method: "PATCH",
-headers: { "Content-Type": "application/json" },
-body: JSON.stringify({ symbol: grid.symbol, timeframe: grid.timeframe, direction: isCombo ? "long" : "neutral" }),
-})
-onRefresh()
-} catch (err) {
-console.error("Failed to toggle combo:", err)
-} finally {
-setComboBusy(false)
-}
-}
-  
-  const handleToggleDirection = async () => {
+const handleToggleDirection = async () => {
     setDirectionBusy(true)
     try {
       const currentMode = grid.direction.startsWith("auto") ? "auto" : grid.direction
-      const nextDir = currentMode === "long" ? "short" : currentMode === "short" ? "auto" : "long"
+      const nextDir = currentMode === "long" ? "short" : currentMode === "short" ? "auto" : currentMode === "auto" ? "neutral" : "long"
       await fetch("/api/bot/grid-config", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -323,10 +310,6 @@ setComboBusy(false)
             {grid.symbol}
 </Badge>
 {livePrice != null && <span className={`shrink-0 font-mono text-[11px] ${priceDir === "down" ? "text-danger" : priceDir === "up" ? "text-success" : "text-chart-3"}`}>@{livePrice < 1 ? livePrice.toFixed(6) : livePrice.toFixed(2)}</span>}
-<label className="flex shrink-0 cursor-pointer items-center gap-1" title="COMBO: neutral two-sided grid (buys + sells placed instantly)">
-<input type="checkbox" checked={isCombo} disabled={comboBusy} onChange={handleToggleCombo} className="size-3.5 accent-chart-3" />
-<span className={`font-mono text-[10px] ${isCombo ? "text-chart-3" : "text-muted-foreground/60"}`}>COMBO</span>
-</label>
           <span className="text-muted-foreground shrink-0">{grid.timeframe}</span>
           {grid.paused && <Badge variant="outline" className="border-chart-3/40 text-chart-3 shrink-0">PAUSED</Badge>}
           <Badge
@@ -346,7 +329,7 @@ setComboBusy(false)
 : "border-success/40 bg-success/15 text-success"
             }`}
             onClick={handleToggleDirection}
-            title="Toggle direction (long/short/auto)"
+            title="Toggle direction (long/short/auto/neutral)"
           >
             {directionBusy ? "…" : 
               grid.direction === "short" ? "SHORT" 
@@ -437,6 +420,7 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
   
   const [scanning, setScanning] = useState(false)
   const [aiPicks, setAiPicks] = useState<any[]>([])
+  const [aiMessage, setAiMessage] = useState<string>("")
   const [applyingSym, setApplyingSym] = useState<string | null>(null)
 
   const handleRefresh = async () => {
@@ -464,6 +448,7 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
       const json = await res.json()
       if (!json.success) throw new Error(json.error || "AI scan failed")
       setAiPicks(json.recommendations || [])
+      setAiMessage((json.recommendations || []).length > 0 ? "" : "Scan complete — 0 candidates passed all quality gates. The advisor only recommends A+ setups; try again in a few hours.")
     } catch (err) {
       console.error("AI scan failed:", err)
       window.alert("Failed to run AI advisor. Check Fly logs.")
@@ -493,7 +478,7 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
           leverage: pick.leverage,
           budgetPct: pick.budgetPct,
           makerMode: true,
-          direction: "neutral"
+          direction: "auto"
         })
       })
 
@@ -588,28 +573,46 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
           >
             🔄 Rotate Now
           </Button>
-          <Button 
-            onClick={async () => {
-              const currentState = state.rotationEnabled
-              await fetch("/api/bot/rotate", { 
-                method: "POST", 
-                headers: {"Content-Type":"application/json"}, 
-                body: JSON.stringify({enabled: !currentState}) 
-              })
-              alert(currentState ? "❌ Auto-rotation disabled!" : "✅ Auto-rotation enabled! Runs every 4 hours.")
-              setTimeout(() => window.location.reload(), 500)
-            }} 
-            size="sm" 
-            variant="outline" 
-            className={`text-xs h-7 px-3 transition-all ${
-              state.rotationEnabled 
-                ? 'bg-success/20 border-success/60 text-success font-bold shadow-[0_0_8px_rgba(var(--success),0.3)]' 
-                : 'hover:bg-danger/10 hover:border-danger/40'
-            }`}
-            title={state.rotationEnabled ? 'Auto-rotation is ON (click to disable)' : 'Auto-rotation is OFF (click to enable)'}
-          >
-            ⏰ {state.rotationEnabled ? 'Auto ON' : 'Auto OFF'}
-          </Button>
+          {state.gridEnabled ? (
+            <Button 
+              onClick={async () => {
+                if (!window.confirm("🛑 STOP all grids? This disables every pair, tears down all ladders, and persists a kill-switch so nothing re-activates on restart.")) return
+                const res = await fetch("/api/bot/stop", { method: "POST" })
+                const data = await res.json().catch(() => ({}))
+                if (data.ok) {
+                  alert(`🛑 All grids stopped (${data.disabled} pairs disabled). Kill-switch persisted.`)
+                  setTimeout(() => window.location.reload(), 500)
+                } else {
+                  alert("❌ STOP failed: " + (data.error || "unknown"))
+                }
+              }} 
+              size="sm" 
+              variant="outline" 
+              className="text-xs h-7 px-3 transition-all border-danger/40 text-danger font-bold hover:bg-danger/10 hover:border-danger/60"
+              title="Disable all grids, tear down ladders, and persist a kill-switch"
+            >
+              🛑 STOP
+            </Button>
+          ) : (
+            <Button 
+              onClick={async () => {
+                const res = await fetch("/api/bot/start", { method: "POST" })
+                const data = await res.json().catch(() => ({}))
+                if (data.ok) {
+                  alert("▶️ Grids re-enabled. Re-enable individual pairs manually to resume trading.")
+                  setTimeout(() => window.location.reload(), 500)
+                } else {
+                  alert("❌ START failed: " + (data.error || "unknown"))
+                }
+              }} 
+              size="sm" 
+              variant="outline" 
+              className="text-xs h-7 px-3 transition-all border-success/40 text-success font-bold hover:bg-success/10 hover:border-success/60"
+              title="Clear the kill-switch (grids stay disabled until re-enabled manually)"
+            >
+              ▶️ START
+            </Button>
+          )}
         </div>
           <span className="text-xs text-muted-foreground">{grids.length} pairs · {totalOrders} orders active</span>
         {state.lastRotationTime && state.lastRotationTime > 0 && (
@@ -637,26 +640,29 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
 <option value="Min60">1h</option>
 <option value="Hour4">4h</option>
 </select>
-        <div className="flex items-center gap-1 mr-2" title="Live available balance to deploy (from MEXC)">
+        <div className="flex items-center gap-1 mr-2" title="Available balance vs equity">
           {(() => {
-            const live = state?.liveAccount && !("error" in state.liveAccount) ? state.liveAccount : null
-            if (live == null) {
-              // Live balance unavailable (e.g. MEXC fetch failed) — fall back to
-              // the old config-based estimate, but label it clearly as such so
-              // it's never mistaken for real spendable capital.
-              const totalDeployed = grids.reduce((s, g) => s + (g.budgetPct || 0), 0)
-              const avail = Math.max(0, Math.round(100 - totalDeployed))
-              const color = avail >= 40 ? "text-success border-success/40 bg-success/10" : avail >= 20 ? "text-chart-3 border-chart-3/40 bg-chart-3/10" : "text-danger border-danger/40 bg-danger/10"
-              return <span className={`shrink-0 font-mono text-[10px] px-1.5 py-0.5 rounded border ${color}`}>💰 ~{avail}% free (config est., live unavailable)</span>
-            }
-            const pct = live.equity > 0 ? Math.round((live.availableBalance / live.equity) * 100) : 0
-            const color = pct >= 40 ? "text-success border-success/40 bg-success/10" : pct >= 20 ? "text-chart-3 border-chart-3/40 bg-chart-3/10" : "text-danger border-danger/40 bg-danger/10"
-            return <span className={`shrink-0 font-mono text-[10px] px-1.5 py-0.5 rounded border ${color}`}>💰 ${live.availableBalance.toFixed(2)} ({pct}%) free</span>
+            const live = state.liveAccount && !("error" in state.liveAccount) ? state.liveAccount : null
+            const committedMargin =
+              (state.openPositions ?? []).reduce((s, p) => s + Number(p.sizeUsdt ?? 0), 0) +
+              (state.grid?.allOrders ?? []).reduce((s, o) => {
+                const lev = Number(o.leverage ?? 1) || 1
+                const notional = (o.buyPrice != null ? Number(o.buyPrice) : Number(o.price)) * Number(o.quantity)
+                return s + notional / lev
+              }, 0)
+            const available = live ? live.availableBalance : Math.max(0, state.config.paperBalance - committedMargin)
+            const equity = live ? live.equity : state.equity
+            const availPct = equity > 0 ? Math.round((available / equity) * 100) : 0
+            const color = availPct >= 40 ? "text-success border-success/40 bg-success/10" : availPct >= 20 ? "text-chart-3 border-chart-3/40 bg-chart-3/10" : "text-danger border-danger/40 bg-danger/10"
+            return <span className={`shrink-0 font-mono text-[10px] px-1.5 py-0.5 rounded border ${color}`}>💰 {fmt(available, 2)} USDT · {availPct}% free</span>
           })()}
         </div>
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
+        {aiMessage && aiPicks.length === 0 && !scanning && (
+          <div className="mb-2 rounded-md border border-chart-3/30 bg-chart-3/5 p-2 text-xs text-chart-3">{aiMessage}</div>
+        )}
         {aiPicks.length > 0 && (
           <div className="flex flex-col gap-2 p-2 border border-chart-3/30 rounded-md bg-chart-3/5">
             <span className="text-xs font-bold text-chart-3">AI Recommendations:</span>

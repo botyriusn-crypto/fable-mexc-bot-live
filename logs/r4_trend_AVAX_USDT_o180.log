@@ -1,0 +1,30 @@
+[DB] Connecting to: postgres://PASTE_THE_FULL_URL_HERE
+Fetching AVAX_USDT Min60 for 180 days...
+Fetched 4320 candles
+  Config: EMA 9/21  RSI 35/65  ADX t/r 25/29  SL/TP 1.5/2.5xATR  trail 1.2xATR  lev 3x  fees 0.020%  slip 0.030%  (live parity; ML gate neutral)
+  !! F9 WARNING: adxRangeThreshold (29) >= adxTrendThreshold (25)
+     -> "neutral" regime is IMPOSSIBLE; the live bot never stands aside.
+     -> Re-run with --adx-range 20 to quantify what the neutral zone restores.
+
+══════════════════════════════════════════════════════
+  BASE+FIXED+TREND  [AVAX_USDT Min60 180d]
+══════════════════════════════════════════════════════
+  Trades:            234
+  Win rate:          35.9%
+  Avg win:           179.65 USDT
+  Avg loss:          118.17 USDT
+  Expectancy:        -11.26 USDT/trade
+  Avg R:             -0.078R
+  Profit factor:     0.85
+  Total PnL:         -2634.46 USDT (-26.3%)
+  Total fees:        573.02 USDT
+  Sharpe (per-trade):-0.074
+  Max drawdown (MTM):38.2%
+
+  Per-strategy:
+    trend    n=234   win=35.9%  pnl=-2634.46  avgR=-0.08
+  Per-exit-reason:
+    tp       n=84    win=100.0%  pnl=15090.91
+    sl       n=150   win=0.0%  pnl=-17725.38
+
+Per-trade CSVs: r4_trend_AVAX_USDT_o180_*.csv

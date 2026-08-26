@@ -3,9 +3,15 @@
 import crypto from "crypto"
 
 const BASE_URL = "https://api.bybit.com/v5"
+const RECV_WINDOW = "5000"
 
+function toBybitSymbol(symbol: string): string {
+  return symbol.replace(/_/g, "") // BTC_USDT -> BTCUSDT
+}
+
+// Bybit v5 signature: HMAC-SHA256(secret, timestamp + apiKey + recvWindow + paramString)
 function sign(apiKey: string, secret: string, timestamp: string, paramString: string): string {
-  const signStr = `${timestamp}${apiKey}${paramString}`
+  const signStr = `${timestamp}${apiKey}${RECV_WINDOW}${paramString}`
   return crypto.createHmac("sha256", secret).update(signStr).digest("hex")
 }
 
@@ -27,6 +33,7 @@ async function privateRequest(
 
   if (method === "GET") {
     const qs = Object.entries(params)
+      .sort(([a], [b]) => a.localeCompare(b))
       .map(([k, v]) => `${k}=${v}`)
       .join("&")
     paramString = qs
@@ -42,8 +49,9 @@ async function privateRequest(
     method,
     headers: {
       "Content-Type": "application/json",
-      "X-BAPI-KEY": apiKey,
+      "X-BAPI-API-KEY": apiKey,
       "X-BAPI-TIMESTAMP": timestamp,
+      "X-BAPI-RECV-WINDOW": RECV_WINDOW,
       "X-BAPI-SIGN": signature,
     },
     body,
@@ -65,8 +73,39 @@ async function privateRequest(
   return json?.result
 }
 
+// --- instrument qty-step cache (avoids a fetch per order) ---
+const qtyStepCache: Record<string, number> = {}
+
+async function getQtyStep(symbol: string): Promise<number> {
+  const bs = toBybitSymbol(symbol)
+  if (qtyStepCache[bs]) return qtyStepCache[bs]
+  const r = (await privateRequest("GET", "/market/instruments-info", {
+    category: "linear",
+    symbol: bs,
+  })) as { list?: Array<{ lotSizeFilter?: { qtyStep?: string } }> }
+  const step = Number(r?.list?.[0]?.lotSizeFilter?.qtyStep ?? "0.001")
+  qtyStepCache[bs] = step
+  return step
+}
+
+// Round a contract quantity down to the symbol's qtyStep precision.
+function roundQty(qty: number, step: number): number {
+  const decimals = (step.toString().split(".")[1] || "").length
+  const factor = Math.pow(10, decimals)
+  return Math.floor(qty * factor) / factor
+}
+
+// Set leverage for a symbol (must be done before placing an order).
+export async function setLeverage(symbol: string, leverage: number): Promise<unknown> {
+  return privateRequest("POST", "/position/set-leverage", {
+    category: "linear",
+    symbol: toBybitSymbol(symbol),
+    buyLeverage: String(leverage),
+    sellLeverage: String(leverage),
+  })
+}
+
 // side: 1 = open long, 2 = close short, 3 = open short, 4 = close long
-// Bybit uses: Buy (for open long), Sell (for close short/open short/close long)
 export async function placeMarketOrder(opts: {
   symbol: string
   side: 1 | 2 | 3 | 4
@@ -80,19 +119,26 @@ export async function placeMarketOrder(opts: {
     4: "Buy",   // close long
   }
 
+  const bs = toBybitSymbol(opts.symbol)
+  const step = await getQtyStep(bs)
+  const qty = roundQty(opts.volume, step)
+  if (qty <= 0) throw new Error(`Order qty rounds to 0 (${opts.volume} contracts, step ${step})`)
+
+  // Leverage must be set separately — Bybit rejects it on /order/create.
+  await setLeverage(bs, opts.leverage)
+
   return privateRequest("POST", "/order/create", {
     category: "linear",
-    symbol: opts.symbol,
+    symbol: bs,
     side: sideMap[opts.side],
     orderType: "Market",
-    qty: opts.volume,
-    leverage: opts.leverage,
-    reduce_only: opts.side === 2 || opts.side === 4 ? true : false,
+    qty: String(qty),
+    reduceOnly: opts.side === 2 || opts.side === 4,
   })
 }
 
 export async function getAccountAssets(): Promise<unknown> {
-  return privateRequest("GET", "/account/wallet/balance", {
+  return privateRequest("GET", "/account/wallet-balance", {
     accountType: "UNIFIED",
   })
 }
@@ -103,7 +149,7 @@ export async function getOpenPositions(symbol?: string): Promise<unknown> {
     settleCoin: "USDT",
   }
   if (symbol) {
-    params.symbol = symbol
+    params.symbol = toBybitSymbol(symbol)
   }
   return privateRequest("GET", "/position/list", params)
 }

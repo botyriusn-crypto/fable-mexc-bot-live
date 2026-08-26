@@ -2,8 +2,8 @@ import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { botConfig, positions, equitySnapshots, botLogs } from "@/lib/db/schema"
 import { eq, sql } from "drizzle-orm"
-import { getConfig, closePosition } from "@/lib/engine"
-import { teardownGrid } from "@/lib/grid"
+import { getConfig, closePosition, stopRealtimeEngine, initRealtimeEngine, runTick } from "@/lib/engine"
+import { teardownGrid, getGridConfigs } from "@/lib/grid"
 import { fetchTicker } from "@/lib/mexc/public"
 
 export const dynamic = "force-dynamic"
@@ -16,11 +16,29 @@ export async function POST(request: Request) {
     switch (body.action) {
       case "start": {
         await db.update(botConfig).set({ status: "running", updatedAt: sql`NOW()` }).where(eq(botConfig.id, 1))
+        // Restart WebSocket engines for enabled grid pairs
+        try {
+          const gridCfgs = await getGridConfigs()
+          for (const gc of gridCfgs) {
+            if (gc.enabled) await initRealtimeEngine(gc.symbol.toUpperCase(), gc.timeframe)
+          }
+        } catch (err) {
+          console.error("[control] failed to restart WS engines:", err)
+        }
         await db.insert(botLogs).values({ level: "info", message: "Bot started" })
+        // Immediate sync: run one tick now so the bot reconciles with MEXC
+        // and refreshes balance/positions immediately instead of waiting for
+        // the next scheduled tick (avoids the stale-balance lag after stop/start).
+        runTick().catch((err) => console.error("[control] immediate tick failed:", err))
         return NextResponse.json({ ok: true })
       }
       case "stop": {
         await db.update(botConfig).set({ status: "stopped", updatedAt: sql`NOW()` }).where(eq(botConfig.id, 1))
+        // Tear down all WebSocket engines so no further ticks fire while stopped
+        const managers = (globalThis as any).__wsManagers || {}
+        for (const symbol of Object.keys(managers)) {
+          await stopRealtimeEngine(symbol)
+        }
         await db.insert(botLogs).values({ level: "info", message: "Bot stopped" })
         return NextResponse.json({ ok: true })
       }

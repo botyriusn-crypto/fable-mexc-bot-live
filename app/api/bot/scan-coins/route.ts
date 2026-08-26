@@ -137,7 +137,7 @@ export async function GET() {
         const closes = candles.map(c => c.close)
         const atrArr = atr(candles, 14)
         const adxArr = adx(candles, 14)
-        const rsiArr = rsi(candles, 14)
+        const rsiArr = rsi(closes, 14)
         const emaFast = ema(closes, 9)
         const emaSlow = ema(closes, 21)
         

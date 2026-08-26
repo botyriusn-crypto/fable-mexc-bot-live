@@ -1,0 +1,41 @@
+[DB] Connecting to: postgres://PASTE_THE_FULL_URL_HERE
+Fetching TAO_USDT Min5 for 60 days (offset 60d)...
+Fetched 17280 candles
+
+══════════════════════════════════════════════════════
+  SNIPER BACKTEST  [TAO_USDT Min5 60d]
+  entry=next-open  sigma=3.5  volMult=2  lev=3x  risk=1.0%  fees=0.020%  slip=0.030%  minStop=0.6%  offset=60d
+══════════════════════════════════════════════════════
+  Trades:            27
+  Win rate:          25.9%  (breakeven at 3:1 after costs is ~26-28%)
+  Avg win:           272.21 USDT
+  Avg loss:          105.97 USDT
+  Expectancy:        -7.92 USDT/trade
+  Avg R:             -0.066R
+  Profit factor:     0.90
+  Total PnL:         -213.91 USDT (-2.1%)
+  Total fees:        115.64 USDT
+  Sharpe (per-trade):-0.048
+  Max drawdown (MTM):9.2%
+  Skipped (stop<0.6%): 19
+
+  By signal type:
+    sweep    n=  27  win=25.9%  pnl=-213.91  avgR=-0.07
+
+  By direction:
+    short    n=  15  win=26.7%  pnl=-80.77  avgR=-0.04
+    long     n=  12  win=25.0%  pnl=-133.14  avgR=-0.10
+
+  By exit reason:
+    sl       n=  20  win=0.0%  pnl=-2119.38  avgR=-1.08
+    tp       n=   7  win=100.0%  pnl=1905.46  avgR=2.82
+
+  Stop-distance buckets (stop as % of entry):
+    0.6-1.0%  n=  16  win=25.0%  avgR=-0.12
+    >=1.0%    n=  11  win=27.3%  avgR=0.01
+
+  MFE before full-SL death (of 20 SL losers):
+    >=+1R:    7 (35%)  <- a TP at 1R converts these
+    >=+1.5R:    6 (30%)  <- a TP at 1.5R converts these
+    >=+2R:    1 (5%)  <- a TP at 2R converts these
+    >=+2.5R:    1 (5%)  <- a TP at 2.5R converts these

@@ -1,40 +1,35 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 
-const WEIGHT_LABELS: Record<string, string> = {
-  adx: "Trend (ADX)",
-  roc: "Momentum (ROC)",
-  rsi: "RSI",
-  atrPct: "Volatility (ATR)",
-  macdHist: "MACD hist",
-  sideLong: "Long bias",
-  volSurge: "Volume surge",
-  crossover: "Crossover",
-  emaSpread: "EMA spread",
+const PARAM_LABELS: Record<string, string> = {
+  sweepLookback: "Sweep lookback",
+  volumeSurgeMult: "Volume surge ×",
+  sigmaExtreme: "Sigma extreme",
+  fundingThreshold: "Funding threshold",
+  tpSlRatio: "TP:SL ratio",
+  resolveAfterBuckets: "Resolve after",
 }
 
 export function ClassifierCard({ state }: { state: any }) {
-  const s = (state as any)?.shadowStats
-  const model = (state as any)?.sniperModel
+  const s = (state as any)?.sniperStats
   const total = s?.totalEvaluations ?? 0
   const resolved = s?.resolvedCount ?? 0
   const correct = s?.correctCount ?? 0
   const accuracy = s?.accuracy ?? 0
-  const top = s?.topCandidate
-  const weights: Record<string, number> = model?.weights ?? {}
+  const params: Record<string, number> = s?.params ?? {}
 
   return (
     <Card className="border-yellow-400/50 bg-yellow-400/5 shadow-[0_0_16px_rgba(250,204,21,0.12)]">
       <CardHeader className="pb-2">
-        <CardTitle className="text-lg font-bold text-yellow-300">Shadow ML — Live Entry Training</CardTitle>
+        <CardTitle className="text-lg font-bold text-yellow-300">Sniper Signal — Rule-Based Entry</CardTitle>
         <p className="text-xs text-yellow-200/70">
-          Trains ONLY on non-grid outcomes (shadow + trend). Grid fills no longer pollute the model.
+          Liquidity sweeps + sigma exhaustion. No ML weights — the advisor tunes the rule params directly.
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="grid grid-cols-3 gap-2">
           <div className="rounded-md border border-yellow-400/40 bg-yellow-400/10 p-3 text-center">
             <div className="text-3xl font-bold text-yellow-300">{total}</div>
-            <div className="text-[10px] text-yellow-200/70">EVALUATIONS</div>
+            <div className="text-[10px] text-yellow-200/70">SIGNALS</div>
           </div>
           <div className="rounded-md border border-yellow-400/40 bg-yellow-400/10 p-3 text-center">
             <div className="text-3xl font-bold text-yellow-300">{resolved}</div>
@@ -45,6 +40,29 @@ export function ClassifierCard({ state }: { state: any }) {
             <div className="text-[10px] text-yellow-200/70">ACCURACY ({correct}/{resolved})</div>
           </div>
         </div>
+
+        {s?.bySignalType && (
+          <div className="rounded-md border border-yellow-400/40 bg-yellow-400/10 p-3">
+            <div className="text-[10px] text-yellow-200/70 mb-1">ACCURACY BY SIGNAL TYPE</div>
+            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
+              <span>SWEEP</span>
+              <span>{s.bySignalType.sweep.count > 0 ? `${(s.bySignalType.sweep.accuracy * 100).toFixed(0)}% (${s.bySignalType.sweep.correct}/${s.bySignalType.sweep.count})` : "—"}</span>
+            </div>
+            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
+              <span>SIGMA</span>
+              <span>{s.bySignalType.sigma.count > 0 ? `${(s.bySignalType.sigma.accuracy * 100).toFixed(0)}% (${s.bySignalType.sigma.correct}/${s.bySignalType.sigma.count})` : "—"}</span>
+            </div>
+            <div className="text-[10px] text-yellow-200/70 mt-2 mb-1">SIDE SPLITS</div>
+            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
+              <span className="text-success">LONG</span>
+              <span>{s.byDirection.long.count > 0 ? `${(s.byDirection.long.accuracy * 100).toFixed(0)}% (${s.byDirection.long.correct}/${s.byDirection.long.count})` : "—"}</span>
+            </div>
+            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
+              <span className="text-danger">SHORT</span>
+              <span>{s.byDirection.short.count > 0 ? `${(s.byDirection.short.accuracy * 100).toFixed(0)}% (${s.byDirection.short.correct}/${s.byDirection.short.count})` : "—"}</span>
+            </div>
+          </div>
+        )}
 
         {s?.confidenceBuckets && (
           <div className="rounded-md border border-yellow-400/40 bg-yellow-400/10 p-3">
@@ -61,15 +79,6 @@ export function ClassifierCard({ state }: { state: any }) {
               <span>LOW &lt;55%</span>
               <span>{s.confidenceBuckets.low.count > 0 ? `${(s.confidenceBuckets.low.accuracy * 100).toFixed(0)}% (${s.confidenceBuckets.low.correct}/${s.confidenceBuckets.low.count})` : "—"}</span>
             </div>
-            <div className="text-[10px] text-yellow-200/70 mt-2 mb-1">SIDE SPLITS</div>
-            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
-              <span className="text-success">LONG</span>
-              <span>{s.sideSplits.long.count > 0 ? `${(s.sideSplits.long.accuracy * 100).toFixed(0)}% (${s.sideSplits.long.correct}/${s.sideSplits.long.count})` : "—"}</span>
-            </div>
-            <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
-              <span className="text-danger">SHORT</span>
-              <span>{s.sideSplits.short.count > 0 ? `${(s.sideSplits.short.accuracy * 100).toFixed(0)}% (${s.sideSplits.short.correct}/${s.sideSplits.short.count})` : "—"}</span>
-            </div>
             <div className="text-[10px] text-yellow-200/70 mt-2 mb-1">REGIME DECAY CHECK</div>
             <div className="flex justify-between text-[10px] font-mono text-yellow-200/80">
               <span>LAST 50 RESOLVED</span>
@@ -82,33 +91,15 @@ export function ClassifierCard({ state }: { state: any }) {
           </div>
         )}
 
-        {top && (
-          <div className="rounded-md border border-yellow-400/40 bg-yellow-400/10 p-3">
-            <div className="text-[10px] text-yellow-200/70 mb-1">STRONGEST CURRENT READ</div>
-            <div className="font-mono text-xl font-bold text-yellow-300">
-              {top.symbol}{" "}
-              <span className={top.direction === "long" ? "text-success" : "text-danger"}>
-                {String(top?.direction || "unknown").toUpperCase()}
-              </span>{" "}
-              <span className="text-yellow-200/80">({(((top.confidence ?? 0) as number) * 100).toFixed(0)}% · {top.source === "ml" ? "ML" : "SETUP"})</span>
-            </div>
-          </div>
-        )}
-
         <div className="rounded-md border border-yellow-400/40 bg-yellow-400/10 p-3">
-          <div className="text-[10px] text-yellow-200/70 mb-2">LEARNED WEIGHTS — SNIPER MODEL ({model?.sampleCount ?? 0} non-grid samples)</div>
+          <div className="text-[10px] text-yellow-200/70 mb-2">RULE PARAMETERS (advisor-tuned)</div>
           <div className="space-y-1">
-            {Object.entries(WEIGHT_LABELS).map(([k, label]) => {
-              const v = weights[k] ?? 0
-              const pct = Math.min(Math.abs(v) / 1.5, 1) * 100
+            {Object.entries(PARAM_LABELS).map(([k, label]) => {
+              const v = params[k]
               return (
-                <div key={k} className="flex items-center gap-2 text-[10px]">
-                  <span className="w-24 shrink-0 text-yellow-200/70">{label}</span>
-                  <div className="relative h-1.5 flex-1 rounded bg-yellow-400/10">
-                    <div className={`absolute top-0 h-1.5 rounded ${v >= 0 ? "bg-success" : "bg-danger"}`}
-                      style={{ left: v >= 0 ? "50%" : `${50 - pct / 2}%`, width: `${Math.max(pct / 2, 1)}%` }} />
-                  </div>
-                  <span className="w-12 shrink-0 text-right font-mono text-yellow-200/80">{v.toFixed(3)}</span>
+                <div key={k} className="flex items-center justify-between text-[10px]">
+                  <span className="text-yellow-200/70">{label}</span>
+                  <span className="font-mono text-yellow-200/80">{v !== undefined ? v : "—"}</span>
                 </div>
               )
             })}
@@ -123,10 +114,10 @@ export function ClassifierCard({ state }: { state: any }) {
 
         <p className="text-[10px] leading-relaxed text-yellow-200/60">
           {resolved < 100
-            ? `Collecting baseline… ${100 - resolved} more resolved decisions before this model is trusted to gate SNIPER entries.`
+            ? `Collecting baseline… ${100 - resolved} more resolved signals before the sniper is trusted to gate live entries.`
             : accuracy >= 0.55
-              ? "Model shows a real edge — ready to be wired as a SNIPER entry gate."
-              : "Model not beating baseline yet — keep collecting, do not gate entries."}
+              ? "Sniper shows a real edge — ready to be wired as a live entry gate."
+              : "Sniper not beating baseline yet — keep collecting, do not gate entries."}
         </p>
       </CardContent>
     </Card>

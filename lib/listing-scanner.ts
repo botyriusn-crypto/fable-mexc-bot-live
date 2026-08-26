@@ -1,5 +1,5 @@
 import { db } from "./db"
-import { gridConfigs } from "./db/schema"
+import { gridConfigs, botConfig } from "./db/schema"
 import { eq } from "drizzle-orm"
 import { log } from "./logger"
 import { computeSafeGridSettings } from "./grid-sizing"
@@ -17,6 +17,10 @@ const BUDGET_PCT = 0.05 // 5% of total budget for new listings
 const TTL_HOURS = 24 // Auto-delete after 24h
 
 export async function scanNewListings(exchange: any): Promise<void> {
+  // Master kill-switch: never create new grids while stopped.
+  const cfgRows = await db.select({ gridEnabled: botConfig.gridEnabled }).from(botConfig).where(eq(botConfig.id, 1))
+  if (!cfgRows[0]?.gridEnabled) return
+
   const now = Date.now()
   if (now - lastScan < SCAN_INTERVAL) return
   lastScan = now

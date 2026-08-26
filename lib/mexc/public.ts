@@ -173,12 +173,66 @@ export function getCandles(symbol: string, timeframe: string, limit: number): Pr
   return fetchKlines(symbol, timeframe, limit);
 }
 
-export interface Candle {
-  timestamp: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-  quoteAssetVolume?: number;
+// Bulk ticker for ALL USDT perpetuals in one call — used by the sniper to
+// rank the whole market by volatility/momentum without N per-symbol calls.
+export interface BulkTicker { symbol: string; lastPrice: number; volume24: number; amount24: number; riseFallRate: number; fundingRate: number }
+let _bulkTickerCache: { data: BulkTicker[]; ts: number } | null = null
+
+export async function fetchAllTickers(): Promise<BulkTicker[]> {
+  if (_bulkTickerCache && Date.now() - _bulkTickerCache.ts < 30 * 1000) return _bulkTickerCache.data
+  const res = await fetch(`${BASE_URL}/ticker`, { cache: "no-store" })
+  if (!res.ok) throw new Error(`MEXC bulk ticker fetch failed: ${res.status}`)
+  const json = await res.json()
+  if (!json.success || !Array.isArray(json.data)) throw new Error("MEXC bulk ticker response unsuccessful")
+  const data: BulkTicker[] = json.data
+    .filter((t: any) => t.symbol.endsWith("_USDT"))
+    .map((t: any) => ({
+      symbol: t.symbol,
+      lastPrice: Number(t.lastPrice),
+      volume24: Number(t.volume24 ?? 0),
+      amount24: Number(t.amount24 ?? 0),
+      riseFallRate: Number(t.riseFallRate ?? 0),
+      fundingRate: Number(t.fundingRate ?? 0),
+    }))
+  _bulkTickerCache = { data, ts: Date.now() }
+  return data
+}
+
+// Recent trades (taker side) — the only "smart money" flow signal MEXC's
+// public API exposes. There is NO open-interest endpoint, so OI stays neutral.
+// Each deal carries a side (T: 1 = buy, 2 = sell) and a notional (p * v).
+export interface Deal { price: number; volume: number; side: 1 | 2; time: number }
+
+const __dealsCache = new Map<string, { t: number; d: Deal[] }>()
+
+export async function fetchDeals(symbol: string, limit = 100): Promise<Deal[]> {
+  const now = Date.now()
+  const c = __dealsCache.get(symbol)
+  if (c && now - c.t < 5000) return c.d
+  const res = await fetch(`${BASE_URL}/deals/${symbol}?limit=${limit}`, { cache: "no-store" })
+  if (!res.ok) throw new Error(`MEXC deals fetch failed for ${symbol}: ${res.status}`)
+  const json = await res.json()
+  if (!json.success || !Array.isArray(json.data)) throw new Error("MEXC deals response unsuccessful")
+  const deals: Deal[] = json.data.map((d: any) => ({
+    price: Number(d.p),
+    volume: Number(d.v),
+    side: d.T === 1 ? 1 : 2,
+    time: Number(d.t),
+  }))
+  __dealsCache.set(symbol, { t: Date.now(), d: deals })
+  return deals
+}
+
+// Aggregate taker buy/sell notional and net delta (CVD) from a deals snapshot.
+export interface TakerFlow { takerBuyVolume: number; takerSellVolume: number; cvd: number }
+
+export function computeTakerFlow(deals: Deal[]): TakerFlow {
+  let buy = 0
+  let sell = 0
+  for (const d of deals) {
+    const notional = d.price * d.volume
+    if (d.side === 1) buy += notional
+    else sell += notional
+  }
+  return { takerBuyVolume: buy, takerSellVolume: sell, cvd: buy - sell }
 }

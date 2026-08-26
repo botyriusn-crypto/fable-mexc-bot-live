@@ -1,0 +1,46 @@
+[DB] Connecting to: postgres://PASTE_THE_FULL_URL_HERE
+Fetching XRP_USDT Min5 for 60 days (offset 60d)...
+Fetched 17280 candles
+
+══════════════════════════════════════════════════════
+  SNIPER BACKTEST  [XRP_USDT Min5 60d]
+  entry=next-open  sigma=3.5  volMult=2  lev=3x  risk=1.0%  fees=0.020%  slip=0.030%  offset=60d
+══════════════════════════════════════════════════════
+  Trades:            103
+  Win rate:          33.0%  (breakeven at 3:1 after costs is ~26-28%)
+  Avg win:           266.62 USDT
+  Avg loss:          120.93 USDT
+  Expectancy:        7.00 USDT/trade
+  Avg R:             0.088R
+  Profit factor:     1.09
+  Total PnL:         720.95 USDT (7.2%)
+  Total fees:        878.37 USDT
+  Sharpe (per-trade):0.038
+  Max drawdown (MTM):14.0%
+
+  By signal type:
+    sweep    n=  96  win=31.3%  pnl=129.48  avgR=0.02
+    sigma    n=   7  win=57.1%  pnl=591.47  avgR=0.97
+
+  By direction:
+    short    n=  36  win=41.7%  pnl=1687.30  avgR=0.45
+    long     n=  67  win=28.4%  pnl=-966.35  avgR=-0.11
+
+  By exit reason:
+    sl       n=  69  win=0.0%  pnl=-8344.16  avgR=-1.14
+    tp       n=  33  win=100.0%  pnl=9027.68  avgR=2.64
+    eod      n=   1  win=100.0%  pnl=37.43  avgR=0.35
+
+  Stop-distance buckets (stop as % of entry):
+    <0.3%     n=   4  win=25.0%  avgR=-0.34
+    0.3-0.6%  n=  67  win=38.8%  avgR=0.30
+    0.6-1.0%  n=  25  win=20.0%  avgR=-0.42
+    >=1.0%    n=   7  win=28.6%  avgR=0.08
+
+  MFE before full-SL death (of 69 SL losers):
+    >=+1R:   23 (33%)  <- a TP at 1R converts these
+    >=+1.5R:   12 (17%)  <- a TP at 1.5R converts these
+    >=+2R:    6 (9%)  <- a TP at 2R converts these
+    >=+2.5R:    4 (6%)  <- a TP at 2.5R converts these
+
+Per-trade CSV: sno60_XRP_USDT.csv

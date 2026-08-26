@@ -7,7 +7,6 @@ export async function log(level: string, message: string, details?: any): Promis
       level,
       message,
       details: details || {},
-      timestamp: new Date()
     })
     console.log(`[${level.toUpperCase()}] ${message}`)
   } catch (err) {

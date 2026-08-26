@@ -63,6 +63,78 @@ export interface BotState {
     unrealizedPnl: number
     realizedPnl: number
   }
+  // Multi-grid / rotation / shadow fields returned by /api/bot/state (optional; absent in fallback)
+  gridConfigs?: Array<{
+    symbol: string
+    timeframe: string
+    enabled: boolean
+    paused: boolean
+    levels: number
+    effectiveLevels: number
+    spacing: number | null
+    buyCount: number
+    sellCount: number
+    unrealizedPnl: number
+    realizedPnl: number
+    budgetPct: number
+    leverage: number
+    gridLeverage?: number
+    atrMult?: number
+    makerMode?: boolean
+    direction: string
+  }>
+  gridEnabled?: boolean
+  lastRotationTime?: number
+  shadowStats?: {
+    totalEvaluations: number
+    resolvedCount: number
+    correctCount: number
+    accuracy: number
+    topCandidate: {
+      symbol: string
+      direction: string
+      createdAt: string
+      [key: string]: unknown
+    } | null
+  } | null
+  sniperStats?: {
+    params: Record<string, number>
+    totalEvaluations: number
+    resolvedCount: number
+    correctCount: number
+    accuracy: number
+    bySignalType: { sweep: { count: number; correct: number; accuracy: number }; sigma: { count: number; correct: number; accuracy: number } }
+    byDirection: { long: { count: number; correct: number; accuracy: number }; short: { count: number; correct: number; accuracy: number } }
+    confidenceBuckets: { high: { count: number; correct: number; accuracy: number }; mid: { count: number; correct: number; accuracy: number }; low: { count: number; correct: number; accuracy: number } }
+    rollingAccuracy: { last50: number; allTime: number }
+    topCandidate: {
+      symbol: string
+      direction: string
+      confidence: number
+      createdAt: string
+      source: string
+    } | null
+  } | null
+  watchdog?: unknown
+  liveStats?: unknown
+  todayStats?: unknown
+  risk?: {
+    tradingHalted: boolean
+    killSwitch: boolean
+    reasons: string[]
+    equity: number
+    dayStartEquity: number
+    peakEquity: number
+    dailyRealizedPnl: number
+    dailyPnl: number
+    dailyPnlPct: number
+    drawdownPct: number
+    usedMargin: number
+    usedMarginPct: number
+    marginBudgetRemaining: number
+    openPositionCount: number
+    updatedAt: number
+  } | null
 }
 
 const fetcher = async (url: string) => {
@@ -113,7 +185,7 @@ export function useBotState() {
         unrealizedPnl: 0,
         realizedPnl: 0
       }
-    }
+    } as unknown as BotState,
   })
 }
 

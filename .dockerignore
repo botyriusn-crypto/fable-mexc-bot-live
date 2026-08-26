@@ -1,12 +1,26 @@
+# Git
+.git
+.gitignore
 
-bot.log
-.DS_Store
-.env
-.env*
-.env.local
-*.log
-.next
-.next/
+# Node / build artifacts
 node_modules
-node_modules/
-pm2-*.log
+.next
+dist
+build
+
+# Runtime caches (regenerated at runtime — never needed in the image)
+sniper_klines_cache.json
+bybit_klines_cache.json
+funding_cache.json
+bybit_funding_cache.json
+*_cache.json
+*.cache.json
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Misc
+*.log
+.DS_Store

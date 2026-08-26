@@ -1,0 +1,30 @@
+[DB] Connecting to: postgres://PASTE_THE_FULL_URL_HERE
+Fetching LINK_USDT Min60 for 180 days...
+Fetched 4320 candles
+  Config: EMA 9/21  RSI 35/65  ADX t/r 25/29  SL/TP 1.5/2.5xATR  trail 1.2xATR  lev 3x  fees 0.020%  slip 0.030%  (live parity; ML gate neutral)
+  !! F9 WARNING: adxRangeThreshold (29) >= adxTrendThreshold (25)
+     -> "neutral" regime is IMPOSSIBLE; the live bot never stands aside.
+     -> Re-run with --adx-range 20 to quantify what the neutral zone restores.
+
+══════════════════════════════════════════════════════
+  BASE+FIXED+TREND  [LINK_USDT Min60 180d]
+══════════════════════════════════════════════════════
+  Trades:            267
+  Win rate:          38.2%
+  Avg win:           169.14 USDT
+  Avg loss:          105.05 USDT
+  Expectancy:        -0.30 USDT/trade
+  Avg R:             -0.026R
+  Profit factor:     1.00
+  Total PnL:         -79.87 USDT (-0.8%)
+  Total fees:        766.81 USDT
+  Sharpe (per-trade):-0.002
+  Max drawdown (MTM):18.5%
+
+  Per-strategy:
+    trend    n=267   win=38.2%  pnl=-79.87  avgR=-0.03
+  Per-exit-reason:
+    tp       n=102   win=100.0%  pnl=17252.78
+    sl       n=165   win=0.0%  pnl=-17332.66
+
+Per-trade CSVs: r4_trend_LINK_USDT_o0_*.csv

@@ -1,0 +1,47 @@
+[DB] Connecting to: postgresql://postgres:****@127.0.0.1:5432/fable_mexc_bot
+Fetching LTC_USDT Min5 for 60 days (offset 60d)...
+Fetched 17280 candles
+
+══════════════════════════════════════════════════════
+  SNIPER BACKTEST  [LTC_USDT Min5 60d]
+  entry=next-open  sigma=3.5  volMult=2  lev=3x  risk=1.0%  fees=0.020%  slip=0.030%  beAt=1R  offset=60d
+══════════════════════════════════════════════════════
+  Trades:            153
+  Win rate:          19.6%  (breakeven at 3:1 after costs is ~26-28%)
+  Avg win:           247.25 USDT
+  Avg loss:          71.70 USDT
+  Expectancy:        -9.16 USDT/trade
+  Avg R:             -0.093R
+  Profit factor:     0.84
+  Total PnL:         -1401.53 USDT (-14.0%)
+  Total fees:        1281.17 USDT
+  Sharpe (per-trade):-0.069
+  Max drawdown (MTM):17.5%
+
+  By signal type:
+    sweep    n= 150  win=19.3%  pnl=-1444.27  avgR=-0.10
+    sigma    n=   3  win=33.3%  pnl=42.74  avgR=0.08
+
+  By direction:
+    short    n=  57  win=24.6%  pnl=579.16  avgR=0.11
+    long     n=  96  win=16.7%  pnl=-1980.69  avgR=-0.21
+
+  By exit reason:
+    sl       n=  74  win=0.0%  pnl=-8062.13  avgR=-1.15
+    tp       n=  30  win=100.0%  pnl=7417.38  avgR=2.65
+    be       n=  48  win=0.0%  pnl=-722.36  avgR=-0.16
+    eod      n=   1  win=0.0%  pnl=-34.42  avgR=-0.40
+
+  Stop-distance buckets (stop as % of entry):
+    <0.3%     n=   4  win=25.0%  avgR=-0.34
+    0.3-0.6%  n= 114  win=18.4%  avgR=-0.13
+    0.6-1.0%  n=  29  win=27.6%  avgR=0.24
+    >=1.0%    n=   6  win=0.0%  avgR=-0.88
+
+  MFE before full-SL death (of 74 SL losers):
+    >=+1R:    0 (0%)  <- a TP at 1R converts these
+    >=+1.5R:    0 (0%)  <- a TP at 1.5R converts these
+    >=+2R:    0 (0%)  <- a TP at 2R converts these
+    >=+2.5R:    0 (0%)  <- a TP at 2.5R converts these
+
+Per-trade CSV: snbeo60_LTC_USDT.csv

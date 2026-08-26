@@ -1,0 +1,31 @@
+[DB] Connecting to: postgres://PASTE_THE_FULL_URL_HERE
+Fetching DOGE_USDT Min60 for 180 days...
+Fetched 4320 candles
+  Config: EMA 9/21  RSI 35/65  ADX t/r 25/29  SL/TP 1.5/2.5xATR  trail 1.2xATR  lev 3x  fees 0.020%  slip 0.030%  (live parity; ML gate neutral)
+  !! F9 WARNING: adxRangeThreshold (29) >= adxTrendThreshold (25)
+     -> "neutral" regime is IMPOSSIBLE; the live bot never stands aside.
+     -> Re-run with --adx-range 20 to quantify what the neutral zone restores.
+
+══════════════════════════════════════════════════════
+  BASE+FIXED+TREND  [DOGE_USDT Min60 180d]
+══════════════════════════════════════════════════════
+  Trades:            244
+  Win rate:          35.2%
+  Avg win:           192.15 USDT
+  Avg loss:          125.14 USDT
+  Expectancy:        -13.31 USDT/trade
+  Avg R:             -0.094R
+  Profit factor:     0.84
+  Total PnL:         -3247.48 USDT (-32.5%)
+  Total fees:        637.73 USDT
+  Sharpe (per-trade):-0.082
+  Max drawdown (MTM):39.8%
+
+  Per-strategy:
+    trend    n=244   win=35.2%  pnl=-3247.48  avgR=-0.09
+  Per-exit-reason:
+    tp       n=86    win=100.0%  pnl=16524.60
+    sl       n=157   win=0.0%  pnl=-19737.53
+    eod      n=1     win=0.0%  pnl=-34.55
+
+Per-trade CSVs: r4_trend_DOGE_USDT_o180_*.csv

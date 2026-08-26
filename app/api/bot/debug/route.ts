@@ -35,5 +35,5 @@ export async function GET() {
     recentTrades: allTrades,
     openOrdersCount: openOrders.length,
     openOrders: openOrders
-  }, null, 2)
+  })
 }

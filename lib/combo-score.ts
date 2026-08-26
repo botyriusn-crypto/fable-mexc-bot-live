@@ -43,11 +43,19 @@ export function comboDna(candles: Candle[], spacingPct = 0.6, lastAdx?: number):
       rejectionReason: `Pump/dump detected: ${driftPct.toFixed(1)}% drift (max 20%)`,
     }
   }
-  if (absDrift > 15) {
+  // 1.4 Tighter drift gate for small accounts: reject anything that has
+  // already drifted more than 8% over the lookback (was 15%). A COMBO grid
+  // entering after an 8%+ move is very likely to keep going and bleed the
+  // account before it can mean-revert.
+  // ONDO-DNA bypass (validated 2026-08-23): coins with perfect ATR 0.6-1.2%
+  // and ADX < 25 can handle 8-15% drift because they're in ideal grid fuel.
+  const isOndoDna = atrPct >= 0.6 && atrPct <= 1.2 && (lastAdx ?? 99) < 25
+  const driftThreshold = isOndoDna ? 15 : 8
+  if (absDrift > driftThreshold && !isOndoDna) {
     return {
       chop, revRate, rangePct, driftPct, atrPct, touches, score: 0,
       rejected: true,
-      rejectionReason: `High drift: ${driftPct.toFixed(1)}% (max 15%)`,
+      rejectionReason: `High drift: ${driftPct.toFixed(1)}% (max ${driftThreshold}%)`,
     }
   }
 
@@ -72,23 +80,45 @@ export function comboDna(candles: Candle[], spacingPct = 0.6, lastAdx?: number):
     rangeBonus +
     Math.max(0, 10 - driftPenalty)
 
-  const score = Math.round(activity + quality)
+  let score = Math.round(activity + quality)
+
+  // 1.4 Elevated-drift penalty: candidates in the 5–8% drift band pass the
+  // hard gate but are borderline, so dock their score to push them below
+  // cleaner, calmer candidates in the ranking.
+  if (absDrift > 5 && absDrift <= 8) {
+    score = Math.max(0, Math.round(score - (absDrift - 5) * 3))
+  }
 
   return { chop, revRate, rangePct, driftPct, atrPct, touches, score }
 }
 
-function suggestLeverage(dna: ComboDna): number {
+function suggestLeverage(dna: ComboDna, volumeUsdt: number): number {
   if (dna.rejected) return 1
+
+  // Liquidity ceiling: 24h volume as a market-cap proxy. Large caps can
+  // absorb higher leverage without slippage; micro caps cannot.
+  let lev: number
+  if (volumeUsdt >= 50_000_000) lev = 10
+  else if (volumeUsdt >= 10_000_000) lev = 5
+  else if (volumeUsdt >= 2_000_000) lev = 3
+  else lev = 1
+
+  // Volatility cap: high ATR% → pull down regardless of size.
+  const atrPct = dna.atrPct
+  if (atrPct >= 4.0) lev = Math.min(lev, 1)
+  else if (atrPct >= 2.5) lev = Math.min(lev, 3)
+  else if (atrPct >= 1.5) lev = Math.min(lev, 5)
+
+  // Drift cap: already moved a lot → pull down regardless of size.
   const absDrift = Math.abs(dna.driftPct)
-  if (dna.score >= 90 && absDrift < 3) return 10
-  if (dna.score >= 80 && absDrift < 5) return 7
-  if (dna.score >= 70 && absDrift < 8) return 5
-  if (dna.score >= 60 && absDrift < 12) return 3
-  return 1
+  if (absDrift > 8) lev = Math.min(lev, 1)
+  else if (absDrift > 5) lev = Math.min(lev, 3)
+
+  return lev
 }
 
-export function comboParams(dna: ComboDna, price: number) {
-  const suggestedLeverage = suggestLeverage(dna)
+export function comboParams(dna: ComboDna, price: number, volumeUsdt: number) {
+  const suggestedLeverage = suggestLeverage(dna, volumeUsdt)
   return {
     suggestedLeverage,
     spacingPct: Math.min(Math.max(dna.atrPct / 2, 0.4), 1.2),

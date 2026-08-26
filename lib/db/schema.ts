@@ -61,8 +61,65 @@ export const botConfig = pgTable("bot_config", {
   exchange: text("exchange").notNull().default("mexc"),
   aiAdvisorEnabled: boolean("ai_advisor_enabled").notNull().default(false),
   aiAnalysisSchedule: text("ai_analysis_schedule").notNull().default("manual"),
-  aiAdvisorEnabled: boolean("ai_advisor_enabled").notNull().default(false),
-  aiAnalysisSchedule: text("ai_analysis_schedule").notNull().default("manual"), // 'mexc' | 'gate' | 'bybit'
+  aiLastAnalysis: timestamp("ai_last_analysis", { withTimezone: true }),
+  swingEnabled: boolean("swing_enabled").notNull().default(false),
+  swingRiskPct: doublePrecision("swing_risk_pct").notNull().default(0.02),
+  swingSymbols: jsonb("swing_symbols").notNull().default('["BTC_USDT","ETH_USDT"]'),
+  swingLeverage: integer("swing_leverage").notNull().default(1),
+  sniperLive: boolean("sniper_live").notNull().default(false),
+  sniperMaxEntries: integer("sniper_max_entries").notNull().default(3),
+  sniperPositionSizeUsdt: doublePrecision("sniper_position_size_usdt").notNull().default(50),
+  sniperLeverage: integer("sniper_leverage").notNull().default(3),
+  sniperConfidenceFloor: doublePrecision("sniper_confidence_floor").notNull().default(0.6),
+  sniperCorrThreshold: doublePrecision("sniper_corr_threshold").notNull().default(0.8),
+  sniperSigmaExtreme: doublePrecision("sniper_sigma_extreme").notNull().default(3.5),
+  sniperVolumeSurgeMult: doublePrecision("sniper_volume_surge_mult").notNull().default(2.0),
+  sniperMinVolumeUsdt: doublePrecision("sniper_min_volume_usdt").notNull().default(1000000),
+  sniperTargetRiskUsdt: doublePrecision("sniper_target_risk_usdt").notNull().default(5),
+  sniperMinStopPct: doublePrecision("sniper_min_stop_pct").notNull().default(0.008),
+  sniperTpSlRatio: doublePrecision("sniper_tp_sl_ratio").notNull().default(4.0),
+  sniperMomentumThreshold: doublePrecision("sniper_momentum_threshold").notNull().default(0.7),
+  sniperTrailAtrMult: doublePrecision("sniper_trail_atr_mult").notNull().default(0.6),
+  // Partial profit taking
+  partialTakeEnabled: boolean("partial_take_enabled").notNull().default(false),
+  partialFraction: doublePrecision("partial_fraction").notNull().default(0.5),
+  partialAtrMult: doublePrecision("partial_atr_mult").notNull().default(1.0),
+  // Advanced strategy
+  advancedEnabled: boolean("advanced_enabled").notNull().default(false),
+  advancedMtfEnabled: boolean("advanced_mtf_enabled").notNull().default(true),
+  advancedHtfTimeframe: text("advanced_htf_timeframe").notNull().default("Min60"),
+  advancedHtfEmaFast: integer("advanced_htf_ema_fast").notNull().default(9),
+  advancedHtfEmaSlow: integer("advanced_htf_ema_slow").notNull().default(21),
+  advancedMtfMinAlignment: doublePrecision("advanced_mtf_min_alignment").notNull().default(0.66),
+  advancedSmartMoneyEnabled: boolean("advanced_smart_money_enabled").notNull().default(true),
+  advancedFundingLongThreshold: doublePrecision("advanced_funding_long_threshold").notNull().default(-0.0005),
+  advancedFundingShortThreshold: doublePrecision("advanced_funding_short_threshold").notNull().default(0.0005),
+  advancedOiDeltaThresholdPct: doublePrecision("advanced_oi_delta_threshold_pct").notNull().default(2),
+  advancedCvdZThreshold: doublePrecision("advanced_cvd_z_threshold").notNull().default(1.5),
+  advancedDynamicSizingEnabled: boolean("advanced_dynamic_sizing_enabled").notNull().default(true),
+  advancedBaseRiskPct: doublePrecision("advanced_base_risk_pct").notNull().default(0.01),
+  advancedMaxRiskPct: doublePrecision("advanced_max_risk_pct").notNull().default(0.02),
+  advancedConfidenceFloor: doublePrecision("advanced_confidence_floor").notNull().default(0.5),
+  advancedMaxPositionPct: doublePrecision("advanced_max_position_pct").notNull().default(0.25),
+  // Trend Rider strategy (4H detection + 15m entry + daily regime gate)
+  trendRiderEnabled: boolean("trend_rider_enabled").notNull().default(false),
+  trendRiderPositionSizeUsdt: doublePrecision("trend_rider_position_size_usdt").notNull().default(500),
+  trendRiderLeverage: integer("trend_rider_leverage").notNull().default(3),
+  trendRiderPullbackAtr: doublePrecision("trend_rider_pullback_atr").notNull().default(0.3),
+  trendRiderMinTrendAge: integer("trend_rider_min_trend_age").notNull().default(3),
+  trendRiderChandelierMult: doublePrecision("trend_rider_chandelier_mult").notNull().default(3.0),
+  trendRiderRegimeGate: boolean("trend_rider_regime_gate").notNull().default(true),
+  trendRiderRegimeAdxMin: integer("trend_rider_regime_adx_min").notNull().default(20),
+trendRiderHtfTrailUseSwing: boolean("trend_rider_htf_trail_use_swing").notNull().default(true),
+  // Funding carry (Bybit funding trading)
+  fundingCarryEnabled: boolean("funding_carry_enabled").notNull().default(false),
+  fundingCarryThreshold: doublePrecision("funding_carry_threshold").notNull().default(0.0001),
+  fundingCarryMomentumLookbackSec: integer("funding_carry_momentum_lookback_sec").notNull().default(259200),
+  fundingCarryHorizonSec: integer("funding_carry_horizon_sec").notNull().default(86400),
+  fundingCarrySizeUsdt: doublePrecision("funding_carry_size_usdt").notNull().default(50),
+  fundingCarryLeverage: integer("funding_carry_leverage").notNull().default(3),
+  fundingCarryTpBps: doublePrecision("funding_carry_tp_bps").notNull().default(50),
+  fundingCarrySlBps: doublePrecision("funding_carry_sl_bps").notNull().default(30),
   mode: text("mode").notNull().default("paper"),
   status: text("status").notNull().default("stopped"),
   paperBalance: doublePrecision("paper_balance").notNull().default(10000),
@@ -91,6 +148,8 @@ export const positions = pgTable("positions", {
   atrAtEntry: doublePrecision("atr_at_entry"),
   strategy: text("strategy").notNull().default("trend"), // 'trend' | 'range' | 'webhook'
   rangeTarget: doublePrecision("range_target"), // mean-reversion TP (BB middle at entry)
+  remainingQuantity: doublePrecision("remaining_quantity"),
+  partialExitCount: integer("partial_exit_count").notNull().default(0),
   status: text("status").notNull().default("open"), // 'open' | 'closed'
   openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
   closedAt: timestamp("closed_at", { withTimezone: true }),
@@ -107,9 +166,10 @@ export const trades = pgTable("trades", {
   leverage: integer("leverage").notNull(),
   pnl: doublePrecision("pnl").notNull(),
   fees: doublePrecision("fees").notNull(),
-  exitReason: text("exit_reason").notNull(), // 'tp' | 'sl' | 'trail' | 'signal' | 'manual'
+  exitReason: text("exit_reason").notNull(), // 'tp' | 'sl' | 'trail' | 'signal' | 'manual' | 'partial'
   strategy: text("strategy").notNull().default("trend"), // 'trend' | 'range' | 'webhook'
   entryConfidence: doublePrecision("entry_confidence"),
+  partial: boolean("partial").notNull().default(false),
   openedAt: timestamp("opened_at", { withTimezone: true }),
   closedAt: timestamp("closed_at", { withTimezone: true }).notNull().defaultNow(),
   live: boolean("live").notNull().default(false),
@@ -120,6 +180,7 @@ export const equitySnapshots = pgTable("equity_snapshots", {
   balance: doublePrecision("balance").notNull(),
   equity: doublePrecision("equity").notNull(),
   unrealizedPnl: doublePrecision("unrealized_pnl").notNull().default(0),
+  live: boolean("live").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })
 
@@ -209,6 +270,7 @@ export const gridOrders = pgTable("grid_orders", {
   exchangeStatus: text("exchange_status"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   filledAt: timestamp("filled_at", { withTimezone: true }),
+  syncedAt: timestamp("synced_at", { withTimezone: true }),
 })
 
 
@@ -231,8 +293,45 @@ export const gridConfigs = pgTable("grid_configs", {
   upper: doublePrecision("upper"),
   spacing: doublePrecision("spacing"),
   effectiveLevels: integer("effective_levels"),
+  // Free-form metadata (e.g. new-listing tracking: isNewListing, detectedAt, ttlHours).
+  metadata: jsonb("metadata"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+
+export const advisorVariants = pgTable("advisor_variants", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull().unique(),
+  params: jsonb("params").notNull(),
+  stats: jsonb("stats").notNull().default({ allowed: 0, correct: 0, sumReturn: 0 }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const gridFlowState = pgTable("grid_flow_state", {
+  id: serial("id").primaryKey(),
+  symbol: text("symbol").notNull().unique(),
+  timeframe: text("timeframe").notNull().default("Min15"),
+  gateEnabled: boolean("gate_enabled").notNull().default(true),
+  windowMs: integer("window_ms").notNull().default(21600000),
+  killSwitchWindowMs: integer("kill_switch_window_ms").notNull().default(86400000),
+  lastEvalAt: timestamp("last_eval_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const gridFlowShadow = pgTable("grid_flow_shadow", {
+  id: serial("id").primaryKey(),
+  symbol: text("symbol").notNull(),
+  side: text("side").notNull(), // 'long' | 'short'
+  entryPrice: doublePrecision("entry_price").notNull(),
+  quantity: doublePrecision("quantity").notNull().default(1),
+  leverage: integer("leverage").notNull().default(2),
+  tpPrice: doublePrecision("tp_price"),
+  slPrice: doublePrecision("sl_price"),
+  status: text("status").notNull().default("open"), // 'open' | 'resolved'
+  resolvedPnl: doublePrecision("resolved_pnl"),
+  openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
 })
 
 export type BotConfig = typeof botConfig.$inferSelect
@@ -242,3 +341,5 @@ export type Position = typeof positions.$inferSelect
 export type Trade = typeof trades.$inferSelect
 export type MlModelRow = typeof mlModel.$inferSelect
 export type AiRecommendation = typeof aiRecommendations.$inferSelect
+export type GridFlowState = typeof gridFlowState.$inferSelect
+export type GridFlowShadow = typeof gridFlowShadow.$inferSelect

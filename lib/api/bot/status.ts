@@ -16,7 +16,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       lastTickTime: lastTickTime ? new Date(lastTickTime).toISOString() : null,
       secondsSinceLastTick: timeSinceLastTick,
       isStuck: isTicking && timeSinceLastTick !== null && timeSinceLastTick > 60,
-      symbolsToMonitor: cfg.symbolsToMonitor || []
+      symbolsToMonitor: (cfg as any).symbolsToMonitor || []
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to get status' });

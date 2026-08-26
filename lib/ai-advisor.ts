@@ -1,6 +1,7 @@
 import { db } from "./db"
 import { trades, botConfig, aiRecommendations } from "./db/schema"
 import { eq, desc, and } from "drizzle-orm"
+import { clampRecommendations, normalizeField } from "./ai-levers"
 
 export interface TradeAnalysis {
   tradeCount: number
@@ -114,12 +115,45 @@ CURRENT SETTINGS:
 - Position Size: $${config.positionSizeUsdt}
 - Confirmation Mode: ${config.confirmationMode}
 
+SNIPER SETTINGS:
+- Sniper Live: ${config.sniperLive}
+- Sniper Max Entries: ${config.sniperMaxEntries}
+- Sniper Position Size: $${config.sniperPositionSizeUsdt}
+- Sniper Leverage: ${config.sniperLeverage}x
+- Sniper Confidence Floor: ${config.sniperConfidenceFloor}
+- Sniper Correlation Threshold: ${config.sniperCorrThreshold}
+- Sniper Sigma Extreme: ${config.sniperSigmaExtreme}
+- Sniper Volume Surge ×: ${config.sniperVolumeSurgeMult}
+- Sniper Min Volume (USDT): ${config.sniperMinVolumeUsdt}
+- Sniper Momentum Threshold: ${config.sniperMomentumThreshold}
+- Sniper Trail ATR ×: ${config.sniperTrailAtrMult}
+- Sniper Target Risk (USDT): $${config.sniperTargetRiskUsdt} (read-only — do not recommend changes)
+
 RECENT TRADE OUTCOMES:
 ${recentTrades.slice(0, 10).map((t, i) => `Trade ${i + 1}: ${t.side.toUpperCase()} - PnL: $${t.pnl.toFixed(2)}, Fees: $${t.fees.toFixed(2)}, Exit: ${t.exitReason}`).join("\n")}
 
-Provide 2-4 specific, actionable recommendations to improve performance. Return as JSON:
+Provide 2-4 specific, actionable recommendations to improve performance. Return as JSON array. Use EXACTLY these field names (camelCase, no spaces):
+- mlConfidenceThreshold
+- slAtrMult
+- tpAtrMult
+- emaFast
+- emaSlow
+- rsiPeriod
+- momentumThreshold
+- positionSizeUsdt
+- sniperMaxEntries
+- sniperPositionSizeUsdt
+- sniperLeverage
+- sniperConfidenceFloor
+- sniperCorrThreshold
+- sniperSigmaExtreme
+- sniperVolumeSurgeMult
+- sniperMinVolumeUsdt
+- sniperMomentumThreshold
+- sniperTrailAtrMult
+
 [
-  {"field": "setting_name", "current": current_value, "suggested": suggested_value, "reason": "brief reason", "impact": "expected impact"}
+  {"field": "mlConfidenceThreshold", "current": 0.7, "suggested": 0.85, "reason": "brief reason", "impact": "expected impact"}
 ]`
 
     const text = await callLLM(prompt)
@@ -138,6 +172,17 @@ Provide 2-4 specific, actionable recommendations to improve performance. Return 
         tpAtrMult: config.tpAtrMult,
         emaFast: config.emaFast, emaSlow: config.emaSlow,
         strategyMode: config.strategyMode,
+        sniperMaxEntries: config.sniperMaxEntries,
+        sniperPositionSizeUsdt: config.sniperPositionSizeUsdt,
+        sniperLeverage: config.sniperLeverage,
+        sniperConfidenceFloor: config.sniperConfidenceFloor,
+        sniperCorrThreshold: config.sniperCorrThreshold,
+        sniperSigmaExtreme: config.sniperSigmaExtreme,
+        sniperVolumeSurgeMult: config.sniperVolumeSurgeMult,
+        sniperMinVolumeUsdt: config.sniperMinVolumeUsdt,
+        sniperMomentumThreshold: config.sniperMomentumThreshold,
+        sniperTrailAtrMult: config.sniperTrailAtrMult,
+        sniperTargetRiskUsdt: config.sniperTargetRiskUsdt,
       },
       recommendations,
       status: "pending",
@@ -156,18 +201,27 @@ export async function applyRecommendations(
   recommendations: Array<{ field: string; current: unknown; suggested: unknown; reason: string; impact: string }>,
 ): Promise<boolean> {
   try {
-    const fieldMap: Record<string, string> = {
-      mlConfidenceThreshold: "ml_confidence_threshold",
-      slAtrMult: "sl_atr_mult", tpAtrMult: "tp_atr_mult",
-      emaFast: "ema_fast", emaSlow: "ema_slow",
-      rsiPeriod: "rsi_period", momentumThreshold: "momentum_threshold",
-      positionSizeUsdt: "position_size_usdt",
+    // Normalize display names ("ML Confidence Threshold") to canonical keys
+    // ("mlConfidenceThreshold") before routing through the levers.
+    const normalized = recommendations.map((rec) => ({ ...rec, field: normalizeField(rec.field) }))
+
+    // Route every suggestion through the levers (guardrails) before writing.
+    const { applied, skipped } = clampRecommendations(
+      normalized as Array<{ field: string; current: string | number | boolean; suggested: string | number | boolean; reason: string; impact: string }>,
+    )
+
+    for (const rec of skipped) {
+      console.warn(`[AI Advisor] Skipped ${rec.field}: ${rec.skipReason}`)
+    }
+    for (const rec of applied) {
+      if (rec.wasClamped) {
+        console.warn(`[AI Advisor] Clamped ${rec.field}: ${rec.current} -> ${rec.suggested} -> ${rec.clamped}`)
+      }
     }
 
     const updates: Record<string, unknown> = {}
-    for (const rec of recommendations) {
-      const dbField = fieldMap[rec.field]
-      if (dbField) updates[rec.field] = rec.suggested
+    for (const rec of applied) {
+      updates[rec.field] = rec.clamped
     }
     if (Object.keys(updates).length === 0) return false
 

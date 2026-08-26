@@ -1,0 +1,42 @@
+[DB] Connecting to: postgres://PASTE_THE_FULL_URL_HERE
+Fetching APT_USDT Min5 for 60 days (offset 60d)...
+Fetched 17280 candles
+
+══════════════════════════════════════════════════════
+  SNIPER BACKTEST  [APT_USDT Min5 60d]
+  entry=next-open  sigma=3.5  volMult=2  lev=3x  risk=1.0%  fees=0.020%  slip=0.030%  minStop=0.6%  offset=60d
+══════════════════════════════════════════════════════
+  Trades:            82
+  Win rate:          22.0%  (breakeven at 3:1 after costs is ~26-28%)
+  Avg win:           249.42 USDT
+  Avg loss:          98.41 USDT
+  Expectancy:        -22.05 USDT/trade
+  Avg R:             -0.230R
+  Profit factor:     0.71
+  Total PnL:         -1808.50 USDT (-18.1%)
+  Total fees:        358.92 USDT
+  Sharpe (per-trade):-0.153
+  Max drawdown (MTM):20.7%
+  Skipped (stop<0.6%): 92
+
+  By signal type:
+    sweep    n=  79  win=22.8%  pnl=-1526.13  avgR=-0.20
+    sigma    n=   3  win=0.0%  pnl=-282.38  avgR=-1.10
+
+  By direction:
+    long     n=  48  win=16.7%  pnl=-1873.77  avgR=-0.43
+    short    n=  34  win=29.4%  pnl=65.27  avgR=0.06
+
+  By exit reason:
+    sl       n=  64  win=0.0%  pnl=-6298.08  avgR=-1.08
+    tp       n=  18  win=100.0%  pnl=4489.58  avgR=2.81
+
+  Stop-distance buckets (stop as % of entry):
+    0.6-1.0%  n=  60  win=21.7%  avgR=-0.26
+    >=1.0%    n=  22  win=22.7%  avgR=-0.16
+
+  MFE before full-SL death (of 64 SL losers):
+    >=+1R:   18 (28%)  <- a TP at 1R converts these
+    >=+1.5R:    8 (13%)  <- a TP at 1.5R converts these
+    >=+2R:    5 (8%)  <- a TP at 2R converts these
+    >=+2.5R:    2 (3%)  <- a TP at 2.5R converts these

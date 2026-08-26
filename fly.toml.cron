@@ -1,0 +1,5 @@
+# Add this to your existing fly.toml under [http_service]
+# This schedules the swing tick to run every 4 hours at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
+
+# Note: Fly.io doesn't have built-in cron in the same way as traditional servers.
+# We'll use an external cron service or Fly's scheduled machines feature.

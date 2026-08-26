@@ -1,0 +1,26 @@
+[DB] Connecting to: postgresql://postgres:****@127.0.0.1:5432/fable_mexc_bot
+Fetching TAO_USDT Min15 for 60 days...
+Fetched 5760 candles
+  Config: EMA 9/21  RSI 35/65  ADX t/r 25/20  SL/TP 1.5/2.5xATR  trail 1.2xATR  lev 3x  fees 0.020%  slip 0.030%  (live parity; ML gate neutral)
+
+══════════════════════════════════════════════════════
+  BASE+FIXED  [TAO_USDT Min15 60d]
+══════════════════════════════════════════════════════
+  Trades:            223
+  Win rate:          33.6%
+  Avg win:           92.76 USDT
+  Avg loss:          57.47 USDT
+  Expectancy:        -6.94 USDT/trade
+  Avg R:             -0.190R
+  Profit factor:     0.82
+  Total PnL:         -1548.19 USDT (-15.5%)
+  Total fees:        617.30 USDT
+  Sharpe (per-trade):-0.091
+  Max drawdown (MTM):26.5%
+
+  Per-strategy:
+    range    n=76    win=30.3%  pnl=-804.52  avgR=-0.29
+    trend    n=147   win=35.4%  pnl=-743.66  avgR=-0.14
+  Per-exit-reason:
+    sl       n=148   win=0.0%  pnl=-8505.48
+    tp       n=75    win=100.0%  pnl=6957.30

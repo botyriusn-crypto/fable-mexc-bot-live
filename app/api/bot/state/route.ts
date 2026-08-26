@@ -10,10 +10,11 @@ import { getAccountAssets } from "@/lib/mexc/private"
 import { ema, computeSnapshot } from "@/lib/indicators"
 import { detectRegime, type Regime } from "@/lib/strategy"
 import { getGridConfigs, gridUnrealizedPnl } from "@/lib/grid"
-import { isRotationEnabled, getLastRotationTime } from "@/lib/portfolio-rotator"
+import { getLastRotationTime } from "@/lib/portfolio-rotator"
 import { getShadowStats, runShadowCycle } from "@/lib/shadow-evaluator"
 import { getWatchdogReport } from "@/lib/watchdog"
-import { loadModel } from "@/lib/ml"
+import { getSniperStats, runSniperCycle } from "@/lib/sniper"
+import { evaluatePortfolioRisk, getRiskState } from "@/lib/risk-manager"
 
 interface MexcAsset {
   currency: string; availableBalance: number; equity: number;
@@ -34,23 +35,28 @@ async function fetchLiveAccount() {
 
 export const dynamic = "force-dynamic"
 let lastShadowRun = 0
+let lastSniperRun = 0
 
 export async function GET() {
   const nowMs = Date.now()
   if (nowMs - lastShadowRun > 60_000) {
     lastShadowRun = nowMs
     runShadowCycle().catch(() => {})
+    if (nowMs - lastSniperRun > 60_000) {
+      lastSniperRun = nowMs
+      runSniperCycle().catch(() => {})
+    }
   }
   let shadowStats: any = null
-  let sniperModel: any = null
-  try { sniperModel = await loadModel() } catch { sniperModel = null }
+  let sniperStats: any = null
+  try { sniperStats = await getSniperStats() } catch { sniperStats = null }
   try {
     shadowStats = await getShadowStats()
   } catch {
     shadowStats = { totalEvaluations: 0, resolvedCount: 0, correctCount: 0, accuracy: 0, topCandidate: null }
   }
   try {
-    const [cfgRows, openPosRows, recentTrades, equity, logs, modelRows, activeGridOrders, decisions, gridConfigRows, lifetimeTradesRaw, gridRealizedRows] = await Promise.all([
+    const [cfgRows, openPosRows, recentTrades, equity, logs, modelRows, activeGridOrders, decisions, gridConfigRows, lifetimeTradesRaw, gridRealizedRows, swingPosRows, swingTradesRows] = await Promise.all([
       db.select().from(botConfig).where(eq(botConfig.id, 1)),
       db.select().from(positions).where(eq(positions.status, "open")),
       db.select().from(trades).orderBy(desc(trades.closedAt)).limit(50),
@@ -60,7 +66,7 @@ export async function GET() {
       db.select().from(gridOrders).where(inArray(gridOrders.status, ["pending", "external"])).orderBy(desc(gridOrders.price)),
       db.select().from(classifierDecisions).orderBy(desc(classifierDecisions.createdAt)).limit(100),
       db.select().from(gridConfigs).orderBy(gridConfigs.symbol),
-      db.select({ pnl: trades.pnl, live: trades.live }).from(trades),
+      db.select({ pnl: trades.pnl, live: trades.live, closedAt: trades.closedAt }).from(trades),
       // True all-time realized PnL per symbol, computed in the DB — not
       // filtered from a capped "recent" list. The old approach filtered a
       // shared, account-wide LIMIT 50 trades query down by symbol, which
@@ -71,6 +77,8 @@ export async function GET() {
         live: trades.live,
         totalPnl: sql<number>`COALESCE(SUM(${trades.pnl}), 0)`,
       }).from(trades).where(eq(trades.strategy, "grid")).groupBy(trades.symbol, trades.live),
+      db.select().from(positions).where(eq(positions.strategy, "swing")),
+      db.select().from(trades).where(eq(trades.strategy, "swing")),
     ])
 
     // Map keyed "symbol|isLive" -> true all-time realized PnL for that
@@ -89,9 +97,17 @@ export async function GET() {
       winRate: liveOnly.length > 0 ? liveOnly.filter((t) => (t.pnl || 0) > 0).length / liveOnly.length : 0,
     }
     
-    // TODAY stats (last 24h)
+    // MODE-AWARE stats — paper shows paper, live shows live (no mixing)
+    const isLiveModeStats = cfgRows[0]?.mode === "live"
+    const modeTrades = lifetimeTradesRaw.filter((t) => isLiveModeStats ? t.live === true : t.live !== true)
+    const modeStats = {
+      totalTrades: modeTrades.length,
+      totalPnl: modeTrades.reduce((s, t) => s + (t.pnl || 0), 0),
+      winRate: modeTrades.length > 0 ? modeTrades.filter((t) => (t.pnl || 0) > 0).length / modeTrades.length : 0,
+    }
+    // TODAY stats (last 24h, mode-aware)
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000)
-    const todayTrades = liveOnly.filter((t: any) => new Date(t.closedAt) > oneDayAgo)
+    const todayTrades = modeTrades.filter((t: any) => new Date(t.closedAt) > oneDayAgo)
     const todayStats = {
       trades: todayTrades.length,
       pnl: todayTrades.reduce((s, t) => s + (t.pnl || 0), 0),
@@ -100,6 +116,16 @@ export async function GET() {
 
     const cfg = cfgRows[0]
     if (!cfg) return NextResponse.json({ error: "Config not found" }, { status: 500 })
+
+    
+    // Swing strategy stats
+    const swingPositions = swingPosRows.filter((p: any) => p.status === "open")
+    const swingStats = {
+      totalTrades: swingTradesRows.length,
+      totalPnl: swingTradesRows.reduce((s, t) => s + (t.pnl || 0), 0),
+      winRate: swingTradesRows.length > 0 ? swingTradesRows.filter((t) => (t.pnl || 0) > 0).length / swingTradesRows.length : 0,
+      openPositions: swingPositions.length,
+    }
 
     const liveAccount = cfg.mode === "live" ? await fetchLiveAccount() : null
 
@@ -110,9 +136,9 @@ export async function GET() {
     try {
       const [t, candles] = await Promise.all([fetchTicker(cfg.symbol), fetchKlines(cfg.symbol, cfg.timeframe, 200)])
       ticker = t
-      const closes = candles.map((c) => c.close)
+      const closes = candles.map((c: any) => c.close)
       const emaF = ema(closes, cfg.emaFast), emaS = ema(closes, cfg.emaSlow)
-      chart = candles.slice(-100).map((c, i) => {
+      chart = candles.slice(-100).map((c: any, i: number) => {
         const j = candles.length - 100 + i
         return { time: c.time, close: c.close, emaFast: emaF[j], emaSlow: emaS[j] }
       })
@@ -139,6 +165,42 @@ export async function GET() {
       return { position: p, markPrice: mark, unrealizedPnl: mark == null ? 0 : (mark - p.entryPrice) * dir * p.quantity, selected: p.symbol === cfg.symbol && p.timeframe === cfg.timeframe }
     })
     const unrealizedPnl = exposures.reduce((t, e) => t + e.unrealizedPnl, 0)
+
+    // Strategy breakdown for open positions (mode-filtered)
+    const isLiveMode = cfg.mode === "live"
+    const filteredOpenPosRows = openPosRows
+    
+    const strategyBreakdown = {
+      grid: { unrealized: 0, count: 0 },
+      sniper: { unrealized: 0, count: 0 },
+      swing: { unrealized: 0, count: 0 },
+      trend: { unrealized: 0, count: 0 },
+      trend_rider: { unrealized: 0, count: 0 }
+    }
+    
+    for (const p of filteredOpenPosRows) {
+      const mark = markBySymbol.get(p.symbol)
+      if (!mark) continue
+      const dir = p.side === "long" ? 1 : -1
+      const pnl = (mark - p.entryPrice) * dir * p.quantity
+      const strat = p.strategy || "trend"
+      if (strategyBreakdown[strat]) {
+        strategyBreakdown[strat].unrealized += pnl
+        strategyBreakdown[strat].count += 1
+      }
+    }
+    
+    // Sniper profitability (all-time, mode-filtered)
+    const sniperTrades = await db.select().from(trades).where(eq(trades.strategy, "sniper"))
+    const filteredSniperTrades = sniperTrades.filter(t => isLiveMode ? t.live === true : t.live !== true)
+    const sniperWins = filteredSniperTrades.filter(t => t.pnl > 0)
+    const sniperLosses = filteredSniperTrades.filter(t => t.pnl <= 0)
+    const sniperTotalPnl = filteredSniperTrades.reduce((s, t) => s + t.pnl, 0)
+    const sniperWinRate = filteredSniperTrades.length > 0 ? sniperWins.length / filteredSniperTrades.length : 0
+    const sniperAvgR = filteredSniperTrades.length > 0 ? sniperTotalPnl / (filteredSniperTrades.length * (cfg.sniperTargetRiskUsdt || 5)) : 0
+    const sniperProfitFactor = sniperLosses.length > 0 
+      ? Math.abs(sniperWins.reduce((s, t) => s + t.pnl, 0) / sniperLosses.reduce((s, t) => s + t.pnl, 0))
+      : sniperWins.length > 0 ? Infinity : 0
 
     const wins = recentTrades.filter(t => t.pnl > 0).length
     const winRate = recentTrades.length > 0 ? wins / recentTrades.length : 0
@@ -234,16 +296,34 @@ export async function GET() {
       latest: marketDecisions[0] ?? null,
     }
 
+    // Portfolio risk snapshot: prefer the cached state from the last tick;
+    // if the bot hasn't ticked yet, compute a fresh one so the UI isn't blank.
+    let risk = getRiskState()
+    if (!risk) {
+      try { risk = await evaluatePortfolioRisk(cfg, totalGridUnrealized) } catch { risk = null }
+    }
+
     return NextResponse.json({
-      rotationEnabled: isRotationEnabled(),
+      gridEnabled: cfg.gridEnabled,
       lastRotationTime: getLastRotationTime(),
       shadowStats,
-      sniperModel,
+      risk,
+      sniperStats,
+    strategyBreakdown,
+    sniperProfitability: {
+      winRate: sniperWinRate,
+      avgR: sniperAvgR,
+      totalPnl: sniperTotalPnl,
+      profitFactor: sniperProfitFactor,
+      totalTrades: filteredSniperTrades.length,
+      wins: sniperWins.length,
+      losses: sniperLosses.length
+    },
       watchdog: getWatchdogReport(),
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,
       markPrice, unrealizedPnl: totalGridUnrealized,
       equity: cfg.paperBalance + totalGridUnrealized,
-      trades: recentTrades, winRate, liveStats, todayStats, equityCurve: equity.reverse(), logs,
+      trades: recentTrades, winRate, liveStats, modeStats, todayStats, swingStats, swingPositions: swingPositions, equityCurve: equity.filter((e: any) => e.live === (cfg.mode === "live")).reverse(), logs,
       model: modelRows[0] ?? null, classifierAnalytics, ticker, chart, liveAccount, regime, adxValue,
       grid: { orders: selectedGridOrders, allOrders: activeGridOrders, holdingCount: gridHolding.length, unrealizedPnl: gridUnrealized, realizedPnl: gridRealized },
       gridConfigs: gridConfigsState,

@@ -1,0 +1,30 @@
+[DB] Connecting to: postgres://PASTE_THE_FULL_URL_HERE
+Fetching HYPE_USDT Min60 for 180 days...
+Fetched 4320 candles
+  Config: EMA 9/21  RSI 35/65  ADX t/r 25/29  SL/TP 1.5/2.5xATR  trail 1.2xATR  lev 3x  fees 0.020%  slip 0.030%  (live parity; ML gate neutral)
+  !! F9 WARNING: adxRangeThreshold (29) >= adxTrendThreshold (25)
+     -> "neutral" regime is IMPOSSIBLE; the live bot never stands aside.
+     -> Re-run with --adx-range 20 to quantify what the neutral zone restores.
+
+══════════════════════════════════════════════════════
+  BASE+FIXED+TREND  [HYPE_USDT Min60 180d]
+══════════════════════════════════════════════════════
+  Trades:            244
+  Win rate:          41.8%
+  Avg win:           273.32 USDT
+  Avg loss:          188.50 USDT
+  Expectancy:        4.56 USDT/trade
+  Avg R:             0.084R
+  Profit factor:     1.04
+  Total PnL:         1112.26 USDT (11.1%)
+  Total fees:        808.70 USDT
+  Sharpe (per-trade):0.018
+  Max drawdown (MTM):34.4%
+
+  Per-strategy:
+    trend    n=244   win=41.8%  pnl=1112.26  avgR=0.08
+  Per-exit-reason:
+    tp       n=102   win=100.0%  pnl=27879.14
+    sl       n=142   win=0.0%  pnl=-26766.88
+
+Per-trade CSVs: r4_trend_HYPE_USDT_o0_*.csv

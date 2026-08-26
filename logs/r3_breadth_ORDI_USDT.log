@@ -1,0 +1,43 @@
+[DB] Connecting to: postgresql://postgres:****@127.0.0.1:5432/fable_mexc_bot
+Fetching ORDI_USDT Min5 for 60 days (offset 0d)...
+Fetched 17280 candles
+
+══════════════════════════════════════════════════════
+  SNIPER BACKTEST  [ORDI_USDT Min5 60d]
+  entry=next-open  sigma=3.5  volMult=2  lev=3x  risk=1.0%  fees=0.020%  slip=0.030%
+══════════════════════════════════════════════════════
+  Trades:            178
+  Win rate:          26.4%  (breakeven at 3:1 after costs is ~26-28%)
+  Avg win:           234.98 USDT
+  Avg loss:          98.04 USDT
+  Expectancy:        -10.10 USDT/trade
+  Avg R:             -0.099R
+  Profit factor:     0.86
+  Total PnL:         -1798.60 USDT (-18.0%)
+  Total fees:        1022.57 USDT
+  Sharpe (per-trade):-0.069
+  Max drawdown (MTM):23.6%
+
+  By signal type:
+    sweep    n= 169  win=25.4%  pnl=-2256.19  avgR=-0.13
+    sigma    n=   9  win=44.4%  pnl=457.60  avgR=0.57
+
+  By direction:
+    long     n=  78  win=29.5%  pnl=-92.48  avgR=0.01
+    short    n= 100  win=24.0%  pnl=-1706.12  avgR=-0.18
+
+  By exit reason:
+    sl       n= 131  win=0.0%  pnl=-12842.87  avgR=-1.11
+    tp       n=  47  win=100.0%  pnl=11044.27  avgR=2.73
+
+  Stop-distance buckets (stop as % of entry):
+    <0.3%     n=   1  win=0.0%  avgR=-1.24
+    0.3-0.6%  n=  82  win=30.5%  avgR=0.01
+    0.6-1.0%  n=  66  win=22.7%  avgR=-0.22
+    >=1.0%    n=  29  win=24.1%  avgR=-0.11
+
+  MFE before full-SL death (of 131 SL losers):
+    >=+1R:   47 (36%)  <- a TP at 1R converts these
+    >=+1.5R:   29 (22%)  <- a TP at 1.5R converts these
+    >=+2R:    6 (5%)  <- a TP at 2R converts these
+    >=+2.5R:    2 (2%)  <- a TP at 2.5R converts these

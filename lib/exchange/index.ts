@@ -6,8 +6,8 @@ const mexcAdapter: ExchangeAdapter = {
   name: "mexc",
   fetchKlines: async (s, i, l) => { const { fetchKlines } = await import("@/lib/mexc/public"); return fetchKlines(s, i, l) },
   fetchTicker: async (s) => { const { fetchTicker } = await import("@/lib/mexc/public"); return fetchTicker(s) },
-  fetchMarkets: async () => { const { fetchContractMarkets } = await import("@/lib/mexc/public"); return fetchContractMarkets() },
-  placeOrder: async (p) => { const { placeMarketOrder } = await import("@/lib/mexc/private"); return placeMarketOrder(p) },
+  fetchMarkets: async () => { const { fetchMarkets } = await import("@/lib/mexc/public"); return fetchMarkets() },
+  placeOrder: async (p) => { const { placeMarketOrder } = await import("@/lib/mexc/private"); await placeMarketOrder(p as any) },
   getAccountAssets: async () => { const { getAccountAssets } = await import("@/lib/mexc/private"); return getAccountAssets() },
 }
 

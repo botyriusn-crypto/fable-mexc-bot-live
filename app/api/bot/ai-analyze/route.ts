@@ -10,7 +10,7 @@ export async function POST() {
   try {
     const cfg = await db.select().from(botConfig).where(eq(botConfig.id, 1)).limit(1)
     if (!cfg.length) return NextResponse.json({ error: "Config not found" }, { status: 500 })
-    
+
     const config = cfg[0]
     const result = await analyzeTradesForMarket(config.symbol, config.timeframe)
     return NextResponse.json(result)

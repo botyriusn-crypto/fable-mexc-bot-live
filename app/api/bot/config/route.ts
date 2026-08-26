@@ -33,6 +33,32 @@ const NUMERIC_FIELDS = [
   "gridFeeMarginMult",
   "gridBudgetPct",
   "gridLeverage",
+  "sniperMaxEntries",
+  "sniperPositionSizeUsdt",
+  "sniperLeverage",
+  "sniperConfidenceFloor",
+  "sniperCorrThreshold",
+  "sniperSigmaExtreme",
+  "sniperMinStopPct",
+  "sniperTpSlRatio",
+  "sniperVolumeSurgeMult",
+  "sniperMinVolumeUsdt",
+  "sniperMomentumThreshold",
+  "sniperTrailAtrMult",
+  "sniperTargetRiskUsdt",
+  "trendRiderPositionSizeUsdt",
+  "trendRiderLeverage",
+  "trendRiderPullbackAtr",
+  "trendRiderMinTrendAge",
+  "trendRiderChandelierMult",
+  "trendRiderRegimeAdxMin",
+  "fundingCarryThreshold",
+  "fundingCarryMomentumLookbackSec",
+  "fundingCarryHorizonSec",
+  "fundingCarrySizeUsdt",
+  "fundingCarryLeverage",
+  "fundingCarryTpBps",
+  "fundingCarrySlBps",
 ] as const
 
 const STRATEGY_MODES = ["auto", "trend", "range"] as const
@@ -49,6 +75,10 @@ const BOOL_FIELDS = [
   "lorentzianKernelFilter",
   "lorentzianWebhooks",
   "aiAdvisorEnabled",
+  "sniperLive",
+  "trendRiderEnabled",
+  "trendRiderRegimeGate",
+  "fundingCarryEnabled",
 ] as const
 
 export async function POST(request: Request) {

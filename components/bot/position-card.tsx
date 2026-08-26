@@ -10,6 +10,9 @@ import { useSWRConfig } from "swr"
 const fmt = (value: number | null | undefined, digits = 2) =>
   value == null ? "—" : value.toLocaleString(undefined, { maximumFractionDigits: digits })
 
+const fmtPrice = (value: number | null | undefined) =>
+  value == null ? "—" : value.toLocaleString(undefined, { maximumSignificantDigits: 6 })
+
 export function PositionCard({ state }: { state: BotState }) {
   const { mutate } = useSWRConfig()
   const [closingId, setClosingId] = useState<number | null>(null)
@@ -50,7 +53,7 @@ export function PositionCard({ state }: { state: BotState }) {
                         {selected ? <Badge className="bg-primary text-primary-foreground">Selected</Badge> : <Badge variant="outline">Legacy</Badge>}
                       </div>
                       <span className="text-xs text-muted-foreground">
-                        {(position?.side || "unknown").toUpperCase()} {position.leverage}x · entry {fmt(position.entryPrice)} · mark {fmt(markPrice)}
+                        {(position?.side || "unknown").toUpperCase()} {position.leverage}x · entry {fmtPrice(position.entryPrice)} · mark {fmtPrice(markPrice)}
                       </span>
                     </div>
                     <Badge
