@@ -22,7 +22,7 @@ export const SNIPER_PARAMS = {
   sigmaExtreme: 3.5,
   fundingThreshold: 0.0005,
   minVolumeUsdt: 1_000_000,
-  tpSlRatio: 4,
+  tpSlRatio: 1.5,
   resolveAfterBuckets: 6,
   minStopPct: 0.008,
 } as const
