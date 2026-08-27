@@ -674,6 +674,14 @@ async function settleGridSell(
   reason: "tp" | "manual",
   exchange?: ExchangeClient
 ): Promise<boolean> {
+  // DEFENSIVE GUARD: a naked sell (no buyPrice) is a short-open, never a
+  // long-close. Refuse to book a phantom zero-PnL long if any future path
+  // reaches here without a buyPrice.
+  if (order.buyPrice == null) {
+    await log("error", `Grid ${order.symbol}: settleGridSell called on naked sell (no buyPrice) — refusing to book phantom long`)
+    return false
+  }
+
   // ATOMIC CLAIM: only one concurrent caller can ever win this update (only
   // succeeds if the row is still "pending"). Without this, overlapping
   // triggers (duplicate WS events, overlapping ticks, or old/new instances
@@ -1455,20 +1463,14 @@ if (shouldRecenter) {
   // 1) Sell fills: price rose to/above a pending sell level
   const sells = active.filter((o) => o.side === "sell" && hi >= o.price)
 for (const o of sells) {
-if (o.buyPrice == null && (gc as any).direction === "neutral") {
+if (o.buyPrice == null) {
 await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
 const closePrice = o.price - spacing
 await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, entryFeatures: { ...snap.features, sideLong: -1 }, status: "pending" })
 await log("trade", `Grid ${o.symbol} COMBO short sell @ ${o.price.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
 continue
 }
-if (o.buyPrice == null && gc.direction === "neutral") {
-await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-const closePrice = o.price - spacing
-await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, entryFeatures: { ...snap.features, sideLong: -1 }, status: "pending" })
-await log("trade", `Grid ${o.symbol} COMBO short sell @ ${o.price.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
-continue
-}
+
 const sold = await settleGridSell(o, o.price, cfg, "tp", exchange)
     // Re-arm the buy at its original level — only if the sell actually
     // succeeded. Re-arming after a failed sell (e.g. the position no longer
