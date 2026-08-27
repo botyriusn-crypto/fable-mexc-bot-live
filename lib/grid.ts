@@ -5,11 +5,10 @@ import type { FeatureVector, IndicatorSnapshot } from "./indicators"
 import { detectVolatilitySurge, adaptiveSpacing, type VolatilityState } from "./volatility-guard"
 import type { Regime } from "./strategy"
 import { loadModelFor, trainOnTrade, MODEL_IDS } from "./ml"
-import { getExchangeClient, type ExchangeClient, type Exchange } from "./exchange"
-import { placePostOnlyOrder, placeMarketOrder as makerMarketOrder, fetchOrderStatus, cancelOrders, getAccountAssets } from "./mexc/private"
+import { getExchangeClient, getFeeRates, type ExchangeClient, type Exchange } from "./exchange"
 import type { Candle } from "./mexc/public"
 import { fetchTicker } from "./mexc/public"
-import { roundMexcQuantity, roundMexcPrice, getMexcSpec, getMexcSpecAsync, getMexcFeeRates } from "./mexc/precision"
+import { getMexcSpecAsync } from "./mexc/precision"
 import { livePrices } from "./mexc/ws"
 import { isTradingHalted, marginBudgetRemaining, getRiskState } from "./risk-manager"
 import { shouldGateEntry, recordShadowEntry, resolveShadowEntries, evaluateKillSwitch } from "./grid-flow"
@@ -75,25 +74,15 @@ function isMakerSymbol(gc: { makerMode?: boolean }): boolean {
   return MAKER_ENABLED && !!gc.makerMode
 }
 
-function roundForMexc(symbol: string, price: number, quantity: number): { price: number, quantity: number } {
-  // Use safe synchronous specs to avoid initialization errors
-  const spec = getMexcSpec(symbol, price)
-  const roundedPrice = Number((Math.round(price / spec.priceUnit) * spec.priceUnit).toFixed(spec.priceScale))
-  const roundedQty = Math.max(spec.minVol, Math.round(quantity / spec.contractSize) * spec.contractSize)
-  return {
-    price: roundedPrice,
-    quantity: roundedQty
-  }
-}
+
 
 // Universal maker order placement with precision rounding for ALL symbols
-async function placeRoundedMakerOrder(symbol: string, side: number, price: number, volume: number, leverage: number): Promise<any> {
-  const rounded = roundForMexc(symbol, price, volume)
-  return placePostOnlyOrder({
+async function placeRoundedMakerOrder(symbol: string, side: number, price: number, volume: number, leverage: number, exchange: ExchangeClient): Promise<any> {
+  return exchange.placePostOnlyOrder({
     symbol,
     side: side as 1 | 2 | 3 | 4,
-    price: rounded.price,
-    volume: rounded.quantity,
+    price,
+    volume,
     leverage,
   })
 }
@@ -191,13 +180,13 @@ function effectiveMakerStopPct(leverage: number): number {
 // Cancels other pending orders for this pair on the REAL exchange (not just
 // the database) before marking them cancelled — otherwise any real resting
 // order gets orphaned on MEXC while our records claim it's gone.
-async function cancelOtherPendingOrders(active: GridOrder[], keepId: number): Promise<void> {
+async function cancelOtherPendingOrders(active: GridOrder[], keepId: number, exchange: ExchangeClient): Promise<void> {
   const others = active.filter(x => x.id !== keepId && x.status === "pending")
   if (others.length === 0) return
   const realIds = others.filter(o => o.mexcOrderId).map(o => o.mexcOrderId!) as string[]
   if (realIds.length > 0) {
     try {
-      await cancelOrders(realIds)
+      await exchange.cancelOrders(realIds)
     } catch (err) {
       await log("error", `Grid stop-loss: failed cancelling ${realIds.length} real resting order(s) on exchange: ${dbErr(err)}`)
     }
@@ -215,14 +204,14 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
     if (adverse >= effectiveGridStopPct(o.leverage)) {
       if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 4, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
       const grossPnl = (price - o.buyPrice!) * o.quantity
-      const { takerFeeRate: rtf1 } = getMexcFeeRates(o.symbol)
+      const { takerFeeRate: rtf1 } = getFeeRates(cfg.exchange as Exchange, o.symbol)
       const fees = (o.buyPrice! + price) * o.quantity * rtf1
       if (cfg.mode === "paper") {
         await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - fees}` }).where(eq(botConfig.id, 1))
       }
       const claimedLongStop = await db.update(gridOrders).set({ status: "filled" }).where(and(eq(gridOrders.id, o.id), eq(gridOrders.status, "pending"))).returning({ id: gridOrders.id })
       if (claimedLongStop.length === 0) return false
-      await cancelOtherPendingOrders(active, o.id)
+      await cancelOtherPendingOrders(active, o.id, exchange ?? getExchangeClient(cfg.exchange as Exchange))
       await log("trade", `Grid ${o.symbol} STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${(grossPnl - fees).toFixed(2)} USDT`)
       return true
     }
@@ -234,12 +223,12 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
     if (adverse >= effectiveGridStopPct(o.leverage)) {
       if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
       const grossPnl = (o.buyPrice! - price) * o.quantity
-      const { takerFeeRate: rtf2 } = getMexcFeeRates(o.symbol)
+      const { takerFeeRate: rtf2 } = getFeeRates(cfg.exchange as Exchange, o.symbol)
       const fees = (o.buyPrice! + price) * o.quantity * rtf2
       if (cfg.mode === "paper") {
         await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - fees}` }).where(eq(botConfig.id, 1))
       }
-      await cancelOtherPendingOrders(active, o.id)
+      await cancelOtherPendingOrders(active, o.id, exchange ?? getExchangeClient(cfg.exchange as Exchange))
       await db.update(gridOrders).set({ status: "filled" }).where(eq(gridOrders.id, o.id))
       await log("trade", `Grid ${o.symbol} SHORT STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${(grossPnl - fees).toFixed(2)} USDT`)
       return true
@@ -359,12 +348,14 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
     await log("error", `Grid ${gc.symbol}: Failed to fetch MEXC specs: ${dbErr(err)}`);
   }
 
+  const client = exchange ?? getExchangeClient(cfg.exchange as Exchange)
+
     try {
       const existingOrders = await getActiveOrders(gc.symbol, gc.timeframe)
       if (existingOrders.length > 0) {
         const orderIds = existingOrders.map(o => o.mexcOrderId).filter((id): id is string => !!id)
         if (orderIds.length > 0) {
-          await cancelOrders(orderIds)
+          await client.cancelOrders(orderIds)
           await log("info", `Grid ${gc.symbol}: Cancelled ${orderIds.length} existing orders before rebuild`)
         }
         await db.update(gridOrders)
@@ -387,7 +378,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   // 0% today) but an adverse exit (stop-loss/max-hold) always crosses as a
   // taker market order. Using real entry-fee basis instead of assuming taker
   // on both legs, which was needlessly widening every maker pair's grid.
-  const { makerFeeRate: realMakerFeeRate, takerFeeRate: realTakerFeeRate } = getMexcFeeRates(gc.symbol)
+  const { makerFeeRate: realMakerFeeRate, takerFeeRate: realTakerFeeRate } = getFeeRates(cfg.exchange as Exchange, gc.symbol)
   const entryFeeRate = isMakerSymbol(gc) ? realMakerFeeRate : realTakerFeeRate
   const breakeven = center * (entryFeeRate + realTakerFeeRate)
   const feeBasedMin = breakeven * gc.feeMarginMult
@@ -412,10 +403,10 @@ if (effectiveDirection(gc) === "neutral") baseSpacing = Math.max(center * 0.006,
   let effectiveBalance = cfg.paperBalance
   if (cfg.mode === "live") {
     try {
-      const { getAccountAssets } = await import("./mexc/private")
-      const assets = await getAccountAssets() as any[]
-      await log("info", `[Balance] Fetched ${assets.length} assets from MEXC`);
-      const usdt = Array.isArray(assets) ? assets.find((a: any) => a.currency === "USDT") : null
+      const client = exchange ?? getExchangeClient(cfg.exchange as Exchange)
+      const assets = await client.getAccountAssets()
+      await log("info", `[Balance] Fetched ${assets.length} assets from exchange`);
+      const usdt = assets.find((a) => a.currency === "USDT") ?? null
       if (usdt) {
         effectiveBalance = Number(usdt.availableBalance)
         await log("info", `[Balance] USDT available: ${effectiveBalance.toFixed(2)}`);
@@ -526,8 +517,9 @@ if (isNeutral) {
   // Balance check: ensure we have enough margin for all orders
   if (cfg.mode === "live") {
     try {
-      const assets = await getAccountAssets()
-      const usdtAsset = assets.find((a: any) => a.currency === "USDT")
+      const client = exchange ?? getExchangeClient(cfg.exchange as Exchange)
+      const assets = await client.getAccountAssets()
+      const usdtAsset = assets.find((a) => a.currency === "USDT")
       const availableBalance = usdtAsset ? Number(usdtAsset.availableBalance) : 0
       
       // Check existing orders for this symbol
@@ -569,7 +561,7 @@ if (cfg.mode === "live") {
         
         while (retries < maxRetries) {
           try {
-            res = await placeRoundedMakerOrder(ord.symbol, side, ord.price, ord.quantity, ord.leverage);
+            res = await placeRoundedMakerOrder(ord.symbol, side, ord.price, ord.quantity, ord.leverage, client);
             break; // Success, exit retry loop
           } catch (err) {
             const errMsg = dbErr(err);
@@ -629,9 +621,9 @@ export async function teardownGrid(cfg: BotConfig, currentPrice: number | null):
   // Maker: cancel real resting orders on the exchange first so we never leave
   // orphaned post-only orders behind after a manual stop.
   const makerIds = active.filter((o) => o.mexcOrderId).map((o) => o.mexcOrderId!) as string[]
-  if (makerIds.length > 0) {
+  if (makerIds.length > 0 && exchange) {
     try {
-      await cancelOrders(makerIds)
+      await exchange.cancelOrders(makerIds)
       await log("info", `Grid teardown: cancelled ${makerIds.length} resting maker orders on exchange`)
     } catch (err) {
       await log("error", `Grid teardown: failed cancelling maker orders: ${err instanceof Error ? err.message : String(err)}`)
@@ -696,7 +688,7 @@ async function settleGridSell(
 
   if (cfg.mode === "live") {
     try {
-      if (exchange) { const r = roundForMexc(order.symbol, order.price, order.quantity); await exchange.placeMarketOrder({ symbol: order.symbol, side: 4, volume: r.quantity, leverage: order.leverage }) }
+      if (exchange) { await exchange.placeMarketOrder({ symbol: order.symbol, side: 4, volume: order.quantity, leverage: order.leverage }) }
     } catch (err) {
       await log("error", `LIVE grid sell failed: ${err instanceof Error ? err.message : String(err)}`)
       // Real sell failed on the exchange. Revert the claim so a later,
@@ -713,7 +705,7 @@ async function settleGridSell(
   const buyPrice = order.buyPrice ?? order.price
   const sizeUsdt = buyPrice * order.quantity
   const grossPnl = (exitPrice - buyPrice) * order.quantity
-  const { takerFeeRate: sgsRate } = getMexcFeeRates(order.symbol)
+  const { takerFeeRate: sgsRate } = getFeeRates(cfg.exchange as Exchange, order.symbol)
   const buyFee = buyPrice * order.quantity * sgsRate
   const sellFee = exitPrice * order.quantity * sgsRate
   const fees = buyFee + sellFee
@@ -787,7 +779,7 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
   const sizeUsdt = buyPrice * order.quantity
   const grossPnl = (exitPrice - buyPrice) * order.quantity
   // Both legs were resting post-only (maker) fills in this settlement path.
-  const { makerFeeRate: smsRate } = getMexcFeeRates(order.symbol)
+  const { makerFeeRate: smsRate } = getFeeRates(cfg.exchange as Exchange, order.symbol)
   const buyFee = buyPrice * order.quantity * smsRate
   const sellFee = exitPrice * order.quantity * smsRate
   const fees = buyFee + sellFee
@@ -850,15 +842,16 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
   // round-trip entirely and settle locally. Hitting the exchange here would
   // always return 2009 "Position is nonexistent" and loop forever.
   if (cfg.mode !== "paper") {
+    const client = getExchangeClient(cfg.exchange as Exchange)
     if (order.mexcOrderId) {
       try {
-        await cancelOrders([order.mexcOrderId])
+        await client.cancelOrders([order.mexcOrderId])
       } catch (err) {
         await log("error", `Grid ${order.symbol} (maker): failed cancelling resting sell before ${reason}: ${dbErr(err)}`)
       }
     }
     try {
-      await makerMarketOrder({ symbol: order.symbol, side: 4, volume: order.quantity, leverage: order.leverage })
+      await client.placeMarketOrder({ symbol: order.symbol, side: 4, volume: order.quantity, leverage: order.leverage })
     } catch (err) {
       const errMsg = dbErr(err)
       if (errMsg.includes("2009") || errMsg.includes("nonexistent")) {
@@ -875,7 +868,7 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
   const grossPnl = (exitPrice - buyPrice) * order.quantity
   // Entry was a resting post-only (maker) buy fill; this exit is a forced
   // market order (stop-loss/max-hold), which always crosses as taker.
-  const { makerFeeRate: mslMaker, takerFeeRate: mslTaker } = getMexcFeeRates(order.symbol)
+  const { makerFeeRate: mslMaker, takerFeeRate: mslTaker } = getFeeRates(cfg.exchange as Exchange, order.symbol)
   const buyFee = buyPrice * order.quantity * mslMaker
   const sellFee = exitPrice * order.quantity * mslTaker
   const fees = buyFee + sellFee
@@ -926,15 +919,16 @@ async function settleMakerShortStopLoss(order: GridOrder, exitPrice: number, cfg
 // round-trip entirely and settle locally. Hitting the exchange here would
 // always return 2009 "Position is nonexistent" and loop forever.
 if (cfg.mode !== "paper") {
+  const client = getExchangeClient(cfg.exchange as Exchange)
   if (order.mexcOrderId) {
     try {
-      await cancelOrders([order.mexcOrderId])
+      await client.cancelOrders([order.mexcOrderId])
     } catch (err) {
       await log("error", `Grid ${order.symbol} (maker short): failed cancelling resting buy before ${reason}: ${dbErr(err)}`)
     }
   }
   try {
-    await makerMarketOrder({ symbol: order.symbol, side: 2, volume: order.quantity, leverage: order.leverage })
+    await client.placeMarketOrder({ symbol: order.symbol, side: 2, volume: order.quantity, leverage: order.leverage })
   } catch (err) {
     const errMsg = dbErr(err)
     if (errMsg.includes("2009") || errMsg.includes("nonexistent")) {
@@ -950,7 +944,7 @@ const sizeUsdt = entryPrice * order.quantity
 const grossPnl = (entryPrice - exitPrice) * order.quantity
 // Entry was a resting post-only (maker) sell fill (short open); this exit is
 // a forced market order (stop-loss/max-hold), which always crosses as taker.
-const { makerFeeRate: mssMaker, takerFeeRate: mssTaker } = getMexcFeeRates(order.symbol)
+const { makerFeeRate: mssMaker, takerFeeRate: mssTaker } = getFeeRates(cfg.exchange as Exchange, order.symbol)
 const fees = (entryPrice * mssMaker + exitPrice * mssTaker) * order.quantity
 const netPnl = grossPnl - fees
 const [trade] = await db
@@ -1042,8 +1036,8 @@ export async function checkAllHeldPositionsRisk(): Promise<void> {
   }
 }
 
-async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): Promise<void> {
-  if (gc.direction === "short" || (gc as any)._autoSide === "short") { return handleShortGridTickMaker(cfg, gc, snap, regime) }
+async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime, exchange: ExchangeClient): Promise<void> {
+  if (gc.direction === "short" || (gc as any)._autoSide === "short") { return handleShortGridTickMaker(cfg, gc, snap, regime, exchange) }
   let active = await getActiveOrders(gc.symbol, gc.timeframe)
   // ── Adaptive flow gate: resolve shadow positions + periodic kill-switch ──
   await resolveShadowEntries(gc.symbol, snap.price)
@@ -1063,7 +1057,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
       if (restingBuys.length > 0) {
         try {
           const liveIds = restingBuys.filter(o => o.mexcOrderId).map((o) => o.mexcOrderId!) as string[]
-          if (liveIds.length > 0) await cancelOrders(liveIds)
+          if (liveIds.length > 0) await exchange.cancelOrders(liveIds)
           await db.update(gridOrders)
             .set({ status: "cancelled", exchangeStatus: "cancelled" })
             .where(inArray(gridOrders.id, restingBuys.map((o) => o.id)))
@@ -1134,7 +1128,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
               }
             }
             const liveIds = naked.filter(o => o.mexcOrderId).map((o) => o.mexcOrderId!) as string[]
-            if (liveIds.length > 0) await cancelOrders(liveIds)
+            if (liveIds.length > 0) await exchange.cancelOrders(liveIds)
             if (naked.length > 0) {
               await db.update(gridOrders)
                 .set({ status: "cancelled", exchangeStatus: "cancelled" })
@@ -1155,7 +1149,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
   // Poll resting BUY orders for real fills
   const buys = active.filter((o) => o.side === "buy" && o.mexcOrderId)
   for (const o of buys) {
-    const st: any = await fetchOrderStatus(o.mexcOrderId as string)
+    const st: any = await exchange.fetchOrderStatus(o.mexcOrderId as string)
     if (!st) continue
     const state = Number(st.state)
     if (state === 3) {
@@ -1166,7 +1160,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
       if (o.buyPrice != null) {
         const entryPrice = o.buyPrice
         const grossPnl = (entryPrice - fillPrice) * o.quantity
-        const { makerFeeRate: scRate } = getMexcFeeRates(o.symbol)
+        const { makerFeeRate: scRate } = getFeeRates(cfg.exchange as Exchange, o.symbol)
         const fees = (entryPrice + fillPrice) * o.quantity * scRate
         const netPnl = grossPnl - fees
         const sizeUsdt = entryPrice * o.quantity
@@ -1185,7 +1179,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
         // Re-arm a fresh naked sell at the original short entry level
         if (!paused) {
           try {
-            const res: any = await placeRoundedMakerOrder(o.symbol, 3, entryPrice, o.quantity, o.leverage)
+            const res: any = await placeRoundedMakerOrder(o.symbol, 3, entryPrice, o.quantity, o.leverage, exchange)
             const sid = extractOrderId(res)
             await db.insert(gridOrders).values({
               symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
@@ -1203,12 +1197,12 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
         .update(gridOrders)
         .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
         .where(eq(gridOrders.id, o.id))
-      const buyFee = fillPrice * o.quantity * getMexcFeeRates(o.symbol).makerFeeRate
+      const buyFee = fillPrice * o.quantity * getFeeRates(cfg.exchange as Exchange, o.symbol).makerFeeRate
       await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance}` /* MARGIN DEDUCTION REMOVED FOR PAPER TRADING */ }).where(eq(botConfig.id, 1))
 
       const sellPrice = fillPrice + (snap.atr * gc.rangeAtrMult)
       try {
-        const res: any = await placeRoundedMakerOrder(o.symbol, 4, sellPrice, o.quantity, o.leverage)
+        const res: any = await placeRoundedMakerOrder(o.symbol, 4, sellPrice, o.quantity, o.leverage, exchange)
               const sid = extractOrderId(res)
         await db.insert(gridOrders).values({
           symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
@@ -1229,7 +1223,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
   // Poll resting SELL orders for real fills
   const sells = active.filter((o) => o.side === "sell" && o.mexcOrderId)
   for (const o of sells) {
-    const st: any = await fetchOrderStatus(o.mexcOrderId as string)
+    const st: any = await exchange.fetchOrderStatus(o.mexcOrderId as string)
     if (!st) continue
     const state = Number(st.state)
     if (state === 3) {
@@ -1242,7 +1236,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
           .where(eq(gridOrders.id, o.id))
         const closePrice = fillPrice - (snap.atr * gc.rangeAtrMult)
         try {
-          const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage)
+          const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage, exchange)
           const bid = extractOrderId(res)
           await db.insert(gridOrders).values({
             symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
@@ -1262,7 +1256,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
       // Re-arm a resting maker buy back at the original level
       if (o.buyPrice != null && !paused) {
         try {
-          const res: any = await placeRoundedMakerOrder(o.symbol, 1, o.buyPrice, o.quantity, o.leverage)
+          const res: any = await placeRoundedMakerOrder(o.symbol, 1, o.buyPrice, o.quantity, o.leverage, exchange)
               const bid = extractOrderId(res)
           await db.insert(gridOrders).values({
             symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
@@ -1317,7 +1311,7 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
   // Maker mode (live + enabled symbol): use the real-order polling path and
   // skip the entire virtual-fill engine below.
   if (cfg.mode === "live" && isMakerSymbol(gc)) {
-    return runGridTickMaker(cfg, gc, snap, regime)
+    return runGridTickMaker(cfg, gc, snap, regime, exchange ?? getExchangeClient(cfg.exchange as Exchange))
   }
 
   const active = await getActiveOrders(gc.symbol, gc.timeframe)
@@ -1498,7 +1492,7 @@ if (o.buyPrice != null && (gc as any).direction === "neutral") {
   
   const entry = o.buyPrice
   const grossPnl = (entry - o.price) * o.quantity
-  const fees = (entry + o.price) * o.quantity * getMexcFeeRates(o.symbol).makerFeeRate
+  const fees = (entry + o.price) * o.quantity * getFeeRates(cfg.exchange as Exchange, o.symbol).makerFeeRate
   const netPnl = grossPnl - fees
   await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
 await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
@@ -1511,7 +1505,7 @@ continue
 // block above, which already `continue`s on match, so this could never run)
 if (cfg.mode === "live") {
         try {
-          if (exchange) { const r = roundForMexc(o.symbol, o.price, o.quantity); await log("info", `LIVE buy: ${o.symbol} price=${r.price} qty=${r.quantity} lev=${o.leverage}`); await exchange.placeMarketOrder({ symbol: o.symbol, side: 1 as any, volume: r.quantity, leverage: o.leverage }) }
+          if (exchange) { await log("info", `LIVE buy: ${o.symbol} price=${o.price} qty=${o.quantity} lev=${o.leverage}`); await exchange.placeMarketOrder({ symbol: o.symbol, side: 1 as any, volume: o.quantity, leverage: o.leverage }) }
         } catch (err) {
           await log("error", `LIVE grid buy failed: ${err instanceof Error ? err.message : String(err)}`)
           continue
@@ -1519,7 +1513,7 @@ if (cfg.mode === "live") {
       }
 
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      const buyFee = o.price * o.quantity * getMexcFeeRates(o.symbol).takerFeeRate
+      const buyFee = o.price * o.quantity * getFeeRates(cfg.exchange as Exchange, o.symbol).takerFeeRate
       await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance}` /* MARGIN DEDUCTION REMOVED FOR PAPER TRADING */ }).where(eq(botConfig.id, 1))
 
       // Check the DATABASE for existing sells to prevent duplicates
@@ -1549,7 +1543,7 @@ if (cfg.mode === "live") {
 }
 
 
-async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): Promise<void> {
+async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, regime: Regime, exchange: ExchangeClient): Promise<void> {
   let active = await getActiveOrders(gc.symbol, gc.timeframe)
   // ── Adaptive flow gate: resolve shadow positions + periodic kill-switch ──
   await resolveShadowEntries(gc.symbol, snap.price)
@@ -1574,14 +1568,14 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
   }
   const spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
   for (const o of active.filter(o => o.side === "sell" && o.mexcOrderId)) {
-    const st: any = await fetchOrderStatus(o.mexcOrderId as string)
+    const st: any = await exchange.fetchOrderStatus(o.mexcOrderId as string)
     if (!st) continue
     if (Number(st.state) === 3) {
       const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
       const closePrice = fillPrice - (snap.atr * gc.rangeAtrMult)
       try {
-        const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage)
+        const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage, exchange)
         const bid = extractOrderId(res)
         await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: fillPrice, mexcOrderId: bid, exchangeStatus: "new", status: "pending" })
         await log("trade", `Short ${o.symbol} sell filled @ ${fillPrice.toFixed(6)} | buy to close @ ${closePrice.toFixed(6)}`)
@@ -1594,13 +1588,13 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
     }
   }
   for (const o of active.filter(o => o.side === "buy" && o.mexcOrderId)) {
-    const st: any = await fetchOrderStatus(o.mexcOrderId as string)
+    const st: any = await exchange.fetchOrderStatus(o.mexcOrderId as string)
     if (!st) continue
     if (Number(st.state) === 3) {
       const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
       const entryPrice = o.buyPrice ?? exitPrice
       const grossPnl = (entryPrice - exitPrice) * o.quantity
-      const fees = (entryPrice + exitPrice) * o.quantity * getMexcFeeRates(o.symbol).makerFeeRate
+      const fees = (entryPrice + exitPrice) * o.quantity * getFeeRates(cfg.exchange as Exchange, o.symbol).makerFeeRate
       const netPnl = grossPnl - fees
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
       if (cfg.mode === "paper") {
@@ -1609,7 +1603,7 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
       await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice, sizeUsdt: entryPrice * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
       await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(6)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
       try {
-        const res: any = await placeRoundedMakerOrder(o.symbol, 3, entryPrice, o.quantity, o.leverage)
+        const res: any = await placeRoundedMakerOrder(o.symbol, 3, entryPrice, o.quantity, o.leverage, exchange)
         const sid = extractOrderId(res)
         await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: entryPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
       } catch (err) {
@@ -1628,6 +1622,7 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
 
 async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, exchange?: ExchangeClient): Promise<void> {
   let active = await getActiveOrders(gc.symbol, gc.timeframe)
+  const client = exchange ?? getExchangeClient(cfg.exchange as Exchange)
   if (active.length === 0) {
     // ── Adaptive flow gate: block new short entries when trailing 6h PnL < 0 ──
     if (await shouldGateEntry(gc.symbol)) {
@@ -1651,14 +1646,14 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
   try { if (exchange) { const t = await exchange.fetchTicker(gc.symbol); if (t?.lastPrice) price = t.lastPrice } } catch {}
   for (const o of active.filter(o => o.side === "sell")) {
     if (o.mexcOrderId) {
-      const st: any = await fetchOrderStatus(o.mexcOrderId)
+      const st: any = await client.fetchOrderStatus(o.mexcOrderId)
       if (st && Number(st.state) === 3) {
         const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
         await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
         const closePrice = fillPrice - (snap.atr * gc.rangeAtrMult)
         if (cfg.mode === "live") {
           try {
-            const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage)
+            const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage, client)
             const bid = extractOrderId(res)
             await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: fillPrice, mexcOrderId: bid, exchangeStatus: "new", status: "pending" })
           } catch (err) { await log("error", `Short buy close failed: ${dbErr(err)}`) }
@@ -1679,12 +1674,12 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
   }
   for (const o of active.filter(o => o.side === "buy")) {
     if (o.mexcOrderId) {
-      const st: any = await fetchOrderStatus(o.mexcOrderId)
+      const st: any = await client.fetchOrderStatus(o.mexcOrderId)
       if (st && Number(st.state) === 3) {
         const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
         const entryPrice = o.buyPrice ?? exitPrice
         const grossPnl = (entryPrice - exitPrice) * o.quantity
-        const fees = (entryPrice + exitPrice) * o.quantity * getMexcFeeRates(o.symbol).makerFeeRate
+        const fees = (entryPrice + exitPrice) * o.quantity * getFeeRates(cfg.exchange as Exchange, o.symbol).makerFeeRate
         const netPnl = grossPnl - fees
         await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
         if (cfg.mode === "paper") {
@@ -1695,7 +1690,7 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
         const newSellPrice = entryPrice
         if (cfg.mode === "live") {
           try {
-            const res: any = await placeRoundedMakerOrder(o.symbol, 3, newSellPrice, o.quantity, o.leverage)
+            const res: any = await placeRoundedMakerOrder(o.symbol, 3, newSellPrice, o.quantity, o.leverage, client)
             const sid = extractOrderId(res)
             await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
           } catch (err) { await log("error", `Short re-arm sell failed: ${dbErr(err)}`) }
@@ -1709,7 +1704,7 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
         try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (err) { await log("error", `Short close failed: ${dbErr(err)}`) }
       }
       const grossPnl = (entryPrice - o.price) * o.quantity
-      const { makerFeeRate: mixedMaker, takerFeeRate: mixedTaker } = getMexcFeeRates(o.symbol)
+      const { makerFeeRate: mixedMaker, takerFeeRate: mixedTaker } = getFeeRates(cfg.exchange as Exchange, o.symbol)
       // Mixed fill: entry leg was a maker sell, close leg is a taker buy.
       const fees = (entryPrice * mixedMaker + o.price * mixedTaker) * o.quantity
       const netPnl = grossPnl - fees
@@ -1722,7 +1717,7 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
       const newSellPrice = entryPrice
       if (cfg.mode === "live") {
         try {
-          const res: any = await placeRoundedMakerOrder(o.symbol, 3, newSellPrice, o.quantity, o.leverage)
+          const res: any = await placeRoundedMakerOrder(o.symbol, 3, newSellPrice, o.quantity, o.leverage, client)
           const sid = extractOrderId(res)
           await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
         } catch (err) { await log("error", `Short re-arm sell failed: ${dbErr(err)}`) }
@@ -1774,7 +1769,7 @@ export async function reconcileOrphanedPositions(): Promise<void> {
       return
     }
 
-    const exchange = getExchangeClient("mexc")
+    const exchange = getExchangeClient(cfgRows[0].exchange as Exchange)
     const openPositions = (await exchange.getOpenPositions()) as any[]
     console.log(`[Reconcile] Checking ${Array.isArray(openPositions) ? openPositions.length : 0} open MEXC position(s) for orphans`)
     if (!Array.isArray(openPositions) || openPositions.length === 0) return
@@ -1840,6 +1835,8 @@ export async function reconcileOrphanedPositions(): Promise<void> {
 export async function syncExchangeState() {
   try {
     const configs = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
+    const cfgRows = await db.select().from(botConfig).limit(1)
+    const client = getExchangeClient((cfgRows[0]?.exchange as Exchange) ?? "mexc")
     console.log(`[Reconcile] Syncing state for ${configs.length} enabled pairs...`)
     
     for (const c of configs) {
@@ -1860,7 +1857,7 @@ export async function syncExchangeState() {
           
           if (dbOrder.mexcOrderId) {
             try {
-              const st: any = await fetchOrderStatus(dbOrder.mexcOrderId as string)
+              const st: any = await client.fetchOrderStatus(dbOrder.mexcOrderId as string)
               if (st) {
                 const state = Number(st.state)
                 // MEXC States: 1=Unfilled, 2=PartiallyFilled, 3=Filled, 4=Cancelled

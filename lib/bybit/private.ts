@@ -95,6 +95,29 @@ function roundQty(qty: number, step: number): number {
   return Math.floor(qty * factor) / factor
 }
 
+// --- instrument tick-size cache (avoids a fetch per order) ---
+const tickSizeCache: Record<string, number> = {}
+
+async function getTickSize(symbol: string): Promise<number> {
+  const bs = toBybitSymbol(symbol)
+  if (tickSizeCache[bs]) return tickSizeCache[bs]
+  const r = (await privateRequest("GET", "/market/instruments-info", {
+    category: "linear",
+    symbol: bs,
+  })) as { list?: Array<{ priceFilter?: { tickSize?: string } }> }
+  const tick = Number(r?.list?.[0]?.priceFilter?.tickSize ?? "0.1")
+  tickSizeCache[bs] = tick
+  return tick
+}
+
+// Round a price to the symbol's tickSize precision (nearest tick).
+function roundPrice(price: number, tick: number): number {
+  const decimals = (tick.toString().split(".")[1] || "").length
+  const factor = Math.pow(10, decimals)
+  return Math.round(price * factor) / factor
+}
+
+
 // Set leverage for a symbol (must be done before placing an order).
 export async function setLeverage(symbol: string, leverage: number): Promise<unknown> {
   return privateRequest("POST", "/position/set-leverage", {
@@ -152,4 +175,58 @@ export async function getOpenPositions(symbol?: string): Promise<unknown> {
     params.symbol = toBybitSymbol(symbol)
   }
   return privateRequest("GET", "/position/list", params)
+}
+
+
+// side: 1 = open long, 2 = close short, 3 = open short, 4 = close long
+export async function placePostOnlyOrder(opts: {
+  symbol: string
+  side: 1 | 2 | 3 | 4
+  price: number
+  volume: number
+  leverage: number
+}): Promise<unknown> {
+  const sideMap: Record<number, string> = {
+    1: "Buy",   // open long
+    2: "Sell",  // close short
+    3: "Sell",  // open short
+    4: "Buy",   // close long
+  }
+  const bs = toBybitSymbol(opts.symbol)
+  const step = await getQtyStep(bs)
+  const qty = roundQty(opts.volume, step)
+  if (qty <= 0) throw new Error(`Order qty rounds to 0 (${opts.volume} contracts, step ${step})`)
+  const tick = await getTickSize(bs)
+  const price = roundPrice(opts.price, tick)
+  await setLeverage(bs, opts.leverage)
+  return privateRequest("POST", "/order/create", {
+    category: "linear",
+    symbol: bs,
+    side: sideMap[opts.side],
+    orderType: "Limit",
+    price: String(price),
+    qty: String(qty),
+    timeInForce: "PostOnly",
+    reduceOnly: opts.side === 2 || opts.side === 4,
+  })
+}
+
+export async function fetchOrderStatus(orderId: string): Promise<unknown> {
+  return privateRequest("GET", "/order/realtime", {
+    category: "linear",
+    orderId,
+  })
+}
+
+export async function cancelOrders(orderIds: string[]): Promise<unknown> {
+  const results: unknown[] = []
+  for (const orderId of orderIds) {
+    results.push(
+      await privateRequest("POST", "/order/cancel", {
+        category: "linear",
+        orderId,
+      })
+    )
+  }
+  return results
 }

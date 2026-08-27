@@ -68,12 +68,59 @@ async function privateRequest(
   return json
 }
 
+// --- contract spec cache (quanto_multiplier, price round, min size) ---
+interface GateSpec {
+  quantoMultiplier: number
+  orderPriceRound: number
+  orderSizeMin: number
+}
+
+const gateSpecCache: Record<string, GateSpec> = {}
+
+async function getGateSpec(symbol: string): Promise<GateSpec> {
+  if (gateSpecCache[symbol]) return gateSpecCache[symbol]
+  const res = await fetch(`${BASE_URL}/futures/usdt/contracts/${symbol}`, { cache: "no-store" })
+  if (!res.ok) {
+    throw new Error(`Gate.io contract detail fetch failed: ${res.status} ${res.statusText}`)
+  }
+  const data = (await res.json()) as {
+    quanto_multiplier?: string
+    order_price_round?: string
+    order_size_min?: number
+  }
+  const spec: GateSpec = {
+    quantoMultiplier: Number(data.quanto_multiplier ?? "1"),
+    orderPriceRound: Number(data.order_price_round ?? "0.1"),
+    orderSizeMin: Number(data.order_size_min ?? 1),
+  }
+  gateSpecCache[symbol] = spec
+  return spec
+}
+
+// Convert coin quantity -> integer contracts (floored to quanto_multiplier),
+// throwing if the result is below the symbol's minimum order size.
+function roundGateQty(coinQty: number, spec: GateSpec): number {
+  const contracts = Math.floor(coinQty / spec.quantoMultiplier)
+  if (contracts < spec.orderSizeMin) {
+    throw new Error(`Order size ${contracts} contracts below min ${spec.orderSizeMin} (${coinQty} coin, quanto ${spec.quantoMultiplier})`)
+  }
+  return contracts
+}
+
+// Round price to the symbol's order_price_round tick (nearest tick).
+function roundGatePrice(price: number, spec: GateSpec): number {
+  const decimals = (spec.orderPriceRound.toString().split(".")[1] || "").length
+  const factor = Math.pow(10, decimals)
+  return Math.round(price * factor) / factor
+}
+
+
 // side: 1 = open long, 2 = close short, 3 = open short, 4 = close long
 // Gate.io uses: long_open, long_close, short_open, short_close
 export async function placeMarketOrder(opts: {
   symbol: string
   side: 1 | 2 | 3 | 4
-  volume: number // contracts
+  volume: number // coin quantity (base coin)
   leverage: number
 }): Promise<unknown> {
   const sideMap: Record<number, string> = {
@@ -83,9 +130,12 @@ export async function placeMarketOrder(opts: {
     4: "short_close",
   }
 
+  const spec = await getGateSpec(opts.symbol)
+  const size = roundGateQty(opts.volume, spec)
+
   return privateRequest("POST", "/futures/usdt/orders", {
     contract: opts.symbol,
-    size: opts.volume,
+    size,
     price: "0", // market order
     tif: "ioc", // immediate or cancel
     reduce_only: opts.side === 2 || opts.side === 4,
@@ -101,4 +151,42 @@ export async function getOpenPositions(symbol?: string): Promise<unknown> {
     ? `/futures/usdt/positions?contract=${symbol}`
     : "/futures/usdt/positions"
   return privateRequest("GET", path)
+}
+
+
+// side: 1 = open long, 2 = close short, 3 = open short, 4 = close long
+// Gate.io determines direction by the SIGN of `size` (positive = long,
+// negative = short), combined with `reduce_only` for closes.
+export async function placePostOnlyOrder(opts: {
+  symbol: string
+  side: 1 | 2 | 3 | 4
+  price: number
+  volume: number
+  leverage: number
+}): Promise<unknown> {
+  const isClose = opts.side === 2 || opts.side === 4
+  const isShort = opts.side === 3 || opts.side === 4
+  const spec = await getGateSpec(opts.symbol)
+  const size = roundGateQty(opts.volume, spec)
+  const price = roundGatePrice(opts.price, spec)
+  const signedSize = isShort ? -size : size
+  return privateRequest("POST", "/futures/usdt/orders", {
+    contract: opts.symbol,
+    size: signedSize,
+    price: String(price),
+    tif: "poc", // post-only
+    reduce_only: isClose,
+  })
+}
+
+export async function fetchOrderStatus(orderId: string): Promise<unknown> {
+  return privateRequest("GET", `/futures/usdt/orders/${orderId}`)
+}
+
+export async function cancelOrders(orderIds: string[]): Promise<unknown> {
+  const results: unknown[] = []
+  for (const orderId of orderIds) {
+    results.push(await privateRequest("DELETE", `/futures/usdt/orders/${orderId}`))
+  }
+  return results
 }

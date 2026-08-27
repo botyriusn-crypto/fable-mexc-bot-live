@@ -5,8 +5,7 @@ import {
   botLogs, mlModel, gridOrders, classifierDecisions,
 } from "@/lib/db/schema"
 import { eq, desc, inArray, sql, and } from "drizzle-orm"
-import { fetchTicker, fetchKlines } from "@/lib/mexc/public"
-import { getAccountAssets } from "@/lib/mexc/private"
+import { getExchangeClient, type Exchange } from "@/lib/exchange"
 import { ema, computeSnapshot } from "@/lib/indicators"
 import { detectRegime, type Regime } from "@/lib/strategy"
 import { getGridConfigs, gridUnrealizedPnl } from "@/lib/grid"
@@ -16,18 +15,17 @@ import { getWatchdogReport } from "@/lib/watchdog"
 import { getSniperStats, runSniperCycle } from "@/lib/sniper"
 import { evaluatePortfolioRisk, getRiskState } from "@/lib/risk-manager"
 
-interface MexcAsset {
+interface AccountAsset {
   currency: string; availableBalance: number; equity: number;
-  unrealized: number; positionMargin: number; frozenBalance: number;
+  unrealized: number; positionMargin?: number; frozenBalance?: number;
 }
 
-async function fetchLiveAccount() {
-  if (!process.env.MEXC_API_KEY || !process.env.MEXC_API_SECRET) return null
+async function fetchLiveAccount(exchange: Exchange) {
   try {
-    const assets = (await getAccountAssets()) as MexcAsset[]
+    const assets = (await getExchangeClient(exchange).getAccountAssets()) as AccountAsset[]
     const usdt = Array.isArray(assets) ? assets.find((a) => a.currency === "USDT") : null
     if (!usdt) return { error: "No USDT asset found" }
-    return { availableBalance: usdt.availableBalance, equity: usdt.equity, unrealized: usdt.unrealized, positionMargin: usdt.positionMargin }
+    return { availableBalance: usdt.availableBalance, equity: usdt.equity, unrealized: usdt.unrealized, positionMargin: usdt.positionMargin ?? 0 }
   } catch (err) {
     return { error: err instanceof Error ? err.message : "Failed to fetch live account" }
   }
@@ -127,14 +125,15 @@ export async function GET() {
       openPositions: swingPositions.length,
     }
 
-    const liveAccount = cfg.mode === "live" ? await fetchLiveAccount() : null
+    const liveAccount = cfg.mode === "live" ? await fetchLiveAccount(cfg.exchange as Exchange) : null
 
     let ticker = null
     let chart: { time: number; close: number; emaFast: number; emaSlow: number }[] = []
     let regime: Regime | null = null
     let adxValue: number | null = null
     try {
-      const [t, candles] = await Promise.all([fetchTicker(cfg.symbol), fetchKlines(cfg.symbol, cfg.timeframe, 200)])
+      const ex = getExchangeClient(cfg.exchange as Exchange)
+      const [t, candles] = await Promise.all([ex.fetchTicker(cfg.symbol), ex.fetchKlines(cfg.symbol, cfg.timeframe, 200)])
       ticker = t
       const closes = candles.map((c: any) => c.close)
       const emaF = ema(closes, cfg.emaFast), emaS = ema(closes, cfg.emaSlow)
@@ -154,7 +153,7 @@ export async function GET() {
 
     const exposureSymbols = [...new Set([...openPosRows.map(p => p.symbol), ...activeGridOrders.map(o => o.symbol)])]
     const exposureTickers = await Promise.all(exposureSymbols.map(async (s) => {
-      try { return [s, (await fetchTicker(s)).lastPrice] as const }
+      try { return [s, (await getExchangeClient(cfg.exchange as Exchange).fetchTicker(s)).lastPrice] as const }
       catch { return [s, null] as const }
     }))
     const markBySymbol = new Map(exposureTickers)

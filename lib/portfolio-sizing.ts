@@ -1,7 +1,7 @@
 import { db } from "./db"
-import { gridConfigs } from "./db/schema"
+import { gridConfigs, botConfig } from "./db/schema"
 import { eq } from "drizzle-orm"
-import { getAccountAssets } from "./mexc/private"
+import { getExchangeClient, type Exchange } from "./exchange"
 import { fetchKlines } from "./mexc/public"
 import type { Candle } from "./mexc/public"
 import { log } from "./grid"
@@ -113,10 +113,16 @@ export async function computePortfolioRebalance(timeframe = "Min15"): Promise<Re
   const enabled = await db.select().from(gridConfigs).where(eq(gridConfigs.enabled, true))
   if (enabled.length === 0) return { risks: [], failedSymbols: [], failureRatio: 0, dataQualityOk: true }
 
+  let exchange: Exchange = "mexc"
+  try {
+    const cfgRows = await db.select().from(botConfig).limit(1)
+    if (cfgRows.length > 0) exchange = (cfgRows[0].exchange as Exchange) ?? "mexc"
+  } catch {}
+
   let availableBalance = 0
   try {
-    const assets = (await getAccountAssets()) as any[]
-    const usdt = Array.isArray(assets) ? assets.find((a: any) => a.currency === "USDT") : null
+    const assets = await getExchangeClient(exchange).getAccountAssets()
+    const usdt = assets.find((a) => a.currency === "USDT") ?? null
     availableBalance = usdt ? Number(usdt.availableBalance) : 0
   } catch {
     availableBalance = 0

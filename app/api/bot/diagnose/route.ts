@@ -13,8 +13,8 @@ export async function GET() {
     const exchangeName = (cfg[0]?.exchange ?? "mexc") as "mexc" | "gate" | "bybit"
     const exchange = getExchangeClient(exchangeName)
 
-    let assets: unknown = null
-    let positions: unknown = null
+    let assets: any = null
+    let positions: any = null
     let assetError: string | null = null
     let positionError: string | null = null
 
@@ -32,17 +32,34 @@ export async function GET() {
     const recentTrades = await db.select().from(trades).orderBy(sql`id DESC`).limit(15)
     const pendingOrders = await db.select().from(gridOrders).where(eq(gridOrders.status, "pending"))
 
-    return NextResponse.json({
-      exchange: exchangeName,
-      assets,
-      positions,
-      assetError,
-      positionError,
-      bot_paper_balance: cfg[0]?.paperBalance,
-      bot_pending_orders_count: pendingOrders.length,
-      bot_recent_trades: recentTrades,
-    })
+    // ── Build a short, plain-English summary ──────────────────────────
+    const lines: string[] = []
+    lines.push(`Exchange: ${exchangeName}`)
+
+    if (assetError) {
+      lines.push(`Balance: error (${assetError})`)
+    } else if (Array.isArray(assets) && assets.length > 0) {
+      const a = assets[0]
+      const equity = Number(a?.equity ?? 0)
+      const available = Number(a?.availableBalance ?? 0)
+      lines.push(`Balance: ${a?.currency ?? "USDT"} ${equity.toFixed(4)} total, ${available.toFixed(4)} available`)
+    } else {
+      lines.push(`Balance: none reported`)
+    }
+
+    if (positionError) {
+      lines.push(`Open positions: error (${positionError})`)
+    } else {
+      const n = Array.isArray(positions) ? positions.length : 0
+      lines.push(`Open positions: ${n}`)
+    }
+
+    lines.push(`Paper balance: ${Number(cfg[0]?.paperBalance ?? 0).toFixed(2)}`)
+    lines.push(`Pending orders: ${pendingOrders.length}`)
+    lines.push(`Recent trades: ${recentTrades.length}`)
+
+    return NextResponse.json({ summary: lines.join("\n") })
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return NextResponse.json({ summary: `Error: ${err.message}` }, { status: 500 })
   }
 }

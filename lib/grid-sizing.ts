@@ -1,6 +1,6 @@
-import { getAccountAssets } from "./mexc/private"
+import { getExchangeClient, type Exchange } from "./exchange"
 import { db } from "./db"
-import { gridConfigs , equitySnapshots } from "./db/schema"
+import { gridConfigs , equitySnapshots, botConfig } from "./db/schema"
 import { eq , desc } from "drizzle-orm"
 
 export interface SafeGridSettings {
@@ -46,11 +46,13 @@ export async function computeSafeGridSettings(
 ): Promise<SafeGridSettings & { availableBalance: number; totalPairs: number }> {
   // Get current mode from bot_config to decide balance source
   let mode = "paper"
+  let exchange: Exchange = "mexc"
   let availableBalance = 0
   try {
     const cfgRows = await db.select().from(botConfig).limit(1)
     if (cfgRows.length > 0) {
       mode = cfgRows[0].mode
+      exchange = (cfgRows[0].exchange as Exchange) ?? "mexc"
     }
   } catch {}
 
@@ -85,10 +87,10 @@ export async function computeSafeGridSettings(
   } else {
     // Live mode: fetch from MEXC API
     try {
-      const assets = (await getAccountAssets()) as any[]
-      const usdt = Array.isArray(assets) ? assets.find((a: any) => a.currency === "USDT") : null
+      const assets = await getExchangeClient(exchange).getAccountAssets()
+      const usdt = assets.find((a) => a.currency === "USDT") ?? null
       availableBalance = usdt ? Number(usdt.availableBalance) : 0
-      console.log(`[Grid Sizing] Live mode: using MEXC balance=${availableBalance.toFixed(2)}`)
+      console.log(`[Grid Sizing] Live mode: using exchange balance=${availableBalance.toFixed(2)}`)
     } catch {
       availableBalance = 0
       console.log(`[Grid Sizing] Live mode: API error, availableBalance=0`)

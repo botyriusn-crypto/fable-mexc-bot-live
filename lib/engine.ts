@@ -29,7 +29,7 @@ import { runSniperCycle } from "./sniper"
 import { analyzeTradesForMarket, applyRecommendations } from "./ai-advisor"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager } from './mexc/ws';
-import { getAccountAssets, getOpenPositions as getMexcOpenPositions } from './mexc/private';
+
 import {
   evaluatePortfolioRisk,
   isTradingHalted,
@@ -187,7 +187,7 @@ function normalizeSymbol(s: string): string {
 async function reconcilePositions(cfg: BotConfig): Promise<void> {
   if (cfg.mode !== "live") return
   try {
-    const mexPositions = (await getMexcOpenPositions()) as any[]
+    const mexPositions = await getExchangeClient(cfg.exchange as Exchange).getOpenPositions()
     const mexSymbols = new Set(mexPositions.map((p) => normalizeSymbol(p?.symbol ?? "")))
     const dbOpen = await getOpenPositions()
     for (const pos of dbOpen) {
@@ -1050,8 +1050,8 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     if (isLive) {
       // In live mode, fetch actual account equity from MEXC
       try {
-        const assets = await getAccountAssets()
-        const usdt = Array.isArray(assets) ? assets.find((a: any) => a.currency === "USDT") : null
+        const assets = await getExchangeClient(cfgAfter.exchange as Exchange).getAccountAssets()
+        const usdt = assets.find((a) => a.currency === "USDT") ?? null
         if (usdt) {
           recordBalance = usdt.availableBalance || 0
           recordEquity = usdt.equity || 0
