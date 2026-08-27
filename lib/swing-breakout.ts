@@ -7,7 +7,7 @@ import { db } from "./db"
 import { positions, botConfig, trades } from "./db/schema"
 import { eq, and, sql } from "drizzle-orm"
 
-interface Candle { time: number; high: number; low: number; close: number; open: number }
+export interface Candle { time: number; high: number; low: number; close: number; open: number }
 interface SwingConfig {
   symbol: string
   riskPct: number  // 0.02 = 2% of equity
@@ -17,7 +17,7 @@ interface SwingConfig {
 const TAKER_FEE = 0.0002
 // SWING_SYMBOLS is now read from botConfig.swingSymbols
 
-async function fetch4hCandles(symbol: string, days: number): Promise<Candle[]> {
+export async function fetch4hCandles(symbol: string, days: number): Promise<Candle[]> {
   const isec = 4 * 3600, es = Math.floor(Date.now() / 1000), ss = es - days * 86400
   const all: Candle[] = []; let fe = es
   while (true) {
@@ -35,13 +35,13 @@ async function fetch4hCandles(symbol: string, days: number): Promise<Candle[]> {
   return all.filter((c, i, a) => i === 0 || c.time !== a[i - 1].time)
 }
 
-function ema(v: number[], p: number): number[] {
+export function ema(v: number[], p: number): number[] {
   const o = [v[0]]; const k = 2 / (p + 1)
   for (let i = 1; i < v.length; i++) o[i] = v[i] * k + o[i - 1] * (1 - k)
   return o
 }
 
-function atr(c: Candle[], p = 14): number[] {
+export function atr(c: Candle[], p = 14): number[] {
   const o = new Array(c.length).fill(0); let a = 0
   for (let i = 1; i < c.length; i++) {
     const tr = Math.max(c[i].high - c[i].low, Math.abs(c[i].high - c[i - 1].close), Math.abs(c[i].low - c[i - 1].close))
@@ -51,8 +51,7 @@ function atr(c: Candle[], p = 14): number[] {
   return o
 }
 
-async function checkEntrySignal(symbol: string): Promise<{ side: "long" | "short" | null; price: number; stopLoss: number; takeProfit: number; confidence: number } | null> {
-  const candles = await fetch4hCandles(symbol, 30)
+export function evaluateSwingEntry(candles: Candle[], stopAtrMult: number = 3, targetAtrMult: number = 6): { side: "long" | "short" | null; price: number; stopLoss: number; takeProfit: number; confidence: number } | null {
   if (candles.length < 210) return null
 
   const closes = candles.map(c => c.close)
@@ -75,8 +74,8 @@ async function checkEntrySignal(symbol: string): Promise<{ side: "long" | "short
     return {
       side: "long",
       price,
-      stopLoss: price - 3 * atrVal,
-      takeProfit: price + 6 * atrVal,
+      stopLoss: price - stopAtrMult * atrVal,
+      takeProfit: price + targetAtrMult * atrVal,
       confidence: 70,
     }
   }
@@ -86,8 +85,8 @@ async function checkEntrySignal(symbol: string): Promise<{ side: "long" | "short
     return {
       side: "short",
       price,
-      stopLoss: price + 3 * atrVal,
-      takeProfit: price - 6 * atrVal,
+      stopLoss: price + stopAtrMult * atrVal,
+      takeProfit: price - targetAtrMult * atrVal,
       confidence: 70,
     }
   }
@@ -95,8 +94,7 @@ async function checkEntrySignal(symbol: string): Promise<{ side: "long" | "short
   return null
 }
 
-async function checkExitSignal(symbol: string, pos: any): Promise<{ exit: boolean; reason: string; exitPrice: number } | null> {
-  const candles = await fetch4hCandles(symbol, 5)
+export function evaluateSwingExit(candles: Candle[], pos: any): { exit: boolean; reason: string; exitPrice: number } | null {
   if (candles.length < 20) return null
 
   const last = candles[candles.length - 1]
@@ -247,15 +245,23 @@ export async function runSwingBreakoutTick() {
         .where(and(eq(positions.symbol, symbol), eq(positions.status, "open"), eq(positions.strategy, "swing")))
         .limit(10)
 
-      for (const pos of openPositions) {
-        const exit = await checkExitSignal(symbol, pos)
-        if (exit?.exit) {
-          await closePaperPosition(pos, exit.exitPrice, exit.reason)
+      if (openPositions.length > 0) {
+        const exitCandles = await fetch4hCandles(symbol, 5)
+        for (const pos of openPositions) {
+          const exit = evaluateSwingExit(exitCandles, pos)
+          if (exit?.exit) {
+            await closePaperPosition(pos, exit.exitPrice, exit.reason)
+          }
         }
       }
 
-      // Check for entries
-      const signal = await checkEntrySignal(symbol)
+      // Check for entries. FIXED: was fetching only 30 days (~180 4H
+      // candles), always short of the 210-candle minimum needed for the
+      // EMA200 calculation — meaning this could never actually signal,
+      // regardless of market conditions. 50 days (~300 candles) gives
+      // comfortable headroom above the 210 minimum.
+      const entryCandles = await fetch4hCandles(symbol, 50)
+      const signal = evaluateSwingEntry(entryCandles)
       if (signal?.side) {
         cfg.symbol = symbol
         await openPaperPosition(symbol, signal, cfg)
