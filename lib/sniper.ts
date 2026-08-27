@@ -24,7 +24,7 @@ export const SNIPER_PARAMS = {
   minVolumeUsdt: 1_000_000,
   tpSlRatio: 1.5,
   resolveAfterBuckets: 6,
-  minStopPct: 0.008,
+  minStopPct: 0.015,
 } as const
 
 export interface SniperSignal {
@@ -448,7 +448,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     const snap = { atr: _trSum / 14, price: _cl[_cl.length - 1].close } as IndicatorSnapshot
 
     console.log(`[Sniper] Running detectSniper on ${symbol}... (atr=${snap.atr})`);
-    const sig = detectSniper(_cl, snap, t.fundingRate, { sigmaExtreme, volumeSurgeMult })
+    const sig = detectSniper(_cl, snap, t.fundingRate, { sigmaExtreme, volumeSurgeMult, minStopPct, tpSlRatio, longStopBufferAtr: true })
     if (!sig.direction) {
       console.log(`[Sniper] ${symbol}: no signal (confidence too low or no valid setup)`);
       continue;
