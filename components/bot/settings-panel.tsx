@@ -363,7 +363,7 @@ export function SettingsPanel({ state }: { state: BotState }) {
                 size="sm"
                 variant={cfg.exchange === ex.value ? "default" : "outline"}
                 className="h-7 px-2 text-xs"
-                disabled={cfg.status === "running"}
+                disabled={cfg.status === "running" && cfg.mode === "live"}
                 onClick={async () => {
                   try {
                     await updateConfig({ exchange: ex.value })

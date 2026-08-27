@@ -59,7 +59,7 @@ export async function GET() {
     const [cfgRows, openPosRows, recentTrades, equity, logs, modelRows, activeGridOrders, decisions, gridConfigRows, lifetimeTradesRaw, gridRealizedRows, swingPosRows, swingTradesRows] = await Promise.all([
       db.select().from(botConfig).where(eq(botConfig.id, 1)),
       db.select().from(positions).where(eq(positions.status, "open")),
-      db.select().from(trades).orderBy(desc(trades.closedAt)).limit(50),
+      db.select().from(trades).orderBy(desc(trades.closedAt)).limit(500),
       db.select().from(equitySnapshots).orderBy(desc(equitySnapshots.createdAt)).limit(200),
       db.select().from(botLogs).orderBy(desc(botLogs.createdAt)).limit(50),
       db.select().from(mlModel).where(eq(mlModel.id, 1)),
