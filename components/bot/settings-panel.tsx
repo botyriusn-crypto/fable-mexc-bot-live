@@ -77,6 +77,19 @@ const EXCHANGES = [
 ] as const
 
 const SIZE_FIELDS: FieldDef[] = [{ key: "positionSizeUsdt", label: "Position size (USDT)" }]
+const SNIPER_FIELDS: FieldDef[] = [
+  { key: "sniperMaxEntries", label: "Sniper max entries", step: "1" },
+  { key: "sniperPositionSizeUsdt", label: "Sniper position size (USDT)" },
+  { key: "sniperLeverage", label: "Sniper leverage", step: "1" },
+  { key: "sniperConfidenceFloor", label: "Sniper min confidence", step: "0.05" },
+  { key: "sniperCorrThreshold", label: "Sniper correlation threshold", step: "0.05" },
+  { key: "sniperSigmaExtreme", label: "Sniper sigma extreme", step: "0.1" },
+  { key: "sniperVolumeSurgeMult", label: "Sniper volume surge ×", step: "0.1" },
+  { key: "sniperMinVolumeUsdt", label: "Sniper min volume (USDT)" },
+  { key: "sniperTargetRiskUsdt", label: "Sniper target risk (USDT)", step: "0.5" },
+  { key: "sniperMinStopPct", label: "Sniper min stop distance (%)", step: "0.1", multiplier: 100 },
+  { key: "sniperTpSlRatio", label: "Sniper TP:SL ratio (R)", step: "0.5" },
+]
 
 export function SettingsPanel({ state }: { state: BotState }) {
   const { mutate } = useSWRConfig()
@@ -331,6 +344,14 @@ export function SettingsPanel({ state }: { state: BotState }) {
         </div>
         <Separator />
         {renderFields(SIZE_FIELDS)}
+        <Separator />
+        <div className="flex items-center justify-between">
+          <Label htmlFor="sniper-live" className="text-xs text-muted-foreground">
+            Sniper live
+          </Label>
+          <Switch id="sniper-live" checked={Boolean(cfg.sniperLive)} onCheckedChange={(c) => toggleBool("sniperLive", c)} />
+        </div>
+        {renderFields(SNIPER_FIELDS)}
 
         <div className="flex items-center justify-between">
           <Label htmlFor="allow-long" className="text-xs text-muted-foreground">
