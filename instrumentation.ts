@@ -76,6 +76,21 @@ export async function register() {
           console.error("[Rebalance] Scheduled auto-rebalance failed:", e)
         }
       }, 5 * 60 * 60 * 1000)
+
+      // Swing Breakout (4H) was never actually scheduled anywhere — the
+      // "Active" toggle only set a DB flag, and runSwingBreakoutTick() was
+      // only ever reachable via a manual hit to /api/bot/swing-tick. 4H
+      // candles close every 4 hours, so a 15-minute check cadence is more
+      // than enough to catch a fresh close promptly.
+      const { runSwingBreakoutTick } = await import("./lib/swing-breakout")
+      setInterval(async () => {
+        try {
+          if (!(await isRunning())) return
+          await runSwingBreakoutTick()
+        } catch (e) {
+          console.error("[Swing] Scheduled swing-breakout tick failed:", e)
+        }
+      }, 15 * 60 * 1000)
     } catch (err) {
       console.error("[Startup] Failed to initialize WebSockets:", err)
       if (await isRunning()) {
