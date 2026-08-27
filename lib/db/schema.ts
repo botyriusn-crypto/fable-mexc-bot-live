@@ -232,6 +232,7 @@ export const classifierDecisions = pgTable("classifier_decisions", {
   reason: text("reason").notNull(),
   outcomeDirection: text("outcome_direction"),
   outcomeReturn: doublePrecision("outcome_return"),
+  returnUnit: text("return_unit"),
   outcomeCorrectLogistic: boolean("outcome_correct_logistic"),
   outcomeCorrectLorentzian: boolean("outcome_correct_lorentzian"),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),

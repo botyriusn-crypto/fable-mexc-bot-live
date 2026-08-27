@@ -136,6 +136,7 @@ export async function runShadowCycle(): Promise<void> {
     await db.update(classifierDecisions).set({
       outcomeDirection: actual,
       outcomeReturn: ret,
+      returnUnit: "percent",
       outcomeCorrectLogistic: correct,
       outcomeCorrectLorentzian: correct,
       resolvedAt: sql`NOW()`,

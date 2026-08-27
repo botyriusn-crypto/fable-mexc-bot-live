@@ -106,6 +106,7 @@ async function resolveClassifierOutcomes(symbol: string, timeframe: string, cand
     await db.update(classifierDecisions).set({
       outcomeDirection,
       outcomeReturn,
+      returnUnit: "percent",
       outcomeCorrectLogistic: decision.logisticAllowed && decision.candidateDirection === outcomeDirection,
       outcomeCorrectLorentzian: decision.lorentzianDirection === outcomeDirection,
       resolvedAt: new Date(),

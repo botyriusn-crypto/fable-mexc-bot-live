@@ -268,6 +268,7 @@ export async function resolveSniperDecisions(): Promise<number> {
     await db.update(classifierDecisions).set({
       outcomeDirection: correct ? d.candidateDirection : (isLong ? "short" : "long"),
       outcomeReturn: rMultiple, // R-multiple (not raw %), so sumReturn = total R
+      returnUnit: "r_multiple",
       outcomeCorrectLogistic: correct,
       outcomeCorrectLorentzian: correct,
       resolvedAt: sql`NOW()`,
