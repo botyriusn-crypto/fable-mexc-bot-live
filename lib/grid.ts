@@ -1761,11 +1761,18 @@ export async function reconcileOrphanedPositions(): Promise<void> {
     // grid is OFF (sniper-only / manual trading mode), this account-wide sweep
     // would force-close manual trades the bot has no tracking record for.
     const cfgRows = await db
-      .select({ gridEnabled: botConfig.gridEnabled })
+      .select({ gridEnabled: botConfig.gridEnabled, exchange: botConfig.exchange })
       .from(botConfig)
       .where(eq(botConfig.id, 1))
     if (!cfgRows[0]?.gridEnabled) {
       console.log("[Reconcile] gridEnabled=false — skipping orphan reconciliation (manual trading mode)")
+      return
+    }
+    // Venue gate: this sweep is MEXC-specific (reads holdVol/positionType/openAvgPrice
+    // and calls getMexcSpecAsync). Never run it on another venue — it would
+    // force-close manual orders the bot has no tracking record for.
+    if ((cfgRows[0]?.exchange ?? "mexc") !== "mexc") {
+      console.log(`[Reconcile] exchange=${cfgRows[0]?.exchange} — skipping MEXC-only orphan reconciliation`)
       return
     }
 
