@@ -117,6 +117,24 @@ function roundPrice(price: number, tick: number): number {
   return Math.round(price * factor) / factor
 }
 
+// --- account fee-rate cache (avoids a fetch per order) ---
+let bybitFeeRates: { makerFeeRate: number; takerFeeRate: number } | null = null
+
+// Fetch the account's actual maker/taker fee rates (VIP-tier aware). Bybit
+// returns per-symbol rates; we use the first entry as the account default.
+export async function getFeeRates(): Promise<{ makerFeeRate: number; takerFeeRate: number }> {
+  if (bybitFeeRates) return bybitFeeRates
+  const r = (await privateRequest("GET", "/account/fee-rate", {
+    category: "linear",
+  })) as { list?: Array<{ makerFeeRate?: string; takerFeeRate?: string }> }
+  const first = r?.list?.[0]
+  bybitFeeRates = {
+    makerFeeRate: Number(first?.makerFeeRate ?? "0.0002"),
+    takerFeeRate: Number(first?.takerFeeRate ?? "0.00055"),
+  }
+  return bybitFeeRates
+}
+
 
 // Set leverage for a symbol (must be done before placing an order).
 export async function setLeverage(symbol: string, leverage: number): Promise<unknown> {

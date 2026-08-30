@@ -240,14 +240,35 @@ export function getExchangeClient(exchange: Exchange): ExchangeClient {
 }
 
 
+// Account-level fee-rate cache for Gate/Bybit. Warmed at module load so the
+// synchronous getFeeRates() below can return real VIP-tier rates instead of
+// the hardcoded default-tier assumptions. Falls back to defaults if the
+// fetch fails (e.g. paper mode / no API keys configured).
+const venueFeeCache: Record<string, { makerFeeRate: number; takerFeeRate: number }> = {}
+
+async function warmVenueFees() {
+  try {
+    venueFeeCache["bybit"] = await BybitPrivate.getFeeRates()
+  } catch (err) {
+    console.warn("[Fees] Bybit fee-rate warmup failed:", err instanceof Error ? err.message : String(err))
+  }
+  try {
+    venueFeeCache["gate"] = await GateioPrivate.getFeeRates()
+  } catch (err) {
+    console.warn("[Fees] Gate fee-rate warmup failed:", err instanceof Error ? err.message : String(err))
+  }
+}
+warmVenueFees()
+
 export function getFeeRates(exchange: Exchange, symbol: string): { makerFeeRate: number; takerFeeRate: number } {
   switch (exchange) {
     case "gate":
-      // Gate.io USDT perpetual: maker rebate, taker 0.075%
-      return { makerFeeRate: -0.0001, takerFeeRate: 0.00075 }
+      // Gate.io USDT perpetual: maker rebate, taker 0.075% (default tier).
+      // Real account rate wins once the warmup above completes.
+      return venueFeeCache["gate"] ?? { makerFeeRate: -0.0001, takerFeeRate: 0.00075 }
     case "bybit":
-      // Bybit USDT perpetual non-VIP: maker 0.02%, taker 0.055%
-      return { makerFeeRate: 0.0002, takerFeeRate: 0.00055 }
+      // Bybit USDT perpetual non-VIP: maker 0.02%, taker 0.055% (default tier).
+      return venueFeeCache["bybit"] ?? { makerFeeRate: 0.0002, takerFeeRate: 0.00055 }
     case "mexc":
     default:
       return getMexcFeeRates(symbol)

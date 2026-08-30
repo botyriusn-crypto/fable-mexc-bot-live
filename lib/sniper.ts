@@ -18,8 +18,8 @@ export const SNIPER_SHORTS_ENABLED = false
 
 export const SNIPER_PARAMS = {
   sweepLookback: 20,
-  volumeSurgeMult: 2.0,
-  sigmaExtreme: 3.5,
+  volumeSurgeMult: 1.5,
+  sigmaExtreme: 2.5,
   fundingThreshold: 0.0005,
   minVolumeUsdt: 1_000_000,
   tpSlRatio: 1.5,
@@ -112,7 +112,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   // Sigma confidence scales with how far |z| exceeds the threshold, so the
   // confidence floor and the "top N by confidence" sort actually discriminate
   // (weak sigma ~0.5 -> rejected by a 0.6 floor; strong sigma ~0.9 -> kept).
-  const sigmaConfidence = 0.5 + Math.min(0.4, (Math.abs(z) - sigmaExtreme) * 0.15)
+  const sigmaConfidence = 0.55 + Math.min(0.4, (Math.abs(z) - sigmaExtreme) * 0.25)
 
   let direction: "long" | "short" | null = null
   let confidence = 0

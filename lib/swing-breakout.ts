@@ -6,8 +6,10 @@
 import { db } from "./db"
 import { positions, botConfig, trades } from "./db/schema"
 import { eq, and, sql } from "drizzle-orm"
+import { getExchangeClient, type Exchange } from "./exchange"
+import { rsi, adx, volumeConfirmation } from "./indicators"
 
-export interface Candle { time: number; high: number; low: number; close: number; open: number }
+export interface Candle { time: number; high: number; low: number; close: number; open: number; volume: number }
 interface SwingConfig {
   symbol: string
   riskPct: number  // 0.02 = 2% of equity
@@ -17,22 +19,15 @@ interface SwingConfig {
 const TAKER_FEE = 0.0002
 // SWING_SYMBOLS is now read from botConfig.swingSymbols
 
-export async function fetch4hCandles(symbol: string, days: number): Promise<Candle[]> {
-  const isec = 4 * 3600, es = Math.floor(Date.now() / 1000), ss = es - days * 86400
-  const all: Candle[] = []; let fe = es
-  while (true) {
-    const fs = Math.max(ss, fe - 2000 * isec)
-    try {
-      const j = await (await fetch(`https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=Hour4&start=${fs}&end=${fe}`)).json() as any
-      if (!j.success || !j.data?.time?.length) break
-      const { time, high, low, close, open } = j.data
-      for (let i = 0; i < time.length; i++) all.push({ time: time[i], high: high[i], low: low[i], close: close[i], open: open[i] })
-      if (time[0] <= ss || time.length < 100) break
-      fe = time[0] - isec
-    } catch { break }
-  }
-  all.sort((a, b) => a.time - b.time)
-  return all.filter((c, i, a) => i === 0 || c.time !== a[i - 1].time)
+export async function fetch4hCandles(symbol: string, days: number, exchange: Exchange = "mexc"): Promise<Candle[]> {
+  // Venue-aware: route through the exchange client so the swing strategy
+  // respects the Bybit/Gate/MEXC switch instead of hardcoding MEXC. 4H bars
+  // = 6/day, so `days` days ≈ `days * 6` candles. The canonical Candle
+  // carries volume, which the edge filters below depend on.
+  const limit = Math.max(30, Math.ceil(days * 6))
+  const candles = await getExchangeClient(exchange).fetchKlines(symbol, "Hour4", limit)
+  candles.sort((a, b) => a.time - b.time)
+  return candles.filter((c, i, a) => i === 0 || c.time !== a[i - 1].time)
 }
 
 export function ema(v: number[], p: number): number[] {
@@ -69,8 +64,29 @@ export function evaluateSwingEntry(candles: Candle[], stopAtrMult: number = 3, t
   const atrVal = a[a.length - 1]
   const e200Val = e200[e200.length - 1]
 
+  // ── Edge filters (the "no real edge" fix) ──────────────────────────
+  // 1. Trend strength: ADX must confirm a real trend, not sideways chop.
+  const adxArr = adx(candles)
+  const adxVal = adxArr[adxArr.length - 1]
+  const trending = adxVal >= 20
+
+  // 2. Volume: the breakout must be backed by above-average volume,
+  //    otherwise it's a low-liquidity poke that will fade.
+  const volConfirmed = volumeConfirmation(candles, 1.5)
+
+  // 3. Extended-move guard: reject entries when price is stretched too far
+  //    from EMA200 (blow-off top / capitulation bottom). This is the fix for
+  //    "bought LINK right before it crashed".
+  const stretch = (price - e200Val) / e200Val
+  const notExtended = Math.abs(stretch) <= 0.15
+
+  // 4. RSI: don't buy overbought, don't short oversold.
+  const rsiArr = rsi(closes, 14)
+  const rsiVal = rsiArr[rsiArr.length - 1]
+
   // Long: breakout above 20-high AND price > EMA200
   if (price > hh20 && price > e200Val) {
+    if (!trending || !volConfirmed || !notExtended || rsiVal >= 70) return null
     return {
       side: "long",
       price,
@@ -82,6 +98,7 @@ export function evaluateSwingEntry(candles: Candle[], stopAtrMult: number = 3, t
 
   // Short: breakout below 20-low AND price < EMA200
   if (price < ll20 && price < e200Val) {
+    if (!trending || !volConfirmed || !notExtended || rsiVal <= 30) return null
     return {
       side: "short",
       price,
@@ -230,6 +247,7 @@ export async function runSwingBreakoutTick() {
   }
 
   const swingSymbols: string[] = botCfg.swingSymbols || ["BTC_USDT", "ETH_USDT"]
+  const exchange = (botCfg.exchange as Exchange) || "mexc"
   const cfg: SwingConfig = {
     symbol: "",
     riskPct: botCfg.swingRiskPct || 0.02,
@@ -246,7 +264,7 @@ export async function runSwingBreakoutTick() {
         .limit(10)
 
       if (openPositions.length > 0) {
-        const exitCandles = await fetch4hCandles(symbol, 5)
+        const exitCandles = await fetch4hCandles(symbol, 5, exchange)
         for (const pos of openPositions) {
           const exit = evaluateSwingExit(exitCandles, pos)
           if (exit?.exit) {
@@ -260,7 +278,7 @@ export async function runSwingBreakoutTick() {
       // EMA200 calculation — meaning this could never actually signal,
       // regardless of market conditions. 50 days (~300 candles) gives
       // comfortable headroom above the 210 minimum.
-      const entryCandles = await fetch4hCandles(symbol, 50)
+      const entryCandles = await fetch4hCandles(symbol, 50, exchange)
       const signal = evaluateSwingEntry(entryCandles)
       if (signal?.side) {
         cfg.symbol = symbol

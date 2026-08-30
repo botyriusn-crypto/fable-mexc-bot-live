@@ -298,6 +298,7 @@ export const gridConfigs = pgTable("grid_configs", {
   metadata: jsonb("metadata"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  sessionStartedAt: timestamp("session_started_at", { withTimezone: true }),
 })
 
 

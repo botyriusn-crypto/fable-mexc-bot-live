@@ -341,11 +341,15 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
 
 // Cleanup: Cancel all existing orders for this symbol before rebuilding
   if (cfg.mode === "live" && exchange) {
-  // Fetch MEXC specs for this symbol before calculating orders
-  try {
-    await getMexcSpecAsync(gc.symbol, snap.price);
-  } catch (err) {
-    await log("error", `Grid ${gc.symbol}: Failed to fetch MEXC specs: ${dbErr(err)}`);
+  // Fetch MEXC specs for this symbol before calculating orders. MEXC-only:
+  // Bybit/Gate round internally in their own placePostOnlyOrder, so this
+  // warmup is wasted work (and a wasted network call) on those venues.
+  if ((cfg.exchange as Exchange) === "mexc") {
+    try {
+      await getMexcSpecAsync(gc.symbol, snap.price);
+    } catch (err) {
+      await log("error", `Grid ${gc.symbol}: Failed to fetch MEXC specs: ${dbErr(err)}`);
+    }
   }
 
   const client = exchange ?? getExchangeClient(cfg.exchange as Exchange)
