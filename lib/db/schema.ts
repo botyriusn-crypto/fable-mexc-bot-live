@@ -7,6 +7,7 @@ import {
   boolean,
   timestamp,
   jsonb,
+  index,
 } from "drizzle-orm/pg-core"
 
 export const botConfig = pgTable("bot_config", {
@@ -237,7 +238,9 @@ export const classifierDecisions = pgTable("classifier_decisions", {
   outcomeCorrectLorentzian: boolean("outcome_correct_lorentzian"),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-})
+}, (table) => ({
+  strategyCreatedAtIdx: index("classifier_decisions_strategy_created_at_idx").on(table.strategy, table.createdAt),
+}))
 
 export const aiRecommendations = pgTable("ai_recommendations", {
   id: serial("id").primaryKey(),
