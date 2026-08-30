@@ -286,7 +286,6 @@ export async function getSniperStats() {
   const rows = await db.select().from(classifierDecisions)
     .where(eq(classifierDecisions.strategy, "sniper"))
     .orderBy(sql`created_at DESC`)
-    .limit(500)
   const resolved = rows.filter(d => d.resolvedAt)
   const correct = resolved.filter(d => d.outcomeCorrectLogistic).length
 
