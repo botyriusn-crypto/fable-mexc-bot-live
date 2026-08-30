@@ -12,6 +12,7 @@ import { getMexcSpecAsync } from "./mexc/precision"
 import { livePrices } from "./mexc/ws"
 import { isTradingHalted, marginBudgetRemaining, getRiskState } from "./risk-manager"
 import { shouldGateEntry, recordShadowEntry, resolveShadowEntries, evaluateKillSwitch } from "./grid-flow"
+import { checkGridExposureGate } from "./exposure"
 
 
 // Global cooldown to prevent duplicate setups
@@ -458,6 +459,19 @@ if (effectiveDirection(gc) === "neutral") baseSpacing = Math.max(center * 0.006,
   if (liqDistancePct <= GRID_STOP_LOSS_PCT * 1.5) {
     await log("error", `Grid ${gc.symbol}: Refusing to build grid. Leverage ${gc.leverage}x is too high. Liquidation distance (${(liqDistancePct*100).toFixed(1)}%) is too close to stop-loss (${(GRID_STOP_LOSS_PCT*100).toFixed(1)}%). Reduce leverage to <= ${Math.floor(1.0 / (GRID_STOP_LOSS_PCT * 1.5))}x.`)
     await db.update(gridConfigs).set({ paused: true }).where(eq(gridConfigs.id, gc.id))
+    return
+  }
+
+  // ── Cross-strategy exposure gate ──
+  // Grid deploys a full ladder of notional (budget × leverage) at once. Gate
+  // the TOTAL ladder notional against the per-symbol caps so a grid ladder
+  // can't stack on top of trend/sniper/rider positions in the same symbol.
+  const gridNotional = budget * gc.leverage
+  const gridEquity = (getRiskState()?.equity ?? effectiveBalance ?? 0) || 1
+  const gridDir = isNeutral ? "neutral" : (effectiveDirection(gc) === "short" ? "short" : "long")
+  const gridGate = await checkGridExposureGate(gc.symbol, gridDir, gridNotional, gridEquity)
+  if (!gridGate.allowed) {
+    await log("info", `Grid ${gc.symbol}: setup skipped — exposure gate (${gridGate.reason})`)
     return
   }
 
