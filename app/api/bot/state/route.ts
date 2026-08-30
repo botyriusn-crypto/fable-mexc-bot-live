@@ -246,6 +246,12 @@ export async function GET() {
     }
     const gridRealized = gridRealizedMap.get(`${cfg.symbol}|${cfg.mode === "live"}`) ?? 0
 
+    // Grid unrealized PnL lives in gridOrders, not the positions table, so the
+    // strategy breakdown's grid bucket was always 0. Populate it from the real
+    // grid order book so the top summary bar matches the grid card.
+    strategyBreakdown.grid.unrealized = totalGridUnrealized
+    strategyBreakdown.grid.count = activeGridOrders.filter(o => o.buyPrice).length
+
     // Multi-pair grid configs with live state
     const gridConfigsState = await Promise.all(gridConfigRows.map(async (gc) => {
       const orders = activeGridOrders.filter(o => o.symbol === gc.symbol && o.timeframe === gc.timeframe)
