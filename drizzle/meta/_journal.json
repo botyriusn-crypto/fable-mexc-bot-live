@@ -71,6 +71,13 @@
       "when": 1787772207935,
       "tag": "0009_short_mister_fear",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788112978835,
+      "tag": "0010_fair_bastion",
+      "breakpoints": true
     }
   ]
 }
