@@ -22,6 +22,7 @@ export const SNIPER_PARAMS = {
   sigmaExtreme: 2.5,
   fundingThreshold: 0.0005,
   minVolumeUsdt: 1_000_000,
+  minPrice: 0.10,
   tpSlRatio: 1.5,
   resolveAfterBuckets: 6,
   minStopPct: 0.015,
@@ -382,6 +383,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     cfg = rows[0] ?? null
   } catch {}
   const minVolumeUsdt = cfg?.sniperMinVolumeUsdt ?? SNIPER_PARAMS.minVolumeUsdt
+  const minPrice = cfg?.sniperMinPrice ?? SNIPER_PARAMS.minPrice
   const sigmaExtreme = cfg?.sniperSigmaExtreme ?? SNIPER_PARAMS.sigmaExtreme
   const volumeSurgeMult = cfg?.sniperVolumeSurgeMult ?? SNIPER_PARAMS.volumeSurgeMult
   const minStopPct = cfg?.sniperMinStopPct ?? SNIPER_PARAMS.minStopPct
@@ -402,7 +404,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
   // straight through a stop. `amount24` is the quote (USDT) notional, the
   // correct liquidity measure (base `volume24` is misleading for low-price coins).
   const ranked = tickers
-    .filter((t) => t.amount24 >= minVolumeUsdt && t.lastPrice > 0)
+    .filter((t) => t.amount24 >= minVolumeUsdt && t.lastPrice >= minPrice)
     .map((t) => ({ ...t, score: Math.abs(t.riseFallRate) * Math.log10(t.amount24 + 1) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, SCAN_LIMIT)
