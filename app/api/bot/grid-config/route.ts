@@ -125,7 +125,7 @@ export async function PATCH(request: Request) {
     // at $0 for this fresh run of the coin. Only stamp on a disabled -> enabled
     // transition, so re-saving an already-enabled coin doesn't wipe its session.
     if (updates.enabled === true && cfg[0].enabled !== true) {
-      updates.sessionStartedAt = new Date()
+      updates.lastSetupAt = new Date()
     }
     await db.update(gridConfigs)
       .set(updates)

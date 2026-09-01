@@ -79,7 +79,7 @@ export async function GET() {
         .innerJoin(gridConfigs, eq(trades.symbol, gridConfigs.symbol))
         .where(and(
           eq(trades.strategy, "grid"),
-          sql`${trades.closedAt} >= COALESCE(${gridConfigs.sessionStartedAt}, ${gridConfigs.createdAt})`
+          sql`${trades.closedAt} >= COALESCE(${gridConfigs.lastSetupAt}, ${gridConfigs.createdAt})`
         ))
         .groupBy(trades.symbol, trades.live),
       db.select().from(positions).where(eq(positions.strategy, "swing")),
