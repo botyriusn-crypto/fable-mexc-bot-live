@@ -296,6 +296,18 @@ export const gridConfigs = pgTable("grid_configs", {
   effectiveLevels: integer("effective_levels"),
   // Free-form metadata (e.g. new-listing tracking: isNewListing, detectedAt, ttlHours).
   metadata: jsonb("metadata"),
+  // ── Setup cooldown (DB-backed, atomic) ──
+  // Replaces the old in-memory Maps in lib/grid.ts (GRID_SETUP_COOLDOWN,
+  // BUDGET_TOO_SMALL_COOLDOWN). In-memory state doesn't coordinate across
+  // multiple Fly.io machine instances and doesn't survive a restart/deploy,
+  // which let concurrent ticks each think they were first to set up a
+  // fresh ladder — producing duplicate ladder-setup attempts within the
+  // same second. These columns are claimed atomically via a conditional
+  // UPDATE (see tryClaimSetupCooldown / tryClaimBudgetFailCooldown in
+  // lib/grid.ts), so only one caller can ever win the race regardless of
+  // how many processes are evaluating it concurrently.
+  lastSetupAt: timestamp("last_setup_at", { withTimezone: true }),
+  lastBudgetFailAt: timestamp("last_budget_fail_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 })

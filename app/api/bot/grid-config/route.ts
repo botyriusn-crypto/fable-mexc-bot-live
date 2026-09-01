@@ -121,6 +121,12 @@ export async function PATCH(request: Request) {
     if (cfg.length === 0) {
       return NextResponse.json({ error: "Grid config not found" }, { status: 404 })
     }
+    // New activation: reset the PnL session anchor so realized PnL restarts
+    // at $0 for this fresh run of the coin. Only stamp on a disabled -> enabled
+    // transition, so re-saving an already-enabled coin doesn't wipe its session.
+    if (updates.enabled === true && cfg[0].enabled !== true) {
+      updates.lastSetupAt = new Date()
+    }
     await db.update(gridConfigs)
       .set(updates)
       .where(and(eq(gridConfigs.symbol, symbol), eq(gridConfigs.timeframe, timeframe)))

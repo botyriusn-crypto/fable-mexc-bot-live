@@ -18,10 +18,11 @@ export const SNIPER_SHORTS_ENABLED = false
 
 export const SNIPER_PARAMS = {
   sweepLookback: 20,
-  volumeSurgeMult: 2.0,
-  sigmaExtreme: 3.5,
+  volumeSurgeMult: 1.5,
+  sigmaExtreme: 2.5,
   fundingThreshold: 0.0005,
   minVolumeUsdt: 1_000_000,
+  minPrice: 0.10,
   tpSlRatio: 1.5,
   resolveAfterBuckets: 6,
   minStopPct: 0.015,
@@ -112,7 +113,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   // Sigma confidence scales with how far |z| exceeds the threshold, so the
   // confidence floor and the "top N by confidence" sort actually discriminate
   // (weak sigma ~0.5 -> rejected by a 0.6 floor; strong sigma ~0.9 -> kept).
-  const sigmaConfidence = 0.5 + Math.min(0.4, (Math.abs(z) - sigmaExtreme) * 0.15)
+  const sigmaConfidence = 0.55 + Math.min(0.4, (Math.abs(z) - sigmaExtreme) * 0.25)
 
   let direction: "long" | "short" | null = null
   let confidence = 0
@@ -286,7 +287,6 @@ export async function getSniperStats() {
   const rows = await db.select().from(classifierDecisions)
     .where(eq(classifierDecisions.strategy, "sniper"))
     .orderBy(sql`created_at DESC`)
-    .limit(500)
   const resolved = rows.filter(d => d.resolvedAt)
   const correct = resolved.filter(d => d.outcomeCorrectLogistic).length
 
@@ -383,6 +383,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     cfg = rows[0] ?? null
   } catch {}
   const minVolumeUsdt = cfg?.sniperMinVolumeUsdt ?? SNIPER_PARAMS.minVolumeUsdt
+  const minPrice = cfg?.sniperMinPrice ?? SNIPER_PARAMS.minPrice
   const sigmaExtreme = cfg?.sniperSigmaExtreme ?? SNIPER_PARAMS.sigmaExtreme
   const volumeSurgeMult = cfg?.sniperVolumeSurgeMult ?? SNIPER_PARAMS.volumeSurgeMult
   const minStopPct = cfg?.sniperMinStopPct ?? SNIPER_PARAMS.minStopPct
@@ -403,7 +404,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
   // straight through a stop. `amount24` is the quote (USDT) notional, the
   // correct liquidity measure (base `volume24` is misleading for low-price coins).
   const ranked = tickers
-    .filter((t) => t.amount24 >= minVolumeUsdt && t.lastPrice > 0)
+    .filter((t) => t.amount24 >= minVolumeUsdt && t.lastPrice >= minPrice)
     .map((t) => ({ ...t, score: Math.abs(t.riseFallRate) * Math.log10(t.amount24 + 1) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, SCAN_LIMIT)

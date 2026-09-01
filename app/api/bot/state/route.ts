@@ -74,7 +74,14 @@ export async function GET() {
         symbol: trades.symbol,
         live: trades.live,
         totalPnl: sql<number>`COALESCE(SUM(${trades.pnl}), 0)`,
-      }).from(trades).where(eq(trades.strategy, "grid")).groupBy(trades.symbol, trades.live),
+      })
+        .from(trades)
+        .innerJoin(gridConfigs, eq(trades.symbol, gridConfigs.symbol))
+        .where(and(
+          eq(trades.strategy, "grid"),
+          sql`${trades.closedAt} >= COALESCE(${gridConfigs.lastSetupAt}, ${gridConfigs.createdAt})`
+        ))
+        .groupBy(trades.symbol, trades.live),
       db.select().from(positions).where(eq(positions.strategy, "swing")),
       db.select().from(trades).where(eq(trades.strategy, "swing")),
     ])
@@ -188,6 +195,10 @@ export async function GET() {
         strategyBreakdown[strat].count += 1
       }
     }
+
+    // Fold swing unrealized PnL into the swing card's total PnL so the
+    // displayed figure reflects open positions, not just closed trades.
+    swingStats.totalPnl += strategyBreakdown.swing.unrealized
     
     // Sniper profitability (all-time, mode-filtered)
     const sniperTrades = await db.select().from(trades).where(eq(trades.strategy, "sniper"))
@@ -206,36 +217,40 @@ export async function GET() {
 
     // Legacy single-grid for selected market (keeps existing GridCard working)
     const selectedGridOrders = activeGridOrders.filter(o => o.symbol === cfg.symbol && o.timeframe === cfg.timeframe)
-    const selectedDir = gridConfigRows.find(gc => gc.symbol === cfg.symbol && gc.timeframe === cfg.timeframe)?.direction || "long"
     let gridUnrealized = 0
     for (const o of selectedGridOrders) {
       const mark = markBySymbol.get(o.symbol)
       if (!mark || !o.buyPrice) continue
-      if (selectedDir === "long" && o.side === "sell") {
+      if (o.side === "sell") {
         gridUnrealized += (mark - o.buyPrice) * o.quantity
-      } else if (selectedDir === "short" && o.side === "buy") {
+      } else if (o.side === "buy") {
         gridUnrealized += (o.buyPrice - mark) * o.quantity
       }
     }
-    const gridHolding = selectedGridOrders.filter(o => (selectedDir === "long" && o.side === "sell" && o.buyPrice) || (selectedDir === "short" && o.side === "buy" && o.buyPrice))
+    const gridHolding = selectedGridOrders.filter(o => o.buyPrice)
     let totalGridUnrealized = 0
     for (const gc of gridConfigRows) {
       const mark = markBySymbol.get(gc.symbol)
       if (!mark) continue
       const orders = activeGridOrders.filter(o => o.symbol === gc.symbol && o.timeframe === gc.timeframe)
-      const dir = gc.direction || "long"
       for (const o of orders) {
         // Open longs are pending SELL orders with a recorded buyPrice (entry)
-        if (dir === "long" && o.side === "sell" && o.buyPrice) {
+        if (o.side === "sell" && o.buyPrice) {
           totalGridUnrealized += (mark - o.buyPrice) * o.quantity
         }
         // Open shorts are pending BUY orders with a recorded buyPrice (entry)
-        else if (dir === "short" && o.side === "buy" && o.buyPrice) {
+        else if (o.side === "buy" && o.buyPrice) {
           totalGridUnrealized += (o.buyPrice - mark) * o.quantity
         }
       }
     }
     const gridRealized = gridRealizedMap.get(`${cfg.symbol}|${cfg.mode === "live"}`) ?? 0
+
+    // Grid unrealized PnL lives in gridOrders, not the positions table, so the
+    // strategy breakdown's grid bucket was always 0. Populate it from the real
+    // grid order book so the top summary bar matches the grid card.
+    strategyBreakdown.grid.unrealized = totalGridUnrealized
+    strategyBreakdown.grid.count = activeGridOrders.filter(o => o.buyPrice).length
 
     // Multi-pair grid configs with live state
     const gridConfigsState = await Promise.all(gridConfigRows.map(async (gc) => {
@@ -243,12 +258,11 @@ export async function GET() {
       const buys = orders.filter(o => o.side === "buy")
       const mark = markBySymbol.get(gc.symbol) ?? null
       let unrealized = 0
-      const dir = gc.direction || "long"
       for (const o of orders) {
         if (!mark || !o.buyPrice) continue
-        if (dir === "long" && o.side === "sell") {
+        if (o.side === "sell") {
           unrealized += (mark - o.buyPrice) * o.quantity
-        } else if (dir === "short" && o.side === "buy") {
+        } else if (o.side === "buy") {
           unrealized += (o.buyPrice - mark) * o.quantity
         }
       }

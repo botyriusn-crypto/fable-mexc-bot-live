@@ -1,6 +1,6 @@
 import { db } from "./db"
 import { botConfig, gridConfigs, gridOrders, trades, botLogs, positions, type BotConfig, type GridOrder } from "./db/schema"
-import { eq, sql, and, inArray, desc, isNotNull } from 'drizzle-orm'
+import { eq, sql, and, or, isNull, lt, inArray, desc, isNotNull } from 'drizzle-orm'
 import type { FeatureVector, IndicatorSnapshot } from "./indicators"
 import { detectVolatilitySurge, adaptiveSpacing, type VolatilityState } from "./volatility-guard"
 import type { Regime } from "./strategy"
@@ -14,16 +14,73 @@ import { isTradingHalted, marginBudgetRemaining, getRiskState } from "./risk-man
 import { shouldGateEntry, recordShadowEntry, resolveShadowEntries, evaluateKillSwitch } from "./grid-flow"
 
 
-// Global cooldown to prevent duplicate setups
-const GRID_SETUP_COOLDOWN = new Map<string, number>(); // symbol -> timestamp
+// ── Setup cooldown (DB-backed, atomic) ──
+// Previously these were in-memory Maps (`GRID_SETUP_COOLDOWN`,
+// `BUDGET_TOO_SMALL_COOLDOWN`). That does NOT coordinate across multiple
+// Fly.io machine instances (each has its own process memory) and does NOT
+// survive a restart/deploy (fresh empty Map on boot). Either condition lets
+// two ticks both read "no recent setup" and both proceed, producing
+// duplicate ladder-setup attempts within the same second. Cooldown state now
+// lives in gridConfigs.lastSetupAt / lastBudgetFailAt and is claimed with a
+// single conditional UPDATE, so only one caller can ever win the race
+// regardless of how many processes are evaluating it concurrently.
 const COOLDOWN_MS = 60000; // 60 seconds between setups
 // Separate, much longer backoff for a STRUCTURAL failure (budget cannot
 // clear minimum notional at current leverage/allocation) as opposed to a
 // transient one. Without this, a pair that mathematically cannot afford
 // even 1 order retries every 60s forever, wasting cycles and flooding
 // logs until the account balance or config changes.
-const BUDGET_TOO_SMALL_COOLDOWN = new Map<string, number>(); // symbol -> timestamp
 const BUDGET_TOO_SMALL_BACKOFF_MS = 30 * 60 * 1000; // 30 minutes
+
+// Atomically claim the setup cooldown for a symbol. Returns true only for
+// the single caller that wins the race (the row's lastSetupAt was null or
+// older than cooldownMs). Any concurrent caller — another tick on this
+// instance, or a tick on a different machine entirely — sees the updated
+// timestamp and gets `false`, so at most one ladder setup can proceed per
+// cooldown window no matter how many processes are racing.
+async function tryClaimSetupCooldown(symbol: string, cooldownMs: number): Promise<boolean> {
+  const cutoff = new Date(Date.now() - cooldownMs)
+  const result = await db
+    .update(gridConfigs)
+    .set({ lastSetupAt: new Date() })
+    .where(
+      and(
+        eq(gridConfigs.symbol, symbol),
+        or(isNull(gridConfigs.lastSetupAt), lt(gridConfigs.lastSetupAt, cutoff)),
+      ),
+    )
+    .returning({ id: gridConfigs.id })
+  return result.length === 1
+}
+
+// Same pattern for the structural "budget too small" backoff.
+async function tryClaimBudgetFailCooldown(symbol: string, backoffMs: number): Promise<boolean> {
+  const cutoff = new Date(Date.now() - backoffMs)
+  const result = await db
+    .update(gridConfigs)
+    .set({ lastBudgetFailAt: new Date() })
+    .where(
+      and(
+        eq(gridConfigs.symbol, symbol),
+        or(isNull(gridConfigs.lastBudgetFailAt), lt(gridConfigs.lastBudgetFailAt, cutoff)),
+      ),
+    )
+    .returning({ id: gridConfigs.id })
+  return result.length === 1
+}
+
+// Check (without claiming) whether the budget-too-small backoff is still
+// active for a symbol, so setupGrid can skip early with an informative log
+// exactly as it did before, without consuming a claim on every check.
+async function isBudgetFailCooldownActive(symbol: string, backoffMs: number): Promise<{ active: boolean; remainingMs: number }> {
+  const rows = await db.select({ lastBudgetFailAt: gridConfigs.lastBudgetFailAt }).from(gridConfigs).where(eq(gridConfigs.symbol, symbol)).limit(1)
+  const last = rows[0]?.lastBudgetFailAt ? new Date(rows[0].lastBudgetFailAt as any).getTime() : 0
+  const elapsed = Date.now() - last
+  if (last > 0 && elapsed < backoffMs) {
+    return { active: true, remainingMs: backoffMs - elapsed }
+  }
+  return { active: false, remainingMs: 0 }
+}
 
 // Grid trading engine: a ladder of buy levels below price with paired sell
 // targets one spacing above. Profits from oscillation inside a range.
@@ -293,24 +350,25 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
     return
   }
 
-  // COOLDOWN LOCK: Prevent duplicate setups
-  const lastSetup = GRID_SETUP_COOLDOWN.get(gc.symbol) || 0;
-  const timeSinceLastSetup = Date.now() - lastSetup;
-  
-  if (timeSinceLastSetup < COOLDOWN_MS) {
-    await log("info", `Grid ${gc.symbol}: Cooldown active - ${Math.floor((COOLDOWN_MS - timeSinceLastSetup)/1000)}s remaining, skipping setup`);
+  // BUDGET-TOO-SMALL BACKOFF: check (without claiming) whether this symbol is
+  // still in its 30-minute structural backoff. Checked before the setup
+  // cooldown claim so we don't burn a setup-cooldown claim on a symbol we're
+  // going to skip anyway for a different reason.
+  const budgetFailState = await isBudgetFailCooldownActive(gc.symbol, BUDGET_TOO_SMALL_BACKOFF_MS)
+  if (budgetFailState.active) {
+    await log("info", `Grid ${gc.symbol}: Budget too small for current allocation, backing off - ${Math.floor(budgetFailState.remainingMs / 60000)}m remaining, skipping setup`);
     return;
   }
-  
-  const lastBudgetFail = BUDGET_TOO_SMALL_COOLDOWN.get(gc.symbol) || 0;
-  const timeSinceBudgetFail = Date.now() - lastBudgetFail;
-  if (timeSinceBudgetFail < BUDGET_TOO_SMALL_BACKOFF_MS) {
-    await log("info", `Grid ${gc.symbol}: Budget too small for current allocation, backing off - ${Math.floor((BUDGET_TOO_SMALL_BACKOFF_MS - timeSinceBudgetFail)/60000)}m remaining, skipping setup`);
+
+  // COOLDOWN LOCK: Prevent duplicate setups. Atomic DB claim — only one
+  // caller (across all processes/instances) can win this per COOLDOWN_MS
+  // window, unlike the old in-memory Map which let concurrent instances or
+  // overlapping ticks each think they were first.
+  const claimedSetup = await tryClaimSetupCooldown(gc.symbol, COOLDOWN_MS);
+  if (!claimedSetup) {
+    await log("info", `Grid ${gc.symbol}: Cooldown active or claimed by concurrent instance, skipping setup`);
     return;
   }
-  
-  // Mark this setup as starting
-  GRID_SETUP_COOLDOWN.set(gc.symbol, Date.now());
 
   // BUDGET ENFORCEMENT: Hard cap orders and check existing before setup
   const MAX_ORDERS = 8; // Never exceed 8 orders (4 per side) regardless of config
@@ -437,7 +495,7 @@ if (effectiveDirection(gc) === "neutral") baseSpacing = Math.max(center * 0.006,
 
   if (effectiveLevelsPerSide < 1) {
     await log("error", `Grid ${gc.symbol}: Budget ${budget.toFixed(2)} USDT too small for even 1 order per side at $${MIN_NOTIONAL} minimum notional. Need at least $${((MIN_NOTIONAL * sidesPerLevel) / gc.leverage).toFixed(2)} margin. Backing off ${BUDGET_TOO_SMALL_BACKOFF_MS/60000}m.`)
-    BUDGET_TOO_SMALL_COOLDOWN.set(gc.symbol, Date.now())
+    await tryClaimBudgetFailCooldown(gc.symbol, BUDGET_TOO_SMALL_BACKOFF_MS)
     return
   }
   if (effectiveLevelsPerSide < totalLevels) {

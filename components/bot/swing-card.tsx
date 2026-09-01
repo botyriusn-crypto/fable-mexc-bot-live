@@ -157,6 +157,23 @@ export function SwingCard({ state }: { state: any }) {
           </div>
 
           <div>
+            <label className="text-xs font-medium mb-2 block">Leverage</label>
+            <div className="flex gap-2">
+              {[1, 2, 3, 5, 10].map(lev => (
+                <Button
+                  key={lev}
+                  size="sm"
+                  variant={config.leverage === lev ? "default" : "outline"}
+                  onClick={() => setConfig(prev => ({ ...prev, leverage: lev }))}
+                  className="text-xs"
+                >
+                  {lev}x
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          <div>
             <label className="text-xs font-medium mb-2 block">Symbols</label>
             <div className="flex flex-wrap gap-2">
               {AVAILABLE_SYMBOLS.map(symbol => (

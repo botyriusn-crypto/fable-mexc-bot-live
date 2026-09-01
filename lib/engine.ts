@@ -38,6 +38,7 @@ import {
   getRiskState,
 } from "./risk-manager"
 import { evaluateScalpSignal } from "./trend-scalper"
+import { checkExposureGate } from "./exposure"
 import { evaluateAdvancedEntry, type AdvancedConfig, cvdRollingStats } from "./advanced-strategy"
 import { detectFundingCarry, trailingMeanFunding, computeFundingStops, type FundingCarryConfig } from "./funding-carry"
 import { getFundingRate, getFundingHistory } from "./bybit/public"
@@ -272,6 +273,15 @@ export async function openPosition(
       "info",
       `Entry blocked by margin cap (${direction} ${cfg.symbol}): only ${budget.toFixed(2)} USDT margin budget remaining`,
     )
+    return 0
+  }
+
+  // ── Cross-strategy exposure gate ──
+  const proposedNotional = sizeUsdt * cfg.leverage
+  const equity = (getRiskState()?.equity ?? cfg.paperBalance ?? 0) || 1
+  const exposure = await checkExposureGate(cfg.symbol, direction, proposedNotional, equity)
+  if (!exposure.allowed) {
+    await log("info", `Entry blocked by exposure gate (${direction} ${cfg.symbol}): ${exposure.reason}`)
     return 0
   }
 

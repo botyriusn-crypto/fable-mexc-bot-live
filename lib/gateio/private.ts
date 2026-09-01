@@ -114,6 +114,23 @@ function roundGatePrice(price: number, spec: GateSpec): number {
   return Math.round(price * factor) / factor
 }
 
+// --- account fee-rate cache (avoids a fetch per order) ---
+let gateFeeRates: { makerFeeRate: number; takerFeeRate: number } | null = null
+
+// Fetch the account's actual maker/taker fee rates (VIP-tier aware).
+export async function getFeeRates(): Promise<{ makerFeeRate: number; takerFeeRate: number }> {
+  if (gateFeeRates) return gateFeeRates
+  const data = (await privateRequest("GET", "/futures/usdt/fee")) as {
+    maker_fee?: string
+    taker_fee?: string
+  }
+  gateFeeRates = {
+    makerFeeRate: Number(data.maker_fee ?? "-0.0001"),
+    takerFeeRate: Number(data.taker_fee ?? "0.00075"),
+  }
+  return gateFeeRates
+}
+
 
 // side: 1 = open long, 2 = close short, 3 = open short, 4 = close long
 // Gate.io uses: long_open, long_close, short_open, short_close
