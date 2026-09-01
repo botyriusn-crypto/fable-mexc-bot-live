@@ -12,6 +12,7 @@ import { getMexcSpecAsync } from "./mexc/precision"
 import { livePrices } from "./mexc/ws"
 import { isTradingHalted, marginBudgetRemaining, getRiskState } from "./risk-manager"
 import { shouldGateEntry, recordShadowEntry, resolveShadowEntries, evaluateKillSwitch } from "./grid-flow"
+import { checkGridExposureGate } from "./exposure"
 
 
 // ── Setup cooldown (DB-backed, atomic) ──
@@ -1399,6 +1400,16 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
       await log("info", `Grid ${gc.symbol}: flow gate active (6h PnL < 0) — skipping new entries`)
       return
     }
+    // ── Cross-strategy exposure gate for grid ──
+    const gridNotional = (gc.budgetPct / 100) * cfg.paperBalance * gc.leverage
+    const gridEquity = cfg.paperBalance || 1
+    const gridDirection = gc.direction === "auto" ? "neutral" : gc.direction as "long" | "short"
+    const gridExposure = await checkGridExposureGate(gc.symbol, gridDirection, gridNotional, gridEquity)
+    if (!gridExposure.allowed) {
+      await log("info", `Grid ${gc.symbol}: entry blocked by exposure gate: ${gridExposure.reason}`)
+      return
+    }
+
     // Track how many ticks the grid has been empty
     const emptyTicks = (gc as any)._emptyTicks || 0
     if (emptyTicks >= 2) {
