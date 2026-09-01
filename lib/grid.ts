@@ -96,8 +96,8 @@ const TAKER_FEE = 0.0002
 const MAKER_FEE = 0.0000
 // Maker mode risk controls: protect held inventory regardless of pause state.
 const MAKER_STOP_LOSS_PCT = 0.04   // close at market if price moves 4% against entry
-const MAKER_MAX_HOLD_MINUTES = 240 // force-close after 4 hours regardless of price
-const TREND_MAX_HOLD_MINUTES = 60 // when paused (trending), give up on mean reversion fast
+const MAKER_MAX_HOLD_MINUTES = 720 // force-close after 12 hours regardless of price
+const TREND_MAX_HOLD_MINUTES = 180 // when paused (trending), give up on mean reversion after 3 hours
 const MAKER_RECENTER_DRIFT_PCT = 0.15 // rebuild buy ladder if price drifts 15% from all resting buys
 
 // MEXC's order/create returns the id nested (e.g. { data: { orderId } }) or as a
