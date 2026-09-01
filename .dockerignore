@@ -2,25 +2,64 @@
 .git
 .gitignore
 
-# Node / build artifacts
+# Dependencies
 node_modules
+.pnpm-store
+
+# Next.js build output
 .next
-dist
-build
+out
 
-# Runtime caches (regenerated at runtime — never needed in the image)
-sniper_klines_cache.json
-bybit_klines_cache.json
-funding_cache.json
-bybit_funding_cache.json
-*_cache.json
-*.cache.json
+# Logs
+logs
+*.log
 
-# Env / secrets
+# Environment files
 .env
-.env.*
-!.env.example
+.env.local
+.env.production
+.env*.local
+
+# Test files
+coverage
 
 # Misc
-*.log
 .DS_Store
+*.pem
+
+# Backtest CSVs and research files (these are the big ones)
+*.csv
+backtest-*.ts
+backtest*.mjs
+bt_*.csv
+r4_*.csv
+sn*.csv
+sno*.csv
+snbe*.csv
+research-*.ts
+walkforward*.mjs
+patch-*.mjs
+repair-*.mjs
+check-*.mjs
+validate*.mjs
+inspect-*.mjs
+dedupe*.mjs
+cleanup*.mjs
+reconcile*.mjs
+sweep*.mjs
+test-*.mjs
+test-*.ts
+*.py
+
+# Old/backup files
+*_old
+*.bak
+*.backup
+
+# TypeScript build info
+tsconfig.tsbuildinfo
+
+# Fly.io local files
+.fly
+fly.toml.cron
+fable-mexc-bot-live/
