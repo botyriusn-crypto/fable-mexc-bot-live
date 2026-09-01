@@ -24,9 +24,9 @@ function envNum(name: string, def: number): number {
 
 export const EXPOSURE_LIMITS = {
   // Net directional notional (long - short) per symbol, as a fraction of equity.
-  maxNetNotionalPctOfEquity: () => envNum("MAX_NET_EXPOSURE_PCT", 0.15),
+  maxNetNotionalPctOfEquity: () => envNum("MAX_NET_EXPOSURE_PCT", 0.20),
   // Gross notional (long + short) per symbol — allows some hedged overlap.
-  maxGrossNotionalPctOfEquity: () => envNum("MAX_GROSS_EXPOSURE_PCT", 0.25),
+  maxGrossNotionalPctOfEquity: () => envNum("MAX_GROSS_EXPOSURE_PCT", 0.35),
 }
 
 export interface SymbolExposure {
