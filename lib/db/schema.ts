@@ -265,6 +265,7 @@ export const gridOrders = pgTable("grid_orders", {
   price: doublePrecision("price").notNull(),
   quantity: doublePrecision("quantity").notNull(),
   buyPrice: doublePrecision("buy_price"), // for sell orders: the paired buy entry price
+  slPrice: doublePrecision("sl_price"), // range-aware grid stop (null = legacy pct stop)
   entryFeatures: jsonb("entry_features").$type<Record<string, number>>(),
   status: text("status").notNull().default("pending"), // 'pending' | 'filled' | 'cancelled'
   mexcOrderId: text("mexc_order_id"),

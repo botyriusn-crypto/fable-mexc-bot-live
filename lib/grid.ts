@@ -219,6 +219,24 @@ const GRID_STOP_LOSS_PCT = 0.05 // 5% adverse move triggers stop-loss
 // at a worse price plus a penalty, with zero warning.
 const GRID_LIQUIDATION_SAFETY_FACTOR = 0.75
 
+const POST_SL_COOLDOWN_MS = 90 * 60 * 1000 // no fresh ladder for 90m after a stop-loss on this symbol
+const RANGE_SL_SPACING_MULT = 1.0        // range SL sits one rung beyond the outermost level
+
+async function markPostStopCooldown(symbol: string): Promise<void> {
+  const until = new Date(Date.now() + POST_SL_COOLDOWN_MS).toISOString()
+  await db.update(gridConfigs)
+    .set({ metadata: sql`COALESCE(${gridConfigs.metadata}, '{}'::jsonb) || jsonb_build_object('postSlUntil', ${until}::text)` })
+    .where(eq(gridConfigs.symbol, symbol))
+}
+
+async function postStopCooldownRemainingMs(symbol: string): Promise<number> {
+  const rows = await db.select({ metadata: gridConfigs.metadata }).from(gridConfigs).where(eq(gridConfigs.symbol, symbol)).limit(1)
+  const until = (rows[0]?.metadata as any)?.postSlUntil
+  if (!until) return 0
+  const rem = new Date(until).getTime() - Date.now()
+  return rem > 0 ? rem : 0
+}
+
 function effectiveGridStopPct(leverage: number): number {
   const liquidationDistApprox = 1 / leverage
   return Math.min(GRID_STOP_LOSS_PCT, liquidationDistApprox * GRID_LIQUIDATION_SAFETY_FACTOR)
@@ -259,7 +277,7 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
   // Check Long inventory
   for (const o of active.filter(x => x.side === "sell" && x.buyPrice != null && x.status === "pending")) {
     const adverse = (o.buyPrice! - price) / o.buyPrice!
-    if (adverse >= effectiveGridStopPct(o.leverage)) {
+    if (o.slPrice != null ? price <= o.slPrice : adverse >= effectiveGridStopPct(o.leverage)) {
       if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 4, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
       const grossPnl = (price - o.buyPrice!) * o.quantity
       const { takerFeeRate: rtf1 } = getFeeRates(cfg.exchange as Exchange, o.symbol)
@@ -268,6 +286,7 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
         await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - fees}` }).where(eq(botConfig.id, 1))
       }
       const claimedLongStop = await db.update(gridOrders).set({ status: "filled" }).where(and(eq(gridOrders.id, o.id), eq(gridOrders.status, "pending"))).returning({ id: gridOrders.id })
+      if (claimedLongStop.length > 0) await markPostStopCooldown(o.symbol).catch(() => {})
       if (claimedLongStop.length === 0) return false
       await cancelOtherPendingOrders(active, o.id, exchange ?? getExchangeClient(cfg.exchange as Exchange))
       await log("trade", `Grid ${o.symbol} STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${(grossPnl - fees).toFixed(2)} USDT`)
@@ -278,7 +297,7 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
   // Check Short inventory
   for (const o of active.filter(x => x.side === "buy" && x.buyPrice != null && x.status === "pending")) {
     const adverse = (price - o.buyPrice!) / o.buyPrice!
-    if (adverse >= effectiveGridStopPct(o.leverage)) {
+    if (o.slPrice != null ? price >= o.slPrice : adverse >= effectiveGridStopPct(o.leverage)) {
       if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
       const grossPnl = (o.buyPrice! - price) * o.quantity
       const { takerFeeRate: rtf2 } = getFeeRates(cfg.exchange as Exchange, o.symbol)
@@ -288,6 +307,7 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
       }
       await cancelOtherPendingOrders(active, o.id, exchange ?? getExchangeClient(cfg.exchange as Exchange))
       await db.update(gridOrders).set({ status: "filled" }).where(eq(gridOrders.id, o.id))
+      await markPostStopCooldown(o.symbol).catch(() => {})
       await log("trade", `Grid ${o.symbol} SHORT STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${(grossPnl - fees).toFixed(2)} USDT`)
       return true
     }
@@ -355,6 +375,11 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   // still in its 30-minute structural backoff. Checked before the setup
   // cooldown claim so we don't burn a setup-cooldown claim on a symbol we're
   // going to skip anyway for a different reason.
+  const postSlRemaining = await postStopCooldownRemainingMs(gc.symbol)
+  if (postSlRemaining > 0) {
+    await log("info", `Grid ${gc.symbol}: post-stop-loss cooldown — ${Math.ceil(postSlRemaining / 60000)}m remaining, skipping setup`)
+    return
+  }
   const budgetFailState = await isBudgetFailCooldownActive(gc.symbol, BUDGET_TOO_SMALL_BACKOFF_MS)
   if (budgetFailState.active) {
     await log("info", `Grid ${gc.symbol}: Budget too small for current allocation, backing off - ${Math.floor(budgetFailState.remainingMs / 60000)}m remaining, skipping setup`);
@@ -559,6 +584,21 @@ let orders: any[] = []
       status: "pending" as const,
     })
   }
+  // RANGE-AWARE SL: one rung beyond the outermost level, capped so it is never
+  // looser than the legacy percentage stop. Carried into paired TP orders.
+  {
+    const buyPx = orders.filter(o => o.side === "buy").map(o => o.price)
+    const sellPx = orders.filter(o => o.side === "sell").map(o => o.price)
+    const rangeSlLong = buyPx.length ? Math.min(...buyPx) - baseSpacing * RANGE_SL_SPACING_MULT : null
+    const rangeSlShort = sellPx.length ? Math.max(...sellPx) + baseSpacing * RANGE_SL_SPACING_MULT : null
+    const pct = Math.min(effectiveGridStopPct(gc.leverage), effectiveMakerStopPct(gc.leverage))
+    for (const o of orders) {
+      if (o.side === "buy" && rangeSlLong != null) o.slPrice = Math.max(rangeSlLong, o.price * (1 - pct))
+      if (o.side === "sell" && rangeSlShort != null) o.slPrice = Math.min(rangeSlShort, o.price * (1 + pct))
+    }
+    if (rangeSlLong != null || rangeSlShort != null)
+      await log("info", `Grid ${gc.symbol}: range SL long=${rangeSlLong?.toFixed(6) ?? "-"} short=${rangeSlShort?.toFixed(6) ?? "-"} (spacing ${baseSpacing.toFixed(6)})`)
+  }
 // COMBO (neutral) grids: Place BOTH buy AND sell orders immediately (Bitsgap-style)
 // This captures oscillations in both directions from the start. Order
 // count is already correct at this point (computed before generation), so
@@ -620,7 +660,7 @@ if (cfg.mode === "live") {
         
         while (retries < maxRetries) {
           try {
-            res = await placeRoundedMakerOrder(ord.symbol, side, ord.price, ord.quantity, ord.leverage, client);
+            res = await placeRoundedMakerOrder(ord.symbol, side, ord.price, ord.quantity, ord.leverage, exchange ?? getExchangeClient(cfg.exchange as Exchange));
             break; // Success, exit retry loop
           } catch (err) {
             const errMsg = dbErr(err);
@@ -897,6 +937,7 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
 // Maker tick: fills are detected from REAL MEXC order status, not price
 // crossing. v1 intentionally omits auto-pause and auto-recenter — watch it.
 async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: BotConfig, reason: "stop-loss" | "max-hold"): Promise<void> {
+  if (reason === "stop-loss") await markPostStopCooldown(order.symbol).catch(() => {})
   // PAPER MODE: no real position exists on the exchange, so skip the exchange
   // round-trip entirely and settle locally. Hitting the exchange here would
   // always return 2009 "Position is nonexistent" and loop forever.
@@ -974,6 +1015,7 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
 
 // Maker SHORT stop-loss settlement: cancel resting buy-to-close, then close short at market.
 async function settleMakerShortStopLoss(order: GridOrder, exitPrice: number, cfg: BotConfig, reason: "stop-loss" | "max-hold"): Promise<void> {
+  if (reason === "stop-loss") await markPostStopCooldown(order.symbol).catch(() => {})
 // PAPER MODE: no real position exists on the exchange, so skip the exchange
 // round-trip entirely and settle locally. Hitting the exchange here would
 // always return 2009 "Position is nonexistent" and loop forever.
@@ -1074,8 +1116,8 @@ export async function checkAllHeldPositionsRisk(): Promise<void> {
     if (o.side === "sell") {
       // Held long: loses when price falls below entry.
       const adverseMove = (currentPrice - entryPrice) / entryPrice
-      if (adverseMove <= -effectiveMakerStopPct(o.leverage)) {
-        await log("info", `Grid ${o.symbol} (maker, fast-check): stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% below entry ${entryPrice.toFixed(6)}`)
+      if (o.slPrice != null ? currentPrice <= o.slPrice : adverseMove <= -effectiveMakerStopPct(o.leverage)) {
+        await log("info", `Grid ${o.symbol} (maker, fast-check): stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% below entry ${entryPrice.toFixed(6)} (sl ${o.slPrice?.toFixed(6) ?? "pct"})`)
         await settleMakerStopLoss(o, currentPrice, cfg, "stop-loss")
       } else if (heldMinutes >= (pausedBySymbol.get(o.symbol) ? TREND_MAX_HOLD_MINUTES : MAKER_MAX_HOLD_MINUTES)) {
         await log("info", `Grid ${o.symbol} (maker, fast-check): max-hold triggered — held ${heldMinutes.toFixed(0)}m, closing at market`)
@@ -1084,8 +1126,8 @@ export async function checkAllHeldPositionsRisk(): Promise<void> {
     } else if (o.side === "buy") {
       // Held short: loses when price rises above entry.
       const adverseMove = (currentPrice - entryPrice) / entryPrice
-      if (adverseMove >= effectiveMakerStopPct(o.leverage)) {
-        await log("info", `Grid ${o.symbol} (maker, fast-check): short stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% above entry ${entryPrice.toFixed(6)}`)
+      if (o.slPrice != null ? currentPrice >= o.slPrice : adverseMove >= effectiveMakerStopPct(o.leverage)) {
+        await log("info", `Grid ${o.symbol} (maker, fast-check): short stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% above entry ${entryPrice.toFixed(6)} (sl ${o.slPrice?.toFixed(6) ?? "pct"})`)
         await settleMakerShortStopLoss(o, currentPrice, cfg, "stop-loss")
       } else if (heldMinutes >= (pausedBySymbol.get(o.symbol) ? TREND_MAX_HOLD_MINUTES : MAKER_MAX_HOLD_MINUTES)) {
         await log("info", `Grid ${o.symbol} (maker, fast-check): short max-hold triggered — held ${heldMinutes.toFixed(0)}m, closing at market`)
@@ -1242,7 +1284,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
             const sid = extractOrderId(res)
             await db.insert(gridOrders).values({
               symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
-              spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell",
+              spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell",
               price: entryPrice, quantity: o.quantity,
               mexcOrderId: sid, exchangeStatus: "new", status: "pending",
             })
@@ -1265,7 +1307,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
               const sid = extractOrderId(res)
         await db.insert(gridOrders).values({
           symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
-          spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell",
+          spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell",
           price: sellPrice, quantity: o.quantity, buyPrice: fillPrice,
           entryFeatures: { ...snap.features, sideLong: 1 },
           mexcOrderId: sid, exchangeStatus: "new", status: "pending",
@@ -1299,7 +1341,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
           const bid = extractOrderId(res)
           await db.insert(gridOrders).values({
             symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
-            spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy",
+            spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "buy",
             price: closePrice, quantity: o.quantity, buyPrice: fillPrice,
             entryFeatures: { ...snap.features, sideLong: -1 },
             mexcOrderId: bid, exchangeStatus: "new", status: "pending",
@@ -1319,7 +1361,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
               const bid = extractOrderId(res)
           await db.insert(gridOrders).values({
             symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
-            spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy",
+            spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "buy",
             price: o.buyPrice, quantity: o.quantity,
             mexcOrderId: bid, exchangeStatus: "new", status: "pending",
           })
@@ -1529,7 +1571,7 @@ for (const o of sells) {
 if (o.buyPrice == null) {
 await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
 const closePrice = o.price - spacing
-await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, entryFeatures: { ...snap.features, sideLong: -1 }, status: "pending" })
+await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, entryFeatures: { ...snap.features, sideLong: -1 }, status: "pending" })
 await log("trade", `Grid ${o.symbol} COMBO short sell @ ${o.price.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
 continue
 }
@@ -1541,7 +1583,7 @@ const sold = await settleGridSell(o, o.price, cfg, "tp", exchange)
     if (sold && o.buyPrice != null) {
       await db.insert(gridOrders).values({
         symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
-        spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy",
+        spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "buy",
         price: o.buyPrice, quantity: o.quantity, status: "pending",
       })
     }
@@ -1567,7 +1609,7 @@ if (o.buyPrice != null && (gc as any).direction === "neutral") {
 await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
 await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: entry * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: false })
 await log("trade", `Grid ${o.symbol} COMBO short closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
-await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: entry, quantity: o.quantity, status: "pending" })
+await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell", price: entry, quantity: o.quantity, status: "pending" })
 continue
 }
 // (dead/unreachable duplicate block removed -- identical condition to the
@@ -1599,7 +1641,7 @@ if (cfg.mode === "live") {
       
       await db.insert(gridOrders).values({
         symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
-        spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell",
+        spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell",
         price: o.price + spacing, quantity: o.quantity, buyPrice: o.price,
         // ON CONFLICT DO NOTHING handled by database unique index
         entryFeatures: { ...snap.features, sideLong: 1 },
@@ -1646,7 +1688,7 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
       try {
         const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage, exchange)
         const bid = extractOrderId(res)
-        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: fillPrice, mexcOrderId: bid, exchangeStatus: "new", status: "pending" })
+        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: fillPrice, mexcOrderId: bid, exchangeStatus: "new", status: "pending" })
         await log("trade", `Short ${o.symbol} sell filled @ ${fillPrice.toFixed(6)} | buy to close @ ${closePrice.toFixed(6)}`)
       } catch (err) {
         await log("error", `Short ${o.symbol} buy placement failed: ${dbErr(err)}`)
@@ -1674,7 +1716,7 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
       try {
         const res: any = await placeRoundedMakerOrder(o.symbol, 3, entryPrice, o.quantity, o.leverage, exchange)
         const sid = extractOrderId(res)
-        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: entryPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
+        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell", price: entryPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
       } catch (err) {
         await log("error", `Short ${o.symbol} re-arm sell failed: ${dbErr(err)}`)
       }
@@ -1724,10 +1766,10 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
           try {
             const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage, client)
             const bid = extractOrderId(res)
-            await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: fillPrice, mexcOrderId: bid, exchangeStatus: "new", status: "pending" })
+            await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: fillPrice, mexcOrderId: bid, exchangeStatus: "new", status: "pending" })
           } catch (err) { await log("error", `Short buy close failed: ${dbErr(err)}`) }
         } else {
-          await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, status: "pending" })
+          await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, status: "pending" })
         }
         await log("trade", `Short ${o.symbol} sell filled @ ${fillPrice.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
       }
@@ -1737,7 +1779,7 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
       }
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
       const closePrice = o.price - (snap.atr * gc.rangeAtrMult)
-      await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, status: "pending" })
+      await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, status: "pending" })
       await log("trade", `Short ${o.symbol} sell @ ${o.price.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
     }
   }
@@ -1761,10 +1803,10 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
           try {
             const res: any = await placeRoundedMakerOrder(o.symbol, 3, newSellPrice, o.quantity, o.leverage, client)
             const sid = extractOrderId(res)
-            await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
+            await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell", price: newSellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
           } catch (err) { await log("error", `Short re-arm sell failed: ${dbErr(err)}`) }
         } else {
-          await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, status: "pending" })
+          await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell", price: newSellPrice, quantity: o.quantity, status: "pending" })
         }
       }
     } else if (price <= o.price) {
@@ -1788,10 +1830,10 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
         try {
           const res: any = await placeRoundedMakerOrder(o.symbol, 3, newSellPrice, o.quantity, o.leverage, client)
           const sid = extractOrderId(res)
-          await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
+          await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell", price: newSellPrice, quantity: o.quantity, mexcOrderId: sid, exchangeStatus: "new", status: "pending" })
         } catch (err) { await log("error", `Short re-arm sell failed: ${dbErr(err)}`) }
       } else {
-        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, side: "sell", price: newSellPrice, quantity: o.quantity, status: "pending" })
+        await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell", price: newSellPrice, quantity: o.quantity, status: "pending" })
       }
     }
   }
