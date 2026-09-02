@@ -7,11 +7,19 @@
 // Honest limitations:
 //   - fundingRate is stubbed to 0 (no historical funding source on MEXC public API).
 //   - Uses a fixed 200-candle window per signal (matches runSniperCycle).
+//   - NOTE: this harness does not gate trades by `confidence` at all — simulate()
+//     accepts any signal detectSniper returns. That means confidence-formula
+//     changes (e.g. the sweep confidence flattening) will NOT show up in these
+//     results, since confidence isn't used for trade selection here. Only
+//     changes to WHICH signals get generated (like sigmaZMax) will move the
+//     numbers. If you need to backtest confidence-gated behavior, filter the
+//     Trade[] array post-hoc by re-deriving confidence, or add a threshold
+//     check in simulate() before pushing to `trades`.
 
 import { detectSniper, type SniperOverrides } from "./lib/sniper"
 import type { Candle } from "./lib/mexc/public"
 
-interface CliArgs { symbols: string[]; timeframe: string; days: number; compare: boolean }
+interface CliArgs { symbols: string[]; timeframe: string; days: number; compare: boolean; sigmaZMax?: number }
 
 function parseArgs(argv: string[]): CliArgs {
   const a: CliArgs = { symbols: ["BTC_USDT"], timeframe: "Min5", days: 60, compare: false }
@@ -22,6 +30,7 @@ function parseArgs(argv: string[]): CliArgs {
     else if (v === "--timeframe") a.timeframe = argv[++i]
     else if (v === "--days") a.days = parseInt(argv[++i], 10)
     else if (v === "--compare") a.compare = true
+    else if (v === "--sigma-z-max") a.sigmaZMax = parseFloat(argv[++i])
   }
   return a
 }
@@ -86,6 +95,7 @@ interface Trade {
   signalType: "sweep" | "sigma"
   outcome: "tp" | "sl"
   rMultiple: number
+  z: number
 }
 
 function simulate(candles: Candle[], overrides: SniperOverrides): Trade[] {
@@ -116,7 +126,7 @@ function simulate(candles: Candle[], overrides: SniperOverrides): Trade[] {
 
     const risk = Math.abs(entry - sig.stopLoss)
     const rMultiple = risk > 0 ? ((exitPrice - entry) / risk) * (isLong ? 1 : -1) : 0
-    trades.push({ direction: sig.direction, signalType: sig.signalType, outcome, rMultiple })
+    trades.push({ direction: sig.direction, signalType: sig.signalType, outcome, rMultiple, z: sig.z })
   }
   return trades
 }
@@ -142,11 +152,22 @@ function report(name: string, trades: Trade[]) {
     const w = ts.filter(t => t.outcome === "tp").length
     return `${dir}=n${ts.length}/win${ts.length ? (w / ts.length * 100).toFixed(0) : 0}%`
   }
+  // Sigma-specific |z| breakdown, to directly compare against the live-data
+  // buckets that motivated the sigmaZMax cap (2.5-3.5 vs 3.5+).
+  const sigmaByZ = () => {
+    const sigmas = trades.filter(t => t.signalType === "sigma")
+    const lowZ = sigmas.filter(t => Math.abs(t.z) <= 3.5)
+    const highZ = sigmas.filter(t => Math.abs(t.z) > 3.5)
+    const wLow = lowZ.filter(t => t.outcome === "tp").length
+    const wHigh = highZ.filter(t => t.outcome === "tp").length
+    return `sigma|z<=3.5=n${lowZ.length}/win${lowZ.length ? (wLow / lowZ.length * 100).toFixed(0) : 0}%  sigma|z>3.5=n${highZ.length}/win${highZ.length ? (wHigh / highZ.length * 100).toFixed(0) : 0}%`
+  }
 
   console.log(`\n  ${name}`)
   console.log(`    Trades=${n}  Win=${(winRate * 100).toFixed(1)}%  Expectancy=${expectancy.toFixed(3)}R  Total=${totalR.toFixed(1)}R  PF=${pf === Infinity ? "inf" : pf.toFixed(2)}`)
   console.log(`    ${byType("sweep")}  ${byType("sigma")}`)
   console.log(`    ${byDir("long")}  ${byDir("short")}`)
+  console.log(`    ${sigmaByZ()}`)
 }
 
 async function main() {
@@ -161,15 +182,21 @@ async function main() {
     data.push({ symbol: sym, candles })
   }
 
+  // Default comparison: OLD (pre-fix, uncapped sigma) vs NEW (sigmaZMax=3.5,
+  // the current lib/sniper.ts default) — isolates exactly the change that
+  // affects which trades this harness generates. Confidence-formula changes
+  // (sweep flattening, sigma confidence curve) do NOT affect trade selection
+  // here (see file header), so they intentionally aren't a variant below.
   const variants: Array<[string, SniperOverrides, "all" | "long" | "short"]> = args.compare
     ? [
-        ["BASELINE (current production)", {}, "all"],
-        ["LONG-ONLY", {}, "long"],
-        ["SHORT-ONLY", {}, "short"],
-        ["LONG-ONLY + sigma2", { tpSlRatioSigma: 2 }, "long"],
-        ["LONG-ONLY + shortPct + sigma2", { shortStopBufferPct: true, tpSlRatioSigma: 2 }, "long"],
+        ["OLD (pre-fix, sigma uncapped)", { sigmaZMax: 100 }, "all"],
+        ["NEW (sigmaZMax=3.5, current default)", {}, "all"],
+        ["NEW, long-only", {}, "long"],
+        ["NEW, short-only (reference only — shorts disabled live)", {}, "short"],
       ]
-    : [["BASELINE", {}, "all"]]
+    : args.sigmaZMax != null
+      ? [[`sigmaZMax=${args.sigmaZMax}`, { sigmaZMax: args.sigmaZMax }, "all"]]
+      : [["BASELINE (current default)", {}, "all"]]
 
   for (const [name, ov, side] of variants) {
     const all: Trade[] = []
