@@ -39,6 +39,7 @@ import {
 } from "./risk-manager"
 import { evaluateScalpSignal } from "./trend-scalper"
 import { checkExposureGate } from "./exposure"
+import { sniperEntryGuard, withSniperLock, SNIPER_GUARDS } from "./sniper-guards"
 import { evaluateAdvancedEntry, type AdvancedConfig, cvdRollingStats } from "./advanced-strategy"
 import { detectFundingCarry, trailingMeanFunding, computeFundingStops, type FundingCarryConfig } from "./funding-carry"
 import { getFundingRate, getFundingHistory } from "./bybit/public"
@@ -1155,12 +1156,35 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
             const candles = await exchange.fetchKlines(toExchangeSymbol(c.symbol), c.timeframe, 200)
             if (candles.length < 60) continue
             const snap = computeSnapshot(candles, marketCfg)
-            snap.price = c.entry
+            // ── Live re-price ──
+            // c.entry is the CLOSE of the signal candle at scan time; a market order
+            // fills at the current price. Refuse if price already ran away (we'd be
+            // buying the top of the reclaim) or already fell through the stop.
+            const liveTicker = await fetchTickerWithRetry(exchange, c.symbol, tickerCache).catch(() => null)
+            const livePrice = Number(liveTicker?.lastPrice) || c.entry
+            const slip = (livePrice - c.entry) / c.entry
+            if (slip > SNIPER_GUARDS.maxEntrySlip()) {
+              await log("info", `Sniper: skipped ${c.symbol} — price ran ${(slip * 100).toFixed(2)}% above signal close`)
+              continue
+            }
+            if (livePrice <= c.stopLoss) {
+              await log("info", `Sniper: skipped ${c.symbol} — live ${livePrice} already at/below stop ${c.stopLoss}`)
+              continue
+            }
+            snap.price = livePrice
             const features: FeatureVector = { ...snap.features, sideLong: c.direction === "long" ? 1 : -1 }
-            const used = await openPosition(marketCfg, c.direction, snap, c.confidence, features, "sniper", {
-              stopLoss: c.stopLoss,
-              takeProfit: c.takeProfit,
-              sizeUsdtOverride: remainingBudget > 0 ? remainingBudget : (cfg.sniperPositionSizeUsdt ?? cfg.positionSizeUsdt),
+            // ── Guards + per-symbol cross-process lock ──
+            const used = await withSniperLock(c.symbol, async () => {
+              const guard = await sniperEntryGuard(c.symbol, c.rise24h, cfg.sniperTargetRiskUsdt ?? 0)
+              if (!guard.allowed) {
+                await log("info", `Sniper: blocked ${c.symbol} (${guard.reason})`)
+                return 0
+              }
+              return openPosition(marketCfg, c.direction, snap, c.confidence, features, "sniper", {
+                stopLoss: c.stopLoss,
+                takeProfit: c.takeProfit,
+                sizeUsdtOverride: cfg.sniperPositionSizeUsdt ?? cfg.positionSizeUsdt,
+              })
             })
             remainingBudget -= Math.min(used, remainingBudget)
           } catch (err) {

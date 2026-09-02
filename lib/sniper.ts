@@ -20,6 +20,22 @@ export const SNIPER_PARAMS = {
   sweepLookback: 20,
   volumeSurgeMult: 1.5,
   sigmaExtreme: 2.5,
+  // UPPER bound on sigma exhaustion, added after live data showed accuracy
+  // collapses past this point rather than continuing to improve. Breakdown
+  // across 676 resolved signals, bucketed by |z|:
+  //   2.50-3.00  -> 49.1% (n=106)
+  //   3.00-3.50  -> 50.0% (n=32)
+  //   3.50-4.00  -> 35.1% (n=114)
+  //   4.00-4.50  -> 39.0% (n=41)
+  //   4.50+      -> mixed, small n
+  // The most extreme z-scores are disproportionately real breakouts/
+  // liquidation cascades, not exhaustion-and-reversion setups — pushing
+  // further into "more extreme" selects for the wrong regime, not a
+  // stronger version of the same one. Signals with |z| > sigmaZMax are
+  // rejected outright rather than scored down, since the combined 3.5+
+  // bucket (~199 signals, ~37% accuracy) is a net loser on its own, not
+  // just a weaker version of the 2.5-3.5 edge.
+  sigmaZMax: 3.5,
   fundingThreshold: 0.0005,
   minVolumeUsdt: 1_000_000,
   minPrice: 0.10,
@@ -44,6 +60,7 @@ export interface SniperSignal {
 const SWEEP_LOOKBACK = SNIPER_PARAMS.sweepLookback
 const VOLUME_SURGE_MULT = SNIPER_PARAMS.volumeSurgeMult
 const SIGMA_EXTREME = SNIPER_PARAMS.sigmaExtreme
+const SIGMA_Z_MAX = SNIPER_PARAMS.sigmaZMax
 
 function avg(nums: number[]): number {
   return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : 0
@@ -51,6 +68,7 @@ function avg(nums: number[]): number {
 
 export interface SniperOverrides {
   sigmaExtreme?: number
+  sigmaZMax?: number
   volumeSurgeMult?: number
   minStopPct?: number
   tpSlRatio?: number
@@ -68,6 +86,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   if (candles.length < 60) return none
 
   const sigmaExtreme = overrides.sigmaExtreme ?? SIGMA_EXTREME
+  const sigmaZMax = overrides.sigmaZMax ?? SIGMA_Z_MAX
   const volumeSurgeMult = overrides.volumeSurgeMult ?? VOLUME_SURGE_MULT
   const bearishPrevCloseConfirm = overrides.bearishPrevCloseConfirm ?? true
   const shortAllowNeutral = overrides.shortAllowNeutral ?? true
@@ -108,12 +127,22 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const prevCandle = candles[candles.length - 2];
   const bearishReclaim = last.high > swingHigh && last.close < swingHigh && last.close < last.open && (!bearishPrevCloseConfirm || prevCandle.close < swingHigh) && volSurge >= volumeSurgeMult && (trendDown || (sweepAllowNeutral && trendNeutral))
 
-  const exhaustedDown = z < -sigmaExtreme && last.close > last.open && trendUp
-  const exhaustedUp = z > sigmaExtreme && last.close < last.open && (trendDown || (shortAllowNeutral && trendNeutral))
-  // Sigma confidence scales with how far |z| exceeds the threshold, so the
-  // confidence floor and the "top N by confidence" sort actually discriminate
-  // (weak sigma ~0.5 -> rejected by a 0.6 floor; strong sigma ~0.9 -> kept).
-  const sigmaConfidence = 0.55 + Math.min(0.4, (Math.abs(z) - sigmaExtreme) * 0.25)
+  // UPPER-BOUNDED sigma exhaustion: |z| must exceed sigmaExtreme (still a
+  // genuine dislocation) but not exceed sigmaZMax (see SNIPER_PARAMS comment
+  // above — beyond this the setup is more likely a real breakout than
+  // exhaustion, and live data confirms accuracy collapses past this line).
+  const absZ = Math.abs(z)
+  const exhaustedDown = z < -sigmaExtreme && absZ <= sigmaZMax && last.close > last.open && trendUp
+  const exhaustedUp = z > sigmaExtreme && absZ <= sigmaZMax && last.close < last.open && (trendDown || (shortAllowNeutral && trendNeutral))
+  // Sigma confidence, REVISED from a monotonically-increasing-with-|z| curve
+  // to one that matches the observed accuracy shape: performance peaks just
+  // past the entry threshold (2.5-3.5) and degrades beyond it, rather than
+  // continuing to improve with more extreme dislocation. The old formula
+  // (0.55 + min(0.4, (|z|-sigmaExtreme)*0.25)) rewarded exactly the z-range
+  // that live data shows performs worst — confidence and outcome quality
+  // were anti-correlated at the top end. This curve is flat-to-mildly-
+  // declining across the now-capped [sigmaExtreme, sigmaZMax] window instead.
+  const sigmaConfidence = 0.65 - Math.max(0, absZ - sigmaExtreme - 0.5) * 0.1
 
   let direction: "long" | "short" | null = null
   let confidence = 0
@@ -122,10 +151,24 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   let signalType: "sweep" | "sigma" | null = null
 
   if (bullishReclaim) {
-    direction = "long"; confidence = 0.6 + Math.min(volSurge, 5) * 0.05
+    direction = "long"
+    // Sweep confidence, REVISED: live data (227 mid-surge signals at 38.3%
+    // vs 137 high-surge at 38.0%) shows volSurge magnitude has essentially
+    // zero predictive relationship with outcome for sweeps — the old
+    // formula (0.6 + min(volSurge,5)*0.05) was scaling confidence against a
+    // variable that carries no signal. Flattened to a fixed base rather than
+    // continuing to reward a number that doesn't predict anything.
+    // NOTE (unverified, worth testing via the Super Advisor rather than
+    // assuming): a clean trendUp/trendDown read is likely a better quality
+    // signal than the trendNeutral fallback path, since sweepAllowNeutral
+    // lets weaker-evidence setups through with no confidence penalty today.
+    // This nudge is a hypothesis, not a data-confirmed fix like the sigma
+    // z-cap above — treat it as a candidate to A/B, not a settled result.
+    confidence = trendUp ? 0.62 : 0.58
     reason = `Liquidity sweep: pierced ${swingLow.toFixed(6)} then reclaimed w/ ${volSurge.toFixed(1)}x volume`; extreme = last.low; signalType = "sweep"
   } else if (bearishReclaim) {
-    direction = "short"; confidence = 0.6 + Math.min(volSurge, 5) * 0.05
+    direction = "short"
+    confidence = trendDown ? 0.62 : 0.58
     reason = `Liquidity sweep: pierced ${swingHigh.toFixed(6)} then rejected w/ ${volSurge.toFixed(1)}x volume`; extreme = last.high; signalType = "sweep"
   } else if (exhaustedDown) {
     direction = "long"; confidence = sigmaConfidence
@@ -164,7 +207,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   return { direction, reason, confidence: Math.min(confidence, 0.95), stopLoss, takeProfit, signalType, volSurge, z, fundingRate }
 }
 
-export async function recordSniperCandidate(symbol: string, timeframe: string, candleTime: number, entry: number, sig: SniperSignal, entryTime: number) {
+export async function recordSniperCandidate(symbol: string, timeframe: string, candleTime: number, entry: number, sig: SniperSignal, entryTime: number, rise24h?: number) {
   if (!sig.direction) return
   try {
     await db.insert(classifierDecisions).values({
@@ -181,7 +224,7 @@ export async function recordSniperCandidate(symbol: string, timeframe: string, c
       lorentzianConfidence: sig.confidence,
       lorentzianAllowed: true,
       // Store signal characteristics so the advisor can grade counterfactually.
-      lorentzianFilters: { signalType: sig.signalType, volSurge: sig.volSurge, z: sig.z, fundingRate: sig.fundingRate, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, entryTime },
+      lorentzianFilters: { signalType: sig.signalType, volSurge: sig.volSurge, z: sig.z, fundingRate: sig.fundingRate, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, entryTime, rise24h: rise24h ?? null },
       finalAllowed: true,
       reason: sig.reason,
     }).onConflictDoNothing()
@@ -365,6 +408,7 @@ export interface SniperCandidate {
   stopLoss: number
   takeProfit: number
   confidence: number
+  rise24h?: number
 }
 
 export async function runSniperCycle(): Promise<SniperCandidate[]> {
@@ -385,6 +429,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
   const minVolumeUsdt = cfg?.sniperMinVolumeUsdt ?? SNIPER_PARAMS.minVolumeUsdt
   const minPrice = cfg?.sniperMinPrice ?? SNIPER_PARAMS.minPrice
   const sigmaExtreme = cfg?.sniperSigmaExtreme ?? SNIPER_PARAMS.sigmaExtreme
+  const sigmaZMax = cfg?.sniperSigmaZMax ?? SNIPER_PARAMS.sigmaZMax
   const volumeSurgeMult = cfg?.sniperVolumeSurgeMult ?? SNIPER_PARAMS.volumeSurgeMult
   const minStopPct = cfg?.sniperMinStopPct ?? SNIPER_PARAMS.minStopPct
   const tpSlRatio = cfg?.sniperTpSlRatio ?? SNIPER_PARAMS.tpSlRatio
@@ -437,7 +482,13 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
 
     // Build minimal snapshot with inline ATR (detectSniper only needs snap.atr
     // for the short-side ATR stop buffer). Avoids needing a full BotConfig here.
-    const _cl = candles as Candle[]
+    // Only evaluate CLOSED candles. fetchKlines returns the still-forming
+    // candle last; a "reclaim" / "bullish close" seen mid-candle can un-happen
+    // before the close (repainting) — the "enters, then goes against fast" bug.
+    const _nowSec = Math.floor(Date.now() / 1000)
+    const _closed = (candles as Candle[]).filter((c: Candle) => c.time + tfSec <= _nowSec)
+    if (_closed.length < 60) continue
+    const _cl = _closed as Candle[]
     let _trSum = 0
     for (let _i = _cl.length - 14; _i < _cl.length; _i++) {
       _trSum += Math.max(
@@ -449,7 +500,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     const snap = { atr: _trSum / 14, price: _cl[_cl.length - 1].close } as IndicatorSnapshot
 
     console.log(`[Sniper] Running detectSniper on ${symbol}... (atr=${snap.atr})`);
-    const sig = detectSniper(_cl, snap, t.fundingRate, { sigmaExtreme, volumeSurgeMult, minStopPct, tpSlRatio, longStopBufferAtr: true })
+    const sig = detectSniper(_cl, snap, t.fundingRate, { sigmaExtreme, sigmaZMax, volumeSurgeMult, minStopPct, tpSlRatio, longStopBufferAtr: true })
     if (!sig.direction) {
       console.log(`[Sniper] ${symbol}: no signal (confidence too low or no valid setup)`);
       continue;
@@ -463,9 +514,9 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
 
     const entryPrice = _cl[_cl.length - 1].close
     const entryTime = _cl[_cl.length - 1].time
-    await recordSniperCandidate(symbol, timeframe, bucket, entryPrice, sig, entryTime)
+    await recordSniperCandidate(symbol, timeframe, bucket, entryPrice, sig, entryTime, t.riseFallRate)
       console.log(`[Sniper] ${symbol}: candidate recorded in database, bucket=${bucket}`);
-    fresh.push({ symbol, timeframe, direction: sig.direction, entry: entryPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence })
+    fresh.push({ symbol, timeframe, direction: sig.direction, entry: entryPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence, rise24h: t.riseFallRate })
   }
 
   await resolveSniperDecisions()
