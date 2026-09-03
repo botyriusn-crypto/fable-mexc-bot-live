@@ -2,13 +2,25 @@ import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { botConfig } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
-import { fetchMarkets } from "@/lib/mexc/public"
+import { getConfig } from "@/lib/engine"
+import { getExchangeClient } from "@/lib/exchange"
+import { fetchMarkets as fetchMexcMarkets } from "@/lib/mexc/public"
 
 export const dynamic = "force-dynamic"
 
 export async function GET() {
   try {
-    const markets = await fetchMarkets()
+    const cfg = await getConfig()
+    const exchange = getExchangeClient(cfg.exchange)
+    
+    let markets: any[] = []
+    if (cfg.exchange === "bybit") {
+      const { fetchMarkets } = await import("@/lib/bybit/public")
+      markets = await fetchMarkets()
+    } else {
+      markets = await fetchMexcMarkets()
+    }
+    
     return NextResponse.json({
       markets: markets.map((m: any) => ({
         symbol: m.symbol,
@@ -16,7 +28,7 @@ export async function GET() {
         priceScale: m.priceScale ?? 4,
         maxLeverage: m.maxLeverage ?? 20,
       })),
-      exchange: 'mexc',
+      exchange: cfg.exchange,
     })
   } catch (error: any) {
     return NextResponse.json({ error: error.message || "Failed to fetch markets" }, { status: 500 })
