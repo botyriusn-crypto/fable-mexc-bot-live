@@ -95,8 +95,8 @@ const TAKER_FEE = 0.0002
 const MAKER_FEE = 0.0000
 // Maker mode risk controls: protect held inventory regardless of pause state.
 const MAKER_STOP_LOSS_PCT = 0.04   // close at market if price moves 4% against entry
-const MAKER_MAX_HOLD_MINUTES = 2880 // force-close after 48 hours (was 12h - too short for mean reversion)
-const TREND_MAX_HOLD_MINUTES = 720 // when paused (trending), give up after 12h (was 3h)
+const MAKER_MAX_HOLD_MINUTES = 720  // 12h. Longer holds bleed margin during trending regime shifts.
+const TREND_MAX_HOLD_MINUTES = 180  // 3h. When regime flips to trend, exit fast (that is the point of pause).
 const MAKER_RECENTER_DRIFT_PCT = 0.15 // rebuild buy ladder if price drifts 15% from all resting buys
 
 // MEXC's order/create returns the id nested (e.g. { data: { orderId } }) or as a
@@ -219,7 +219,9 @@ const GRID_STOP_LOSS_PCT = 0.03 // 3% adverse move (backtest-optimized: tight SL
 const GRID_LIQUIDATION_SAFETY_FACTOR = 0.75
 
 const POST_SL_COOLDOWN_MS = 90 * 60 * 1000 // no fresh ladder for 90m after a stop-loss on this symbol
-const RANGE_SL_SPACING_MULT = 1.0        // range SL sits one rung beyond the outermost level
+const PER_RUNG_SL_SPACING_MULT = 2.0     // per-rung SL sits 2 spacings from each rung's own entry
+                                          // Sized for observed 71.9% win rate: at 2:1 loss ratio,
+                                          // break-even is 67%, so this is safely +EV.
 
 async function markPostStopCooldown(symbol: string): Promise<void> {
   const until = new Date(Date.now() + POST_SL_COOLDOWN_MS).toISOString()
@@ -590,20 +592,28 @@ let orders: any[] = []
       status: "pending" as const,
     })
   }
-  // RANGE-AWARE SL: one rung beyond the outermost level, capped so it is never
-  // looser than the legacy percentage stop. Carried into paired TP orders.
+  // PER-RUNG SL (replaced shared range SL 2026-09-03): each rung has its own
+  // stop N spacings from its own entry. The old shared range SL closed ALL
+  // held rungs simultaneously when price crashed through the bottom of the
+  // grid, turning normal grid drawdown into one catastrophic multi-rung
+  // loss. Per-rung SL means only the specific rung whose stop is hit closes,
+  // keeping losses in the same size class as wins. Absolute % cap protects
+  // against illiquid pair wick blowouts and leverage-liquidation edge cases.
   {
-    const buyPx = orders.filter(o => o.side === "buy").map(o => o.price)
-    const sellPx = orders.filter(o => o.side === "sell").map(o => o.price)
-    const rangeSlLong = buyPx.length ? Math.min(...buyPx) - baseSpacing * RANGE_SL_SPACING_MULT : null
-    const rangeSlShort = sellPx.length ? Math.max(...sellPx) + baseSpacing * RANGE_SL_SPACING_MULT : null
-    const pct = Math.min(effectiveGridStopPct(gc.leverage), effectiveMakerStopPct(gc.leverage))
+    const perRungSlDist = baseSpacing * PER_RUNG_SL_SPACING_MULT
+    const absoluteCap = Math.min(effectiveGridStopPct(gc.leverage), effectiveMakerStopPct(gc.leverage))
     for (const o of orders) {
-      if (o.side === "buy" && rangeSlLong != null) o.slPrice = Math.max(rangeSlLong, o.price * (1 - pct))
-      if (o.side === "sell" && rangeSlShort != null) o.slPrice = Math.min(rangeSlShort, o.price * (1 + pct))
+      if (o.side === "buy") {
+        const spacingBased = o.price - perRungSlDist
+        const capBased = o.price * (1 - absoluteCap)
+        o.slPrice = Math.max(spacingBased, capBased) // tighter (higher for a long SL = smaller loss)
+      } else if (o.side === "sell") {
+        const spacingBased = o.price + perRungSlDist
+        const capBased = o.price * (1 + absoluteCap)
+        o.slPrice = Math.min(spacingBased, capBased) // tighter (lower for a short SL = smaller loss)
+      }
     }
-    if (rangeSlLong != null || rangeSlShort != null)
-      await log("info", `Grid ${gc.symbol}: range SL long=${rangeSlLong?.toFixed(6) ?? "-"} short=${rangeSlShort?.toFixed(6) ?? "-"} (spacing ${baseSpacing.toFixed(6)})`)
+    await log("info", `Grid ${gc.symbol}: per-rung SL at ${PER_RUNG_SL_SPACING_MULT}x spacing = ${perRungSlDist.toFixed(6)} per rung (cap ${(absoluteCap*100).toFixed(2)}%)`)
   }
 // COMBO (neutral) grids: Place BOTH buy AND sell orders immediately (Bitsgap-style)
 // This captures oscillations in both directions from the start. Order
