@@ -516,20 +516,6 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
       continue;
     }
 
-    // ── Sniper V1 confidence gate ─────────────────────────────────────────────
-    // 678-decision backtest (r_multiple unit) shows three zones:
-    //   stuck [0.64,0.75] → n=407, avg R×100 = -77.77  ← all losses, block
-    //   low   (<0.64)     → n=119, avg R×100 = +34.10  ← positive edge, allow
-    //   high  (>0.75)     → n=152, avg R×100 = +40.34  ← positive edge, allow
-    //   non-stuck total   → n=271, PF = 1.364  (unfiltered PF ≈ 0.68)
-    // The stuck zone is where the signal engine has no real conviction:
-    // sweep + funding boost lands at 0.68–0.72, mid-sigma lands here too.
-    // Block it; only proceed when confidence has escaped in either direction.
-    if (sig.confidence >= 0.64 && sig.confidence <= 0.75) {
-      console.log(`[Sniper V1] ${symbol}: BLOCKED conf=${sig.confidence.toFixed(3)} stuck-zone [0.64,0.75] type=${sig.signalType ?? "?"}`)
-      continue
-    }
-
     if (sig.reason.includes("funding")) {
       try {
         await db.insert(botLogs).values({ level: "info", message: `Sniper: funding edge on ${symbol} (rate ${(sig.fundingRate * 100).toFixed(4)}%, ${sig.direction === "long" ? "crowded shorts" : "crowded longs"})` })
@@ -540,6 +526,18 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     const entryTime = _cl[_cl.length - 1].time
     await recordSniperCandidate(symbol, timeframe, bucket, entryPrice, sig, entryTime, t.riseFallRate)
       console.log(`[Sniper] ${symbol}: candidate recorded in database, bucket=${bucket}`);
+
+    // ── Sniper V1 confidence gate (post-record) ───────────────────────────────
+    // Recorded above so every signal is visible in classifier_decisions for
+    // shadow analysis.  Gate actual execution here.
+    // stuck [0.64,0.75]: avg R×100=-77.77, PF≈0.5 — block
+    // low   (<0.64):     avg R×100=+34.10          — allow
+    // high  (>0.75):     avg R×100=+40.34          — allow
+    // combined non-stuck n=271, PF=1.364
+    if (sig.confidence >= 0.64 && sig.confidence <= 0.75) {
+      console.log(`[Sniper V1] ${symbol}: BLOCKED conf=${sig.confidence.toFixed(3)} stuck-zone [0.64,0.75] type=${sig.signalType ?? "?"} — recorded, not queued`)
+      continue
+    }
     fresh.push({ symbol, timeframe, direction: sig.direction, entry: entryPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence, rise24h: t.riseFallRate })
   }
 
