@@ -122,7 +122,7 @@ export async function fetchAllTickers(): Promise<any[]> {
 
 // Fetch all USDT perpetual markets from Bybit (for UI market selector)
 export async function fetchMarkets(): Promise<any[]> {
-  const url = `${BASE_URL}/market/instruments-info?category=linear`
+  const url = `${BASE_URL}/market/instruments-info?category=linear&limit=1000`
   const res = await fetch(url, { cache: "no-store", headers: HEADERS })
   if (!res.ok) throw new Error(`Bybit markets fetch failed: ${res.status}`)
   const json = await res.json() as any
