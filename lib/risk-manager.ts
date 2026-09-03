@@ -1,4 +1,4 @@
-import { fetchTicker } from "./mexc/public"
+import { getExchangeClient } from "./exchange"
 // Portfolio-level risk layer.
 //
 // Purpose: protect a SMALL account (<$500) from the two ways it usually dies —
@@ -116,7 +116,7 @@ export async function evaluatePortfolioRisk(cfg: BotConfig, liveUnrealized?: num
     const marks = new Map<string, number>()
     for (const symbol of symbols) {
       try {
-        const ticker = await fetchTicker(symbol)
+        const ticker = await getExchangeClient(cfg.exchange).fetchTicker(symbol)
         if (ticker?.lastPrice != null) marks.set(symbol, Number(ticker.lastPrice))
       } catch { /* best-effort */ }
     }

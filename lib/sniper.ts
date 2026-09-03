@@ -3,7 +3,8 @@ import type { IndicatorSnapshot } from "./indicators"
 import { db } from "./db"
 import { classifierDecisions, botConfig, botLogs } from "./db/schema"
 import { and, eq, isNull, sql } from "drizzle-orm"
-import { fetchTicker, fetchAllTickers, fetchKlines, type BulkTicker } from "./mexc/public"
+import type { BulkTicker } from "./mexc/public"
+import { getExchangeClient } from "./exchange"
 import { recordOutcome, type SniperFeatures } from "./advisor"
 
 // Tunable rule parameters (Option A: exposed for display + advisor tuning).
@@ -242,6 +243,9 @@ function tfSeconds(tf: string): number {
 // the only resolution that tells the truth about a 4:1 reward:risk trade.
 // Returns the number of decisions resolved this pass.
 export async function resolveSniperDecisions(): Promise<number> {
+  const cfgRows = await db.select().from(botConfig).limit(1)
+  const cfg = cfgRows[0] ?? null
+  if (!cfg) return 0
   const unresolved = await db.select().from(classifierDecisions).where(
     and(eq(classifierDecisions.strategy, "sniper"), isNull(classifierDecisions.resolvedAt))
   )
@@ -259,7 +263,7 @@ export async function resolveSniperDecisions(): Promise<number> {
     // Legacy rows (recorded before stop/take were stored) fall back to the old
     // ticker check so they still resolve rather than hanging forever.
     if (stopLoss == null || takeProfit == null) {
-      const ticker: any = await fetchTicker(d.symbol).catch(() => null)
+      const ticker: any = await getExchangeClient(cfg.exchange).fetchTicker(d.symbol).catch(() => null)
       const price = ticker?.lastPrice ?? ticker?.price
       if (!price) continue
       const ret = ((price - d.entryPrice) / d.entryPrice) * 100
@@ -279,7 +283,7 @@ export async function resolveSniperDecisions(): Promise<number> {
     }
 
     // Walk forward from the entry candle to determine which level hit first.
-    const candles = await fetchKlines(d.symbol, d.timeframe, 200).catch(() => null)
+    const candles = await getExchangeClient(cfg.exchange).fetchKlines(d.symbol, d.timeframe, 200).catch(() => null)
     if (!candles || candles.length < 2) continue
     const sorted = [...candles].sort((a, b) => a.time - b.time)
     const entryIdx = filters?.entryTime != null
@@ -436,7 +440,13 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
 
   let tickers: BulkTicker[]
   try {
-    tickers = await fetchAllTickers()
+    const exchange = getExchangeClient(cfg.exchange)
+    if (exchange.fetchAllTickers) {
+      tickers = await exchange.fetchAllTickers()
+    } else {
+      const { fetchAllTickers: mexFetchAllTickers } = await import("./mexc/public")
+      tickers = await mexFetchAllTickers()
+    }
   } catch (err) {
     console.error("[Sniper] bulk ticker fetch failed:", err)
     return []
@@ -477,7 +487,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     )
     if (dup.length > 0) continue
 
-    const candles = await fetchKlines(symbol, timeframe, 200).catch(() => null)
+    const candles = await getExchangeClient(cfg.exchange).fetchKlines(symbol, timeframe, 200).catch(() => null)
     if (!candles || candles.length < 60) continue
 
     // Build minimal snapshot with inline ATR (detectSniper only needs snap.atr

@@ -945,7 +945,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
               let cvd: number | undefined
               let cvdMean: number | undefined
               let cvdStd: number | undefined
-              if (advCfg.smartMoneyEnabled) {
+              if (advCfg.smartMoneyEnabled && cfg.exchange !== "bybit") {
                 try {
                   const deals = await fetchDeals(toExchangeSymbol(symbol))
                   const flow = computeTakerFlow(deals)
@@ -1376,17 +1376,18 @@ export async function initRealtimeEngine(symbol: string, timeframe: string) {
   // If a WS already exists for this symbol, don't create a duplicate
   if ((globalThis as any).__wsManagers[symbol]) return
   
-  console.log(`[Engine] Initializing real-time WebSocket engine for ${symbol}...`)
-  const manager = new MexcWebSocketManager(symbol, timeframe, async (kline) => {
-    if (kline.isClosed) {
-      console.log(`[WS] ${symbol} candle closed. Triggering instant tick...`)
-      try {
-        await runTick()
-      } catch (err) {
-        console.error(`[WS] Error during ${symbol} WS-triggered tick:`, err)
+  console.log(`[Engine] Using REST polling for ${symbol} (no MEXC websocket)`)
+  // REST polling fallback - fetch price every 15 seconds
+  const pollInterval = setInterval(async () => {
+    try {
+      const exchange = getExchangeClient(cfg.exchange)
+      const ticker = await exchange.fetchTicker(symbol)
+      if (ticker?.lastPrice) {
+        livePrices[symbol] = ticker.lastPrice
       }
-    }
-  })
+    } catch (err) { /* best-effort */ }
+  }, 15000)
+  const manager = { disconnect: () => clearInterval(pollInterval) }
   
   // Connect the WebSocket
   await manager.connect()
