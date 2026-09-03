@@ -233,6 +233,8 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
     for (const m of shortlist) {
       if (depthChecked.length >= 3) break
       try {
+        // fetchDepth is MEXC-specific; skip depth check for non-MEXC exchanges
+        if (cfg.exchange !== "mexc") { depthChecked.push(m); continue }
         const depth = await fetchDepth(m.symbol)
         const currentPrice = livePrices[m.symbol] ?? 0
         if (!currentPrice) { depthChecked.push(m); continue }

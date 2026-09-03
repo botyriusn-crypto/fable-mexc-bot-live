@@ -1,7 +1,8 @@
 import { db } from "./db"
 import { botLogs } from "./db/schema"
 import { eq, lt, sql } from "drizzle-orm"
-import { livePrices } from "./mexc/ws"
+// livePrices imported from globalThis - exchange-aware
+const livePrices: Record<string, number> = (globalThis as any).__livePrices ?? {}
 
 export async function evaluateAiPicks() {
   try {

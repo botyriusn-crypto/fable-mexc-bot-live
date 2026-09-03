@@ -1,9 +1,14 @@
 // Auto-pause ONDO grid when volatility breaks out of range-bound regime
-import { fetchKlines } from "./mexc/public"
+import { getExchangeClient } from "./exchange"
+import { db } from "./db"
+import { botConfig } from "./db/schema"
 
 export async function checkOndoRegime(): Promise<"range" | "trending" | "unknown"> {
   try {
-    const candles = await fetchKlines("ONDO_USDT", "Min15", 7)
+    const cfgRows = await db.select().from(botConfig).limit(1)
+    const cfg = cfgRows[0] ?? null
+    if (!cfg) return "unknown"
+    const candles = await getExchangeClient(cfg.exchange).fetchKlines("ONDO_USDT", "Min15", 200)
     if (candles.length < 100) return "unknown"
     
     // Calculate realized volatility (annualized)

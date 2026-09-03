@@ -2,7 +2,6 @@ import { db } from "./db"
 import { gridConfigs, botConfig } from "./db/schema"
 import { eq } from "drizzle-orm"
 import { getExchangeClient, type Exchange } from "./exchange"
-import { fetchKlines } from "./mexc/public"
 import type { Candle } from "./mexc/public"
 import { log } from "./grid"
 
@@ -134,7 +133,7 @@ export async function computePortfolioRebalance(timeframe = "Min15"): Promise<Re
   const candleResults = await Promise.all(
     enabled.map(async (gc) => {
       try {
-        const candles = await fetchKlines(gc.symbol, timeframe, 100)
+        const candles = await getExchangeClient(exchange).fetchKlines(gc.symbol, timeframe, 100)
         return { symbol: gc.symbol, candles, ok: true as const }
       } catch (err) {
         return { symbol: gc.symbol, candles: [] as Candle[], ok: false as const }
