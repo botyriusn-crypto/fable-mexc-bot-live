@@ -208,7 +208,7 @@ export async function getActiveOrders(symbol?: string, timeframe?: string): Prom
 
 
 
-const GRID_STOP_LOSS_PCT = 0.05 // 5% adverse move triggers stop-loss
+const GRID_STOP_LOSS_PCT = 0.08 // 8% adverse move triggers stop-loss (was 5%, too tight for normal volatility)
 
 // Safety margin against liquidation, mirroring lib/exits.ts's approach for
 // the trend engine: isolated-margin futures liquidate at roughly 1/leverage
@@ -534,6 +534,13 @@ if (effectiveDirection(gc) === "neutral") baseSpacing = Math.max(center * 0.006,
   // the position before our 5% GRID_STOP_LOSS_PCT can trigger.
   // MEXC liquidates at roughly 100% / leverage adverse move.
   const liqDistancePct = 1.0 / gc.leverage
+  // Universal safety: never allow leverage above 5x for grid (too much SL risk)
+  const MAX_GRID_LEVERAGE = 5
+  if (gc.leverage > MAX_GRID_LEVERAGE) {
+    await log("error", `Grid ${gc.symbol}: Refusing to build grid. Leverage ${gc.leverage}x exceeds max ${MAX_GRID_LEVERAGE}x. Lower leverage.`)
+    return
+  }
+
   if (liqDistancePct <= GRID_STOP_LOSS_PCT * 1.5) {
     await log("error", `Grid ${gc.symbol}: Refusing to build grid. Leverage ${gc.leverage}x is too high. Liquidation distance (${(liqDistancePct*100).toFixed(1)}%) is too close to stop-loss (${(GRID_STOP_LOSS_PCT*100).toFixed(1)}%). Reduce leverage to <= ${Math.floor(1.0 / (GRID_STOP_LOSS_PCT * 1.5))}x.`)
     await db.update(gridConfigs).set({ paused: true }).where(eq(gridConfigs.id, gc.id))
