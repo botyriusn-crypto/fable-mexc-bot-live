@@ -36,7 +36,10 @@ export const SNIPER_PARAMS = {
   // rejected outright rather than scored down, since the combined 3.5+
   // bucket (~199 signals, ~37% accuracy) is a net loser on its own, not
   // just a weaker version of the 2.5-3.5 edge.
-  sigmaZMax: 3.5,
+  // V2 (Sept 2026): raised from 3.5 -> 6.0. Historical data shows
+  // long sigma with |z| >= 3.5 has PF=1.906 on n=26. Previous cap at
+  // 3.5 blocked the profitable z-range at detection.
+  sigmaZMax: 6.0,
   fundingThreshold: 0.0005,
   minVolumeUsdt: 1_000_000,
   minPrice: 0.10,
@@ -527,17 +530,19 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     await recordSniperCandidate(symbol, timeframe, bucket, entryPrice, sig, entryTime, t.riseFallRate)
       console.log(`[Sniper] ${symbol}: candidate recorded in database, bucket=${bucket}`);
 
-    // ── Sniper V1 confidence gate (post-record) ───────────────────────────────
-    // Recorded above so every signal is visible in classifier_decisions for
-    // shadow analysis.  Gate actual execution here.
-    // stuck [0.64,0.75]: avg R×100=-77.77, PF≈0.5 — block
-    // low   (<0.64):     avg R×100=+34.10          — allow
-    // high  (>0.75):     avg R×100=+40.34          — allow
-    // combined non-stuck n=271, PF=1.364
-    if (sig.confidence >= 0.64 && sig.confidence <= 0.75) {
-      console.log(`[Sniper V1] ${symbol}: BLOCKED conf=${sig.confidence.toFixed(3)} stuck-zone [0.64,0.75] type=${sig.signalType ?? "?"} — recorded, not queued`)
-      continue
-    }
+    // ── V2 gate (Sept 2026) ─────────────────────────────────────────────────
+    // V1 kill-zone [0.64, 0.75] was validated against the OLD volSurge-scaling
+    // sweepConfidence formula and is deprecated. Under current formulas the
+    // V1 gate blocked the ONLY profitable long-side classes:
+    //   long sweep funded (0.72):    PF=4.399, n=9
+    //   long sweep unfunded (0.62):  PF=1.176, n=112
+    //   long sigma z>=3.5  (0.65):   PF=1.906, n=26
+    //
+    // Execution is now gated by:
+    //   - sniper_confidence_floor (0.60) applied in engine.ts
+    //   - engine.ts long-only filter (shorts data-confirmed unprofitable)
+    //   - sigmaExtreme=3.5 filters low-z sigma at detection
+    //   - SNIPER_SHORTS_ENABLED=false (redundant safety)
     fresh.push({ symbol, timeframe, direction: sig.direction, entry: entryPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence, rise24h: t.riseFallRate })
   }
 
