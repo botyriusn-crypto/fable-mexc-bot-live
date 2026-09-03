@@ -717,6 +717,28 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
   await reconcilePositions(cfg)
   console.log("TICK: bot running"); if (cfg.status !== "running") return { status: "skipped", detail: "Bot is stopped" }
 
+  // ── Equity kill switch (paper mode) ──────────────────────────────────────
+  // Runs before any grid / strategy logic so no new orders are placed once
+  // the threshold is breached.  When paper_balance has dropped ≥3% below
+  // paper_starting_balance the grid is disabled and the tick aborts.
+  // To resume: manually set grid_enabled=true in bot_config after reviewing.
+  if (cfg.mode === "paper") {
+    const _ksStart   = Number(cfg.paperStartingBalance ?? 10000)
+    const _ksCurrent = Number(cfg.paperBalance ?? _ksStart)
+    const _ksDD      = (_ksStart - _ksCurrent) / _ksStart
+    if (_ksDD >= 0.03) {
+      await log(
+        "error",
+        `🛑 EQUITY KILL SWITCH TRIGGERED — paper balance $${_ksCurrent.toFixed(2)} ` +
+        `is ${(_ksDD * 100).toFixed(2)}% below starting $${_ksStart.toFixed(2)}. ` +
+        `Grid disabled. Manual review required before re-enabling.`,
+      )
+      await db.update(botConfig).set({ gridEnabled: false }).where(eq(botConfig.id, cfg.id))
+      _tickInProgress = false
+      return { status: "halted", detail: `Equity kill switch: ${(_ksDD * 100).toFixed(2)}% drawdown` }
+    }
+  }
+
   try {
     const [openPositions, activeGrid] = await Promise.all([
       getOpenPositions(),
