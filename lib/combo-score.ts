@@ -95,19 +95,34 @@ export function comboDna(candles: Candle[], spacingPct = 0.6, lastAdx?: number):
 function suggestLeverage(dna: ComboDna, volumeUsdt: number): number {
   if (dna.rejected) return 1
 
-  // Liquidity ceiling: 24h volume as a market-cap proxy. Large caps can
-  // absorb higher leverage without slippage; micro caps cannot.
-  let lev: number
-  if (volumeUsdt >= 50_000_000) lev = 10
-  else if (volumeUsdt >= 10_000_000) lev = 5
-  else if (volumeUsdt >= 2_000_000) lev = 3
-  else lev = 1
-
-  // Volatility cap: high ATR% → pull down regardless of size.
+  // Liquidity + volatility-aware leverage (backtest-optimized 2026-09-03):
+  // Tight SL (2-3%) + wide ATR spacing (3-4x) works best. Higher leverage
+  // is safe only for LOW volatility large caps.
   const atrPct = dna.atrPct
-  if (atrPct >= 4.0) lev = Math.min(lev, 1)
-  else if (atrPct >= 2.5) lev = Math.min(lev, 3)
-  else if (atrPct >= 1.5) lev = Math.min(lev, 5)
+  let lev: number
+
+  if (volumeUsdt >= 50_000_000) {
+    // Large caps - can handle higher leverage
+    if (atrPct < 0.3) lev = 20
+    else if (atrPct < 0.5) lev = 15
+    else if (atrPct < 1.0) lev = 10
+    else if (atrPct < 1.5) lev = 5
+    else lev = 3
+  } else if (volumeUsdt >= 10_000_000) {
+    // Mid caps
+    if (atrPct < 0.5) lev = 10
+    else if (atrPct < 1.0) lev = 5
+    else if (atrPct < 1.5) lev = 3
+    else lev = 2
+  } else if (volumeUsdt >= 2_000_000) {
+    // Small caps
+    if (atrPct < 0.8) lev = 5
+    else if (atrPct < 1.5) lev = 3
+    else lev = 2
+  } else {
+    // Micro caps - minimal
+    lev = atrPct < 1.0 ? 3 : 1
+  }
 
   // Drift cap: already moved a lot → pull down regardless of size.
   const absDrift = Math.abs(dna.driftPct)
@@ -121,7 +136,7 @@ export function comboParams(dna: ComboDna, price: number, volumeUsdt: number) {
   const suggestedLeverage = suggestLeverage(dna, volumeUsdt)
   return {
     suggestedLeverage,
-    spacingPct: Math.min(Math.max(dna.atrPct / 2, 0.4), 1.2),
+    spacingPct: Math.min(Math.max(dna.atrPct * 1.5, 1.0), 3.0),
     levels: Math.min(20, Math.max(6, Math.round(dna.rangePct / Math.min(Math.max(dna.atrPct / 2, 0.4), 1.2)))),
     atrMult: 0.5,
   }

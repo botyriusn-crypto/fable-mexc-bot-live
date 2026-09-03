@@ -208,7 +208,7 @@ export async function getActiveOrders(symbol?: string, timeframe?: string): Prom
 
 
 
-const GRID_STOP_LOSS_PCT = 0.08 // 8% adverse move triggers stop-loss (was 5%, too tight for normal volatility)
+const GRID_STOP_LOSS_PCT = 0.03 // 3% adverse move (backtest-optimized: tight SL + wide spacing works best)
 
 // Safety margin against liquidation, mirroring lib/exits.ts's approach for
 // the trend engine: isolated-margin futures liquidate at roughly 1/leverage
