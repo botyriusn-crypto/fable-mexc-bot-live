@@ -5,7 +5,7 @@ import { db } from "./db"
 import { classifierDecisions, gridConfigs } from "./db/schema"
 import { loadModelById, predict, trainShadowOnDecision, MODEL_IDS } from "./ml"
 import { heuristicScore } from "./advisor"
-import { fetchTicker, fetchKlines } from "./mexc/public"
+import { getExchangeClient } from "./exchange"
 import { ema, rsi, macdHistogram, atr, rateOfChange, adx, volumeSurge } from "./indicators"
 import type { FeatureVector } from "./indicators"
 
@@ -127,7 +127,7 @@ export async function runShadowCycle(): Promise<void> {
     const tfSec = tfSeconds(d.timeframe)
     const curBucket = Math.floor(Date.now() / 1000 / tfSec)
     if (curBucket - d.candleTime < RESOLVE_AFTER_BUCKETS) continue
-    const ticker: any = await fetchTicker(d.symbol).catch(() => null)
+    const ticker: any = await getExchangeClient(cfg.exchange).fetchTicker(d.symbol).catch(() => null)
     const price = ticker?.lastPrice ?? ticker?.price
     if (!price) continue
     const ret = ((price - d.entryPrice) / d.entryPrice) * 100

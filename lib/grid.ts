@@ -7,7 +7,6 @@ import type { Regime } from "./strategy"
 import { loadModelFor, trainOnTrade, MODEL_IDS } from "./ml"
 import { getExchangeClient, getFeeRates, type ExchangeClient, type Exchange } from "./exchange"
 import type { Candle } from "./mexc/public"
-import { fetchTicker } from "./mexc/public"
 import { getMexcSpecAsync } from "./mexc/precision"
 import { livePrices } from "./mexc/ws"
 import { isTradingHalted, marginBudgetRemaining, getRiskState } from "./risk-manager"
@@ -1204,7 +1203,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
     if (restingBuys.length > 0) {
       let livePrice: number | null = null
       try {
-        livePrice = (await fetchTicker(gc.symbol)).lastPrice
+        livePrice = (await getExchangeClient(cfg.exchange).fetchTicker(gc.symbol)).lastPrice
       } catch {}
       if (livePrice != null) {
         const minDrift = Math.min(...restingBuys.map((o) => Math.abs(livePrice! - o.price) / livePrice!))
@@ -1379,7 +1378,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
   if (heldSells.length > 0) {
     let currentPrice: number | null = null
     try {
-      currentPrice = (await fetchTicker(gc.symbol)).lastPrice
+      currentPrice = (await getExchangeClient(cfg.exchange).fetchTicker(gc.symbol)).lastPrice
     } catch {}
     if (currentPrice != null) {
       for (const o of heldSells) {
