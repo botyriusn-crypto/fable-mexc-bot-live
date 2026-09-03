@@ -516,6 +516,20 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
       continue;
     }
 
+    // ── Sniper V1 confidence gate ─────────────────────────────────────────────
+    // 678-decision backtest (r_multiple unit) shows three zones:
+    //   stuck [0.64,0.75] → n=407, avg R×100 = -77.77  ← all losses, block
+    //   low   (<0.64)     → n=119, avg R×100 = +34.10  ← positive edge, allow
+    //   high  (>0.75)     → n=152, avg R×100 = +40.34  ← positive edge, allow
+    //   non-stuck total   → n=271, PF = 1.364  (unfiltered PF ≈ 0.68)
+    // The stuck zone is where the signal engine has no real conviction:
+    // sweep + funding boost lands at 0.68–0.72, mid-sigma lands here too.
+    // Block it; only proceed when confidence has escaped in either direction.
+    if (sig.confidence >= 0.64 && sig.confidence <= 0.75) {
+      console.log(`[Sniper V1] ${symbol}: BLOCKED conf=${sig.confidence.toFixed(3)} stuck-zone [0.64,0.75] type=${sig.signalType ?? "?"}`)
+      continue
+    }
+
     if (sig.reason.includes("funding")) {
       try {
         await db.insert(botLogs).values({ level: "info", message: `Sniper: funding edge on ${symbol} (rate ${(sig.fundingRate * 100).toFixed(4)}%, ${sig.direction === "long" ? "crowded shorts" : "crowded longs"})` })
