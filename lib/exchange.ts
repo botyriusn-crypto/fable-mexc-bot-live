@@ -178,6 +178,7 @@ export interface ExchangeClient {
   // Public (market data) API
   fetchKlines(symbol: string, interval: string, limit?: number): Promise<Candle[]>
   fetchTicker(symbol: string): Promise<Ticker>
+  fetchAllTickers?(): Promise<Ticker[]>
 
   // Private (trading) API
   placeMarketOrder(opts: {
@@ -217,6 +218,7 @@ export function getExchangeClient(exchange: Exchange): ExchangeClient {
       return {
         fetchKlines: BybitPublic.fetchKlines,
         fetchTicker: BybitPublic.fetchTicker,
+        fetchAllTickers: BybitPublic.fetchAllTickers,
         placeMarketOrder: BybitPrivate.placeMarketOrder,
         placePostOnlyOrder: BybitPrivate.placePostOnlyOrder,
         fetchOrderStatus: async (id) => mapBybitOrderStatus(await BybitPrivate.fetchOrderStatus(id)),

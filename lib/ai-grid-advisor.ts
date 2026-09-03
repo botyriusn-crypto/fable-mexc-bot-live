@@ -6,6 +6,8 @@ import { livePrices } from "./mexc/ws"
 import { fetchDepth, depthNotionalNearMid } from "./mexc/public"
 import type { Candle } from "./mexc/public"
 import { computeSafeGridSettings } from "./grid-sizing"
+import { getExchangeClient, type ExchangeClient, type Ticker } from "./exchange"
+import { getConfig } from "./engine"
 import { eq } from "drizzle-orm"
 
 // Known leveraged-ETF / tokenized-stock tickers on MEXC. These often can't
@@ -90,19 +92,35 @@ export interface GridAiResult {
 
 export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult> {
   try {
-    const tickerRes = await fetch("https://contract.mexc.com/api/v1/contract/ticker", { cache: "no-store" })
-    const tickerJson = await tickerRes.json() as any
-    if (!tickerJson.success) throw new Error("Failed to fetch MEXC tickers")
+    const cfg = await getConfig()
+    const exchange = getExchangeClient(cfg.exchange)
+    
+    // Exchange-aware ticker scanning
+    let allTickers: Ticker[] = []
+    if (exchange.fetchAllTickers) {
+      allTickers = await exchange.fetchAllTickers()
+    } else {
+      // Fallback: MEXC hardcoded API (legacy)
+      const tickerRes = await fetch("https://contract.mexc.com/api/v1/contract/ticker", { cache: "no-store" })
+      const tickerJson = await tickerRes.json() as any
+      if (!tickerJson.success) throw new Error("Failed to fetch MEXC tickers")
+      allTickers = (tickerJson.data as any[]).map((t: any) => ({
+        symbol: t.symbol,
+        lastPrice: Number(t.lastPrice ?? 0),
+        fundingRate: 0,
+        volume24: Number(t.amount24 ?? 0),
+      }))
+    }
 
     const MIN_VOLUME_24H = 15_000_000
-    const candidates = (tickerJson.data as any[])
+    const candidates = allTickers
       .filter(t =>
         t.symbol.endsWith("_USDT") &&
         !t.symbol.includes("STOCK") && !t.symbol.includes("3L") && !t.symbol.includes("3S") &&
         !LEVERAGED_ETF_DENYLIST.has(t.symbol)
       )
-      .filter(t => t.amount24 > MIN_VOLUME_24H)
-      .sort((a, b) => b.amount24 - a.amount24)
+      .filter(t => t.volume24 > MIN_VOLUME_24H)
+      .sort((a, b) => b.volume24 - a.volume24)
       .slice(0, 100)
 
     try {
@@ -130,17 +148,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         // the last 48h (cool-off blacklist to avoid re-picking repeat losers).
         if (isRecentLoser(t.symbol)) { gateStats.recentLoser++; continue }
 
-        const end = Math.floor(Date.now() / 1000)
-        const start = end - (3 * 24 * 3600)
-        const klineRes = await fetch(`https://contract.mexc.com/api/v1/contract/kline/${t.symbol}?interval=Min15&start=${start}&end=${end}`, { cache: "no-store" })
-        const klineJson = await klineRes.json() as any
-        if (!klineJson.success || !klineJson.data?.time?.length) { gateStats.klineFail++; continue }
-
-        const { time, open, high, low, close, vol } = klineJson.data
-        const candles: Candle[] = []
-        for (let i = 0; i < time.length; i++) {
-          candles.push({ time: time[i], open: open[i], high: high[i], low: low[i], close: close[i], volume: vol[i] ?? 0 })
-        }
+        const candles = await exchange.fetchKlines(t.symbol, "Min15", 200)
         if (candles.length < 50) { gateStats.tooFewCandles++; continue }
 
         const closes = candles.map(c => c.close)
