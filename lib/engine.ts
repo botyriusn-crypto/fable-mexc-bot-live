@@ -1,4 +1,5 @@
 let _lastRiskHaltState: string | null = null
+let _tickInProgress = false
 // Tick orchestration: data → features → ML-gated signal → exit management →
 // paper/live execution → model update → persistence.
 
@@ -707,6 +708,11 @@ async function runFundingCarry(cfg: BotConfig): Promise<void> {
 
 // Ticker cache to avoid rate limits
 export async function runTick(): Promise<{ status: string; detail?: string }> {
+  if (_tickInProgress) {
+    console.log("TICK SKIPPED: tick already in progress")
+    return { status: "skipped", detail: "Tick already in progress" }
+  }
+  _tickInProgress = true
   const cfg = await getConfig()
   await reconcilePositions(cfg)
   console.log("TICK: bot running"); if (cfg.status !== "running") return { status: "skipped", detail: "Bot is stopped" }
@@ -1358,6 +1364,8 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     const message = err instanceof Error ? err.message : String(err)
     await log("error", `Tick failed: ${message}`)
     return { status: "error", detail: message }
+  } finally {
+    _tickInProgress = false
   }
 }
 
