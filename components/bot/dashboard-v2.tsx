@@ -169,7 +169,9 @@ export function DashboardV2() {
   const exchangeName = state.config.exchange || "mexc"
   const exchangeLabel = { mexc: "MEXC", gate: "Gate.io", bybit: "Bybit" }[exchangeName || "mexc"] || (exchangeName || "mexc").toUpperCase()
   const live = isLive && state.liveAccount && !("error" in state.liveAccount) ? state.liveAccount : null
-  const balance = live ? live.availableBalance : state.config.paperBalance
+  // Available = equity minus deployed margin (grid budgets + open positions)
+  const usedMargin = state.risk?.usedMargin ?? 0
+  const balance = live ? live.availableBalance : Math.max(0, state.equity - usedMargin)
   const equity = live ? live.equity : state.equity
   const modeStats = (state as any).modeStats ?? (state as any).liveStats
   const todayStats = (state as any).todayStats
