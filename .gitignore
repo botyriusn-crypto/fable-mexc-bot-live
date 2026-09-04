@@ -46,3 +46,7 @@ logs/
 # local scratch / stray copies
 fable-mexc-bot-live/
 patch-*.mjs
+*.bak
+*.bak-*
+*.bak
+*.bak-*

@@ -89,3 +89,57 @@ export async function getFundingHistory(symbol: string, limit = 20): Promise<num
   const list = json.result?.list || []
   return list.map((e: any) => Number(e.fundingRate)).reverse()
 }
+
+// Fetch all USDT perpetual tickers from Bybit (for AI grid advisor scanning).
+// Returns symbols in canonical format (BTC_USDT, not BTCUSDT).
+export async function fetchAllTickers(): Promise<any[]> {
+  const url = `${BASE_URL}/market/tickers?category=linear`
+  const res = await fetch(url, { cache: "no-store", headers: HEADERS })
+  if (!res.ok) throw new Error(`Bybit tickers fetch failed: ${res.status}`)
+  const json = await res.json() as any
+  if (json.retCode !== 0 || !json.result?.list) throw new Error(`Bybit tickers error: ${json.retMsg}`)
+  
+  const list = json.result.list as any[]
+  const result: any[] = []
+  for (const t of list) {
+    if (typeof t.symbol !== "string" || !t.symbol.endsWith("USDT")) continue
+    const sym = t.symbol as string
+    const base = sym.slice(0, -4)
+    const quote = sym.slice(-4)
+    result.push({
+      symbol: `${base}_${quote}`,
+      lastPrice: Number(t.lastPrice ?? 0),
+      fundingRate: Number(t.fundingRate ?? 0),
+      volume24: Number(t.turnover24h ?? 0),
+    })
+  }
+  return result
+}
+
+// Fetch all USDT perpetual tickers from Bybit (for AI grid advisor scanning).
+// Returns symbols in canonical format (BTC_USDT, not BTCUSDT).
+
+
+// Fetch all USDT perpetual markets from Bybit (for UI market selector)
+export async function fetchMarkets(): Promise<any[]> {
+  const url = `${BASE_URL}/market/instruments-info?category=linear&limit=1000`
+  const res = await fetch(url, { cache: "no-store", headers: HEADERS })
+  if (!res.ok) throw new Error(`Bybit markets fetch failed: ${res.status}`)
+  const json = await res.json() as any
+  if (json.retCode !== 0 || !json.result?.list) throw new Error(`Bybit markets error: ${json.retMsg}`)
+  
+  const list = json.result.list as any[]
+  const result: any[] = []
+  for (const m of list) {
+    if (typeof m.symbol !== "string" || !m.symbol.endsWith("USDT")) continue
+    const sym = m.symbol as string
+    const base = sym.slice(0, -4)
+    const quote = sym.slice(-4)
+    result.push({
+      symbol: `${base}_${quote}`,
+      priceScale: Number(m.priceScale ?? 2),
+      maxLeverage: Number(m.leverageFilter?.maxLeverage ?? 20),
+    })
+  }
+  return result
+}

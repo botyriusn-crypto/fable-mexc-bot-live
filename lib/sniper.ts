@@ -3,7 +3,8 @@ import type { IndicatorSnapshot } from "./indicators"
 import { db } from "./db"
 import { classifierDecisions, botConfig, botLogs } from "./db/schema"
 import { and, eq, isNull, sql } from "drizzle-orm"
-import { fetchTicker, fetchAllTickers, fetchKlines, type BulkTicker } from "./mexc/public"
+import type { BulkTicker } from "./mexc/public"
+import { getExchangeClient } from "./exchange"
 import { recordOutcome, type SniperFeatures } from "./advisor"
 
 // Tunable rule parameters (Option A: exposed for display + advisor tuning).
@@ -35,7 +36,10 @@ export const SNIPER_PARAMS = {
   // rejected outright rather than scored down, since the combined 3.5+
   // bucket (~199 signals, ~37% accuracy) is a net loser on its own, not
   // just a weaker version of the 2.5-3.5 edge.
-  sigmaZMax: 3.5,
+  // V2 (Sept 2026): raised from 3.5 -> 6.0. Historical data shows
+  // long sigma with |z| >= 3.5 has PF=1.906 on n=26. Previous cap at
+  // 3.5 blocked the profitable z-range at detection.
+  sigmaZMax: 6.0,
   fundingThreshold: 0.0005,
   minVolumeUsdt: 1_000_000,
   minPrice: 0.10,
@@ -207,7 +211,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   return { direction, reason, confidence: Math.min(confidence, 0.95), stopLoss, takeProfit, signalType, volSurge, z, fundingRate }
 }
 
-export async function recordSniperCandidate(symbol: string, timeframe: string, candleTime: number, entry: number, sig: SniperSignal, entryTime: number) {
+export async function recordSniperCandidate(symbol: string, timeframe: string, candleTime: number, entry: number, sig: SniperSignal, entryTime: number, rise24h?: number) {
   if (!sig.direction) return
   try {
     await db.insert(classifierDecisions).values({
@@ -224,7 +228,7 @@ export async function recordSniperCandidate(symbol: string, timeframe: string, c
       lorentzianConfidence: sig.confidence,
       lorentzianAllowed: true,
       // Store signal characteristics so the advisor can grade counterfactually.
-      lorentzianFilters: { signalType: sig.signalType, volSurge: sig.volSurge, z: sig.z, fundingRate: sig.fundingRate, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, entryTime },
+      lorentzianFilters: { signalType: sig.signalType, volSurge: sig.volSurge, z: sig.z, fundingRate: sig.fundingRate, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, entryTime, rise24h: rise24h ?? null },
       finalAllowed: true,
       reason: sig.reason,
     }).onConflictDoNothing()
@@ -242,6 +246,9 @@ function tfSeconds(tf: string): number {
 // the only resolution that tells the truth about a 4:1 reward:risk trade.
 // Returns the number of decisions resolved this pass.
 export async function resolveSniperDecisions(): Promise<number> {
+  const cfgRows = await db.select().from(botConfig).limit(1)
+  const cfg = cfgRows[0] ?? null
+  if (!cfg) return 0
   const unresolved = await db.select().from(classifierDecisions).where(
     and(eq(classifierDecisions.strategy, "sniper"), isNull(classifierDecisions.resolvedAt))
   )
@@ -259,7 +266,7 @@ export async function resolveSniperDecisions(): Promise<number> {
     // Legacy rows (recorded before stop/take were stored) fall back to the old
     // ticker check so they still resolve rather than hanging forever.
     if (stopLoss == null || takeProfit == null) {
-      const ticker: any = await fetchTicker(d.symbol).catch(() => null)
+      const ticker: any = await getExchangeClient(cfg.exchange).fetchTicker(d.symbol).catch(() => null)
       const price = ticker?.lastPrice ?? ticker?.price
       if (!price) continue
       const ret = ((price - d.entryPrice) / d.entryPrice) * 100
@@ -279,7 +286,7 @@ export async function resolveSniperDecisions(): Promise<number> {
     }
 
     // Walk forward from the entry candle to determine which level hit first.
-    const candles = await fetchKlines(d.symbol, d.timeframe, 200).catch(() => null)
+    const candles = await getExchangeClient(cfg.exchange).fetchKlines(d.symbol, d.timeframe, 200).catch(() => null)
     if (!candles || candles.length < 2) continue
     const sorted = [...candles].sort((a, b) => a.time - b.time)
     const entryIdx = filters?.entryTime != null
@@ -408,6 +415,7 @@ export interface SniperCandidate {
   stopLoss: number
   takeProfit: number
   confidence: number
+  rise24h?: number
 }
 
 export async function runSniperCycle(): Promise<SniperCandidate[]> {
@@ -435,7 +443,13 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
 
   let tickers: BulkTicker[]
   try {
-    tickers = await fetchAllTickers()
+    const exchange = getExchangeClient(cfg.exchange)
+    if (exchange.fetchAllTickers) {
+      tickers = await exchange.fetchAllTickers()
+    } else {
+      const { fetchAllTickers: mexFetchAllTickers } = await import("./mexc/public")
+      tickers = await mexFetchAllTickers()
+    }
   } catch (err) {
     console.error("[Sniper] bulk ticker fetch failed:", err)
     return []
@@ -476,12 +490,18 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     )
     if (dup.length > 0) continue
 
-    const candles = await fetchKlines(symbol, timeframe, 200).catch(() => null)
+    const candles = await getExchangeClient(cfg.exchange).fetchKlines(symbol, timeframe, 200).catch(() => null)
     if (!candles || candles.length < 60) continue
 
     // Build minimal snapshot with inline ATR (detectSniper only needs snap.atr
     // for the short-side ATR stop buffer). Avoids needing a full BotConfig here.
-    const _cl = candles as Candle[]
+    // Only evaluate CLOSED candles. fetchKlines returns the still-forming
+    // candle last; a "reclaim" / "bullish close" seen mid-candle can un-happen
+    // before the close (repainting) — the "enters, then goes against fast" bug.
+    const _nowSec = Math.floor(Date.now() / 1000)
+    const _closed = (candles as Candle[]).filter((c: Candle) => c.time + tfSec <= _nowSec)
+    if (_closed.length < 60) continue
+    const _cl = _closed as Candle[]
     let _trSum = 0
     for (let _i = _cl.length - 14; _i < _cl.length; _i++) {
       _trSum += Math.max(
@@ -507,9 +527,23 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
 
     const entryPrice = _cl[_cl.length - 1].close
     const entryTime = _cl[_cl.length - 1].time
-    await recordSniperCandidate(symbol, timeframe, bucket, entryPrice, sig, entryTime)
+    await recordSniperCandidate(symbol, timeframe, bucket, entryPrice, sig, entryTime, t.riseFallRate)
       console.log(`[Sniper] ${symbol}: candidate recorded in database, bucket=${bucket}`);
-    fresh.push({ symbol, timeframe, direction: sig.direction, entry: entryPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence })
+
+    // ── V2 gate (Sept 2026) ─────────────────────────────────────────────────
+    // V1 kill-zone [0.64, 0.75] was validated against the OLD volSurge-scaling
+    // sweepConfidence formula and is deprecated. Under current formulas the
+    // V1 gate blocked the ONLY profitable long-side classes:
+    //   long sweep funded (0.72):    PF=4.399, n=9
+    //   long sweep unfunded (0.62):  PF=1.176, n=112
+    //   long sigma z>=3.5  (0.65):   PF=1.906, n=26
+    //
+    // Execution is now gated by:
+    //   - sniper_confidence_floor (0.60) applied in engine.ts
+    //   - engine.ts long-only filter (shorts data-confirmed unprofitable)
+    //   - sigmaExtreme=3.5 filters low-z sigma at detection
+    //   - SNIPER_SHORTS_ENABLED=false (redundant safety)
+    fresh.push({ symbol, timeframe, direction: sig.direction, entry: entryPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence, rise24h: t.riseFallRate })
   }
 
   await resolveSniperDecisions()

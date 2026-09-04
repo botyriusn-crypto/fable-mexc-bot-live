@@ -1,4 +1,5 @@
 let _lastRiskHaltState: string | null = null
+let _tickInProgress = false
 // Tick orchestration: data → features → ML-gated signal → exit management →
 // paper/live execution → model update → persistence.
 
@@ -39,6 +40,7 @@ import {
 } from "./risk-manager"
 import { evaluateScalpSignal } from "./trend-scalper"
 import { checkExposureGate } from "./exposure"
+import { sniperEntryGuard, withSniperLock, SNIPER_GUARDS } from "./sniper-guards"
 import { evaluateAdvancedEntry, type AdvancedConfig, cvdRollingStats } from "./advanced-strategy"
 import { detectFundingCarry, trailingMeanFunding, computeFundingStops, type FundingCarryConfig } from "./funding-carry"
 import { getFundingRate, getFundingHistory } from "./bybit/public"
@@ -706,9 +708,36 @@ async function runFundingCarry(cfg: BotConfig): Promise<void> {
 
 // Ticker cache to avoid rate limits
 export async function runTick(): Promise<{ status: string; detail?: string }> {
+  if (_tickInProgress) {
+    console.log("TICK SKIPPED: tick already in progress")
+    return { status: "skipped", detail: "Tick already in progress" }
+  }
+  _tickInProgress = true
   const cfg = await getConfig()
   await reconcilePositions(cfg)
   console.log("TICK: bot running"); if (cfg.status !== "running") return { status: "skipped", detail: "Bot is stopped" }
+
+  // ── Equity kill switch (paper mode) ──────────────────────────────────────
+  // Runs before any grid / strategy logic so no new orders are placed once
+  // the threshold is breached.  When paper_balance has dropped ≥3% below
+  // paper_starting_balance the grid is disabled and the tick aborts.
+  // To resume: manually set grid_enabled=true in bot_config after reviewing.
+  if (cfg.mode === "paper") {
+    const _ksStart   = Number(cfg.paperStartingBalance ?? 10000)
+    const _ksCurrent = Number(cfg.paperBalance ?? _ksStart)
+    const _ksDD      = (_ksStart - _ksCurrent) / _ksStart
+    if (_ksDD >= 0.03) {
+      await log(
+        "error",
+        `🛑 EQUITY KILL SWITCH TRIGGERED — paper balance $${_ksCurrent.toFixed(2)} ` +
+        `is ${(_ksDD * 100).toFixed(2)}% below starting $${_ksStart.toFixed(2)}. ` +
+        `Grid disabled. Manual review required before re-enabling.`,
+      )
+      await db.update(botConfig).set({ gridEnabled: false }).where(eq(botConfig.id, cfg.id))
+      _tickInProgress = false
+      return { status: "halted", detail: `Equity kill switch: ${(_ksDD * 100).toFixed(2)}% drawdown` }
+    }
+  }
 
   try {
     const [openPositions, activeGrid] = await Promise.all([
@@ -938,7 +967,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
               let cvd: number | undefined
               let cvdMean: number | undefined
               let cvdStd: number | undefined
-              if (advCfg.smartMoneyEnabled) {
+              if (advCfg.smartMoneyEnabled && cfg.exchange !== "bybit") {
                 try {
                   const deals = await fetchDeals(toExchangeSymbol(symbol))
                   const flow = computeTakerFlow(deals)
@@ -1155,12 +1184,35 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
             const candles = await exchange.fetchKlines(toExchangeSymbol(c.symbol), c.timeframe, 200)
             if (candles.length < 60) continue
             const snap = computeSnapshot(candles, marketCfg)
-            snap.price = c.entry
+            // ── Live re-price ──
+            // c.entry is the CLOSE of the signal candle at scan time; a market order
+            // fills at the current price. Refuse if price already ran away (we'd be
+            // buying the top of the reclaim) or already fell through the stop.
+            const liveTicker = await fetchTickerWithRetry(exchange, c.symbol, tickerCache).catch(() => null)
+            const livePrice = Number(liveTicker?.lastPrice) || c.entry
+            const slip = (livePrice - c.entry) / c.entry
+            if (slip > SNIPER_GUARDS.maxEntrySlip()) {
+              await log("info", `Sniper: skipped ${c.symbol} — price ran ${(slip * 100).toFixed(2)}% above signal close`)
+              continue
+            }
+            if (livePrice <= c.stopLoss) {
+              await log("info", `Sniper: skipped ${c.symbol} — live ${livePrice} already at/below stop ${c.stopLoss}`)
+              continue
+            }
+            snap.price = livePrice
             const features: FeatureVector = { ...snap.features, sideLong: c.direction === "long" ? 1 : -1 }
-            const used = await openPosition(marketCfg, c.direction, snap, c.confidence, features, "sniper", {
-              stopLoss: c.stopLoss,
-              takeProfit: c.takeProfit,
-              sizeUsdtOverride: remainingBudget > 0 ? remainingBudget : (cfg.sniperPositionSizeUsdt ?? cfg.positionSizeUsdt),
+            // ── Guards + per-symbol cross-process lock ──
+            const used = await withSniperLock(c.symbol, async () => {
+              const guard = await sniperEntryGuard(c.symbol, c.rise24h, cfg.sniperTargetRiskUsdt ?? 0)
+              if (!guard.allowed) {
+                await log("info", `Sniper: blocked ${c.symbol} (${guard.reason})`)
+                return 0
+              }
+              return openPosition(marketCfg, c.direction, snap, c.confidence, features, "sniper", {
+                stopLoss: c.stopLoss,
+                takeProfit: c.takeProfit,
+                sizeUsdtOverride: cfg.sniperPositionSizeUsdt ?? cfg.positionSizeUsdt,
+              })
             })
             remainingBudget -= Math.min(used, remainingBudget)
           } catch (err) {
@@ -1334,6 +1386,8 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     const message = err instanceof Error ? err.message : String(err)
     await log("error", `Tick failed: ${message}`)
     return { status: "error", detail: message }
+  } finally {
+    _tickInProgress = false
   }
 }
 
@@ -1344,17 +1398,18 @@ export async function initRealtimeEngine(symbol: string, timeframe: string) {
   // If a WS already exists for this symbol, don't create a duplicate
   if ((globalThis as any).__wsManagers[symbol]) return
   
-  console.log(`[Engine] Initializing real-time WebSocket engine for ${symbol}...`)
-  const manager = new MexcWebSocketManager(symbol, timeframe, async (kline) => {
-    if (kline.isClosed) {
-      console.log(`[WS] ${symbol} candle closed. Triggering instant tick...`)
-      try {
-        await runTick()
-      } catch (err) {
-        console.error(`[WS] Error during ${symbol} WS-triggered tick:`, err)
+  console.log(`[Engine] Using REST polling for ${symbol} (no MEXC websocket)`)
+  // REST polling fallback - fetch price every 15 seconds
+  const pollInterval = setInterval(async () => {
+    try {
+      const exchange = getExchangeClient(cfg.exchange)
+      const ticker = await exchange.fetchTicker(symbol)
+      if (ticker?.lastPrice) {
+        livePrices[symbol] = ticker.lastPrice
       }
-    }
-  })
+    } catch (err) { /* best-effort */ }
+  }, 15000)
+  const manager = { disconnect: () => clearInterval(pollInterval) }
   
   // Connect the WebSocket
   await manager.connect()

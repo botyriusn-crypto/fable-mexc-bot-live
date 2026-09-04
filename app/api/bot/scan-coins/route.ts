@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
 import { ema, atr, adx, rsi } from "@/lib/indicators"
 import type { Candle } from "@/lib/mexc/public"
+import { getConfig } from "@/lib/engine"
+import { getExchangeClient } from "@/lib/exchange"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
@@ -92,7 +94,17 @@ function detectPumpDump(candles: Candle[]): { isToxic: boolean; reason: string }
 export async function GET() {
   try {
     // 1. Fetch all MEXC contract tickers
-    const tickerRes = await fetch("https://contract.mexc.com/api/v1/contract/ticker")
+    const cfg = await getConfig()
+    const exchange = getExchangeClient(cfg.exchange)
+    let tickerData: any[] = []
+    if (exchange.fetchAllTickers) {
+      const allTickers = await exchange.fetchAllTickers()
+      tickerData = allTickers
+    } else {
+      const tickerRes = await fetch("https://contract.mexc.com/api/v1/contract/ticker")
+      const tickerJson = await tickerRes.json() as any
+      tickerData = (tickerJson.data as any[])
+    }
     const tickerJson = await tickerRes.json() as any
     
     if (!tickerJson.success) throw new Error("Failed to fetch MEXC tickers")
