@@ -515,7 +515,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     console.log(`[Sniper] Running detectSniper on ${symbol}... (atr=${snap.atr})`);
     const sig = detectSniper(_cl, snap, t.fundingRate, { sigmaExtreme, sigmaZMax, volumeSurgeMult, minStopPct, tpSlRatio, longStopBufferAtr: true })
     if (!sig.direction) {
-      console.log(`[Sniper] ${symbol}: no signal (confidence too low or no valid setup)`);
+      console.log(`[Sniper] ${symbol}: no signal — vol=${volNow.toFixed(1)} vs ${(volAvg*volumeSurgeMult).toFixed(1)} | sweepUp=${sweepUp}(trendUp=${trendUp}) | sweepDown=${sweepDown}(trendDown=${trendDown}) | exhaustedDown=${exhaustedDown}(trendUp=${trendUp},neutral=${trendNeutral}) | exhaustedUp=${exhaustedUp}(trendDown=${trendDown},neutral=${trendNeutral}) | funding=${fundingRate.toFixed(5)}`)
       continue;
     }
 
