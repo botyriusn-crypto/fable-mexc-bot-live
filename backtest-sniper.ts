@@ -19,7 +19,7 @@
 import { detectSniper, type SniperOverrides } from "./lib/sniper"
 import type { Candle } from "./lib/mexc/public"
 
-interface CliArgs { symbols: string[]; timeframe: string; days: number; compare: boolean; sigmaZMax?: number }
+interface CliArgs { symbols: string[]; timeframe: string; days: number; compare: boolean; sigmaZMax?: number; sigmaExtreme?: number; minStopPct?: number; volumeSurgeMult?: number }
 
 function parseArgs(argv: string[]): CliArgs {
   const a: CliArgs = { symbols: ["BTC_USDT"], timeframe: "Min5", days: 60, compare: false }
@@ -31,6 +31,9 @@ function parseArgs(argv: string[]): CliArgs {
     else if (v === "--days") a.days = parseInt(argv[++i], 10)
     else if (v === "--compare") a.compare = true
     else if (v === "--sigma-z-max") a.sigmaZMax = parseFloat(argv[++i])
+    else if (v === "--sigma-extreme") a.sigmaExtreme = parseFloat(argv[++i])
+    else if (v === "--min-stop") a.minStopPct = parseFloat(argv[++i])
+    else if (v === "--vol-mult") a.volumeSurgeMult = parseFloat(argv[++i])
   }
   return a
 }
@@ -187,15 +190,20 @@ async function main() {
   // affects which trades this harness generates. Confidence-formula changes
   // (sweep flattening, sigma confidence curve) do NOT affect trade selection
   // here (see file header), so they intentionally aren't a variant below.
+  const v3Overrides: SniperOverrides = {
+    sigmaExtreme: args.sigmaExtreme ?? 2.0,
+    minStopPct: args.minStopPct ?? 0.008,
+    volumeSurgeMult: args.volumeSurgeMult ?? 1.2,
+  }
   const variants: Array<[string, SniperOverrides, "all" | "long" | "short"]> = args.compare
     ? [
-        ["OLD (pre-fix, sigma uncapped)", { sigmaZMax: 100 }, "all"],
-        ["NEW (sigmaZMax=3.5, current default)", {}, "all"],
-        ["NEW, long-only", {}, "long"],
-        ["NEW, short-only (reference only — shorts disabled live)", {}, "short"],
+        ["V2 (conservative)", { sigmaExtreme: 2.5, minStopPct: 0.015, volumeSurgeMult: 1.5, sigmaZMax: 3.5 }, "all"],
+        ["V3 (unlocked)", { sigmaExtreme: 2.0, minStopPct: 0.008, volumeSurgeMult: 1.2, sigmaZMax: 6.0 }, "all"],
+        ["V3, long-only", { sigmaExtreme: 2.0, minStopPct: 0.008, volumeSurgeMult: 1.2, sigmaZMax: 6.0 }, "long"],
+        ["V3, short-only", { sigmaExtreme: 2.0, minStopPct: 0.008, volumeSurgeMult: 1.2, sigmaZMax: 6.0 }, "short"],
       ]
-    : args.sigmaZMax != null
-      ? [[`sigmaZMax=${args.sigmaZMax}`, { sigmaZMax: args.sigmaZMax }, "all"]]
+    : args.sigmaZMax != null || args.sigmaExtreme != null || args.minStopPct != null || args.volumeSurgeMult != null
+      ? [[`custom`, v3Overrides, "all"]]
       : [["BASELINE (current default)", {}, "all"]]
 
   for (const [name, ov, side] of variants) {

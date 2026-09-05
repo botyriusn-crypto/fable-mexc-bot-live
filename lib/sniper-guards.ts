@@ -21,19 +21,19 @@ function envNum(name: string, def: number): number {
 // All tunable via env (same pattern as risk-manager.ts / exposure.ts).
 export const SNIPER_GUARDS = {
   // After a losing sniper trade on a symbol: no new sniper entry on it for N min.
-  lossCooldownMin: () => envNum("SNIPER_LOSS_COOLDOWN_MIN", 240),
+  lossCooldownMin: () => envNum("SNIPER_LOSS_COOLDOWN_MIN", 120),
   // Never re-enter a symbol within N min of the last sniper entry (open OR closed).
   // Also the backstop for the concurrent-tick race.
-  reentryWindowMin: () => envNum("SNIPER_REENTRY_WINDOW_MIN", 30),
+  reentryWindowMin: () => envNum("SNIPER_REENTRY_WINDOW_MIN", 15),
   // Max losing sniper trades per symbol per rolling 24h.
-  maxSymbolLossesPerDay: () => envNum("SNIPER_MAX_SYMBOL_LOSSES_DAY", 1),
+  maxSymbolLossesPerDay: () => envNum("SNIPER_MAX_SYMBOL_LOSSES_DAY", 2),
   // Max sniper entries (all symbols) per rolling 24h.
-  maxEntriesPerDay: () => envNum("SNIPER_MAX_ENTRIES_DAY", 6),
+  maxEntriesPerDay: () => envNum("SNIPER_MAX_ENTRIES_DAY", 12),
   // Stop sniping once rolling-24h realised sniper PnL <= -N * sniperTargetRiskUsdt.
-  maxDailyLossR: () => envNum("SNIPER_MAX_DAILY_LOSS_R", 3),
+  maxDailyLossR: () => envNum("SNIPER_MAX_DAILY_LOSS_R", 5),
   // Skip coins already UP more than this fraction over 24h (0.25 = +25%).
   // MEXC riseFallRate is a fraction — verify: grep -n riseFallRate lib/mexc/public.ts
-  maxPump24h: () => envNum("SNIPER_MAX_24H_PUMP", 0.25),
+  maxPump24h: () => envNum("SNIPER_MAX_24H_PUMP", 0.35),
   // Refuse the fill if live price is more than this fraction above the signal close.
   maxEntrySlip: () => envNum("SNIPER_MAX_ENTRY_SLIP", 0.004),
 }

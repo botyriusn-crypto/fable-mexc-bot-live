@@ -1122,11 +1122,15 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       if (cfg.sniperLive && fresh.length > 0) {
         // Option B: enter only the top N candidates by confidence, not every
         // signal. The margin cap inside openPosition still applies on top.
-        const floor = cfg.sniperConfidenceFloor ?? 0.6
+        const floor = cfg.sniperConfidenceFloor ?? 0.58
+        const rejectedFloor = fresh.filter((c) => c.confidence < floor)
+        const rejectedDir = fresh.filter((c) => !((c.direction === "long" && cfg.allowLong !== false) || (c.direction === "short" && cfg.allowShort !== false)))
+        if (rejectedFloor.length) console.log(`[Sniper Auto] rejected by floor (<${floor}):`, rejectedFloor.map(c => `${c.symbol}(${c.confidence.toFixed(2)})`).join(', '))
+        if (rejectedDir.length) console.log(`[Sniper Auto] rejected by direction cfg:`, rejectedDir.map(c => `${c.symbol}:${c.direction}`).join(', '))
         console.log(`[Sniper Auto] fresh=${fresh.length}, floor=${floor}, candidates:`, fresh.map(c => `${c.symbol}(${c.confidence.toFixed(2)})`).join(', '))
         const ranked = [...fresh]
           .filter((c) => c.confidence >= floor)
-          .filter((c) => c.direction === "long")
+          .filter((c) => (c.direction === "long" && cfg.allowLong !== false) || (c.direction === "short" && cfg.allowShort !== false))
           .sort((a, b) => b.confidence - a.confidence)
         console.log(`[Sniper Auto] after confidence filter: ${ranked.length} signals`)
         const heldSymbols = new Set((await getOpenPositions()).map((p) => p.symbol))

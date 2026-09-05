@@ -19,8 +19,8 @@ export const SNIPER_SHORTS_ENABLED = false
 
 export const SNIPER_PARAMS = {
   sweepLookback: 20,
-  volumeSurgeMult: 1.5,
-  sigmaExtreme: 2.5,
+  volumeSurgeMult: 1.2,
+  sigmaExtreme: 2.0,
   // UPPER bound on sigma exhaustion, added after live data showed accuracy
   // collapses past this point rather than continuing to improve. Breakdown
   // across 676 resolved signals, bucketed by |z|:
@@ -45,7 +45,7 @@ export const SNIPER_PARAMS = {
   minPrice: 0.10,
   tpSlRatio: 1.5,
   resolveAfterBuckets: 6,
-  minStopPct: 0.015,
+  minStopPct: 0.008,
 } as const
 
 export interface SniperSignal {
@@ -106,7 +106,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   const volSurge = avgVol > 0 ? last.volume / avgVol : 1
 
   const closes = candles.map(c => c.close)
-  const window = closes.slice(-100)
+  const window = closes.slice(-50)
   const mean = avg(window)
   const sd = Math.sqrt(avg(window.map(c => (c - mean) ** 2))) || 1
   const z = (last.close - mean) / sd
@@ -118,7 +118,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   // center is higher, the trend is up (dips are buyable); if lower, the trend
   // is down and "buy the dip" is a falling knife. This is what was killing the
   // long side (42% hit rate): sigma-longs kept catching knives in a downtrend.
-  const older = closes.slice(0, Math.max(0, closes.length - 100))
+  const older = closes.slice(0, Math.max(0, closes.length - 50))
   const olderMean = older.length > 0 ? avg(older) : mean
   const trendUp = mean > olderMean
   const trendDown = mean < olderMean
@@ -136,7 +136,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   // above — beyond this the setup is more likely a real breakout than
   // exhaustion, and live data confirms accuracy collapses past this line).
   const absZ = Math.abs(z)
-  const exhaustedDown = z < -sigmaExtreme && absZ <= sigmaZMax && last.close > last.open && trendUp
+  const exhaustedDown = false // DISABLED: sigma long signals (pure sweep mode)
   const exhaustedUp = z > sigmaExtreme && absZ <= sigmaZMax && last.close < last.open && (trendDown || (shortAllowNeutral && trendNeutral))
   // Sigma confidence, REVISED from a monotonically-increasing-with-|z| curve
   // to one that matches the observed accuracy shape: performance peaks just
@@ -146,7 +146,7 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
   // that live data shows performs worst — confidence and outcome quality
   // were anti-correlated at the top end. This curve is flat-to-mildly-
   // declining across the now-capped [sigmaExtreme, sigmaZMax] window instead.
-  const sigmaConfidence = 0.65 - Math.max(0, absZ - sigmaExtreme - 0.5) * 0.1
+  const sigmaConfidence = 0.65
 
   let direction: "long" | "short" | null = null
   let confidence = 0
@@ -168,11 +168,11 @@ export function detectSniper(candles: Candle[], snap: IndicatorSnapshot, funding
     // lets weaker-evidence setups through with no confidence penalty today.
     // This nudge is a hypothesis, not a data-confirmed fix like the sigma
     // z-cap above — treat it as a candidate to A/B, not a settled result.
-    confidence = trendUp ? 0.62 : 0.58
+    confidence = trendUp ? 0.65 : 0.61
     reason = `Liquidity sweep: pierced ${swingLow.toFixed(6)} then reclaimed w/ ${volSurge.toFixed(1)}x volume`; extreme = last.low; signalType = "sweep"
   } else if (bearishReclaim) {
     direction = "short"
-    confidence = trendDown ? 0.62 : 0.58
+    confidence = trendDown ? 0.65 : 0.61
     reason = `Liquidity sweep: pierced ${swingHigh.toFixed(6)} then rejected w/ ${volSurge.toFixed(1)}x volume`; extreme = last.high; signalType = "sweep"
   } else if (exhaustedDown) {
     direction = "long"; confidence = sigmaConfidence
@@ -424,7 +424,7 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
   // liquidity-sweep / sigma-exhaustion sniper needs the opposite — trending,
   // high-volume movers. Rank the whole USDT-perp market by momentum and only
   // run the (expensive) kline fetch on the top candidates.
-  const SCAN_LIMIT = 15 // top N movers per cycle
+  const SCAN_LIMIT = 50 // top N movers per cycle
 
   // Read tunable sniper params from bot_config so the AI advisor can adjust
   // them at runtime. Fall back to SNIPER_PARAMS defaults if unset.
@@ -546,7 +546,10 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
     fresh.push({ symbol, timeframe, direction: sig.direction, entry: entryPrice, stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, confidence: sig.confidence, rise24h: t.riseFallRate })
   }
 
+  // Rank by signal quality — not by 24h move
+  fresh.sort((a, b) => b.confidence - a.confidence)
+  console.log(`[Sniper] ${fresh.length} candidates found, top confidence=${fresh[0]?.confidence.toFixed(2) ?? 0}`)
   await resolveSniperDecisions()
   console.log(`[Sniper] resolveSniperDecisions completed`);
-  return fresh
+  return fresh.slice(0, 10)
 }
