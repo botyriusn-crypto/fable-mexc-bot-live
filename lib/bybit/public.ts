@@ -110,7 +110,9 @@ export async function fetchAllTickers(): Promise<any[]> {
       symbol: `${base}_${quote}`,
       lastPrice: Number(t.lastPrice ?? 0),
       fundingRate: Number(t.fundingRate ?? 0),
-      volume24: Number(t.turnover24h ?? 0),
+      volume24: Number(t.volume24h ?? 0),
+      amount24: Number(t.turnover24h ?? 0),
+      riseFallRate: Number(t.price24hPcnt ?? 0),
     })
   }
   return result
