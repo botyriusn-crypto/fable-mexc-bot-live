@@ -59,6 +59,7 @@ export interface BotState {
   adxValue: number | null
   grid: {
     orders: GridOrder[]
+    allOrders?: GridOrder[]
     holdingCount: number
     unrealizedPnl: number
     realizedPnl: number

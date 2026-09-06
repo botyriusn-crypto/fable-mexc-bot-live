@@ -128,21 +128,22 @@ export function MarketBar({ state }: { state: BotState }) {
           </div>
         </div>
 
-        {/* REGIME BADGE + ADX — bigger, centered */}
+        {/* REGIME BADGE + ADX — selected market only, not the whole bot */}
         <div className="flex items-center gap-3">
           {state.regime ? (
             <>
-              <Badge 
+              <Badge
                 className={`text-xs px-3 py-1.5 font-bold uppercase ${
-                  state.regime === "trend" 
-                    ? "bg-danger/20 text-danger border-danger/40 animate-pulse shadow-[0_0_12px_var(--color-danger)]" 
-                    : state.regime === "range" 
-                    ? "bg-yellow-500/20 text-yellow-400 border-yellow-500/40 animate-pulse shadow-[0_0_12px_rgba(234,179,8,0.6)]" 
+                  state.regime === "trend"
+                    ? "bg-danger/20 text-danger border-danger/40 animate-pulse shadow-[0_0_12px_var(--color-danger)]"
+                    : state.regime === "range"
+                    ? "bg-yellow-500/20 text-yellow-400 border-yellow-500/40 animate-pulse shadow-[0_0_12px_rgba(234,179,8,0.6)]"
                     : "bg-muted text-muted-foreground border-border"
                 }`}
               >
-                {state.regime === "trend" ? "🔥 TRENDING" : state.regime === "range" ? "📦 RANGING" : "⚪ NEUTRAL"}
+                {state.regime === "trend" ? "TRENDING" : state.regime === "range" ? "RANGING" : "NEUTRAL"}
               </Badge>
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">selected market</span>
               {state.adxValue != null && (
                 <span className="text-sm font-bold text-white font-mono tracking-wider">
                   ADX <span className="text-base">{state.adxValue.toFixed(1)}</span>

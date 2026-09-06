@@ -246,7 +246,7 @@ export async function runSwingBreakoutTick() {
     return
   }
 
-  const swingSymbols: string[] = botCfg.swingSymbols || ["BTC_USDT", "ETH_USDT"]
+  const swingSymbols: string[] = Array.isArray(botCfg.swingSymbols) ? (botCfg.swingSymbols as string[]) : ["BTC_USDT", "ETH_USDT"]
   const exchange = (botCfg.exchange as Exchange) || "mexc"
   const cfg: SwingConfig = {
     symbol: "",

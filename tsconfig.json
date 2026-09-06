@@ -42,6 +42,11 @@
     "test-*.ts",
     "test-*.mjs",
     "test_*.mjs",
+    "research-*.ts",
+    "research",
+    "tune-*.ts",
+    "ondo-validation.ts",
+    "check-*.ts",
     "**/*.test.ts"
   ]
 }

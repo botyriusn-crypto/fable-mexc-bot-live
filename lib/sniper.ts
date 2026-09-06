@@ -4,7 +4,7 @@ import { db } from "./db"
 import { classifierDecisions, botConfig, botLogs } from "./db/schema"
 import { and, eq, isNull, sql } from "drizzle-orm"
 import type { BulkTicker } from "./mexc/public"
-import { getExchangeClient } from "./exchange"
+import { getExchangeClient, type Exchange } from "./exchange"
 import { recordOutcome, type SniperFeatures } from "./advisor"
 
 // Tunable rule parameters (Option A: exposed for display + advisor tuning).
@@ -266,7 +266,7 @@ export async function resolveSniperDecisions(): Promise<number> {
     // Legacy rows (recorded before stop/take were stored) fall back to the old
     // ticker check so they still resolve rather than hanging forever.
     if (stopLoss == null || takeProfit == null) {
-      const ticker: any = await getExchangeClient(cfg.exchange).fetchTicker(d.symbol).catch(() => null)
+      const ticker: any = await getExchangeClient(cfg.exchange as Exchange).fetchTicker(d.symbol).catch(() => null)
       const price = ticker?.lastPrice ?? ticker?.price
       if (!price) continue
       const ret = ((price - d.entryPrice) / d.entryPrice) * 100
@@ -286,7 +286,7 @@ export async function resolveSniperDecisions(): Promise<number> {
     }
 
     // Walk forward from the entry candle to determine which level hit first.
-    const candles = await getExchangeClient(cfg.exchange).fetchKlines(d.symbol, d.timeframe, 200).catch(() => null)
+    const candles = await getExchangeClient(cfg.exchange as Exchange).fetchKlines(d.symbol, d.timeframe, 200).catch(() => null)
     if (!candles || candles.length < 2) continue
     const sorted = [...candles].sort((a, b) => a.time - b.time)
     const entryIdx = filters?.entryTime != null
@@ -441,9 +441,9 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
   const minStopPct = cfg?.sniperMinStopPct ?? SNIPER_PARAMS.minStopPct
   const tpSlRatio = cfg?.sniperTpSlRatio ?? SNIPER_PARAMS.tpSlRatio
 
-  let tickers: BulkTicker[]
+  let tickers: Array<BulkTicker | import("./exchange").Ticker>
   try {
-    const exchange = getExchangeClient(cfg.exchange)
+    const exchange = getExchangeClient(cfg.exchange as Exchange)
     if (exchange.fetchAllTickers) {
       tickers = await exchange.fetchAllTickers()
     } else {
@@ -462,8 +462,8 @@ export async function runSniperCycle(): Promise<SniperCandidate[]> {
   // straight through a stop. `amount24` is the quote (USDT) notional, the
   // correct liquidity measure (base `volume24` is misleading for low-price coins).
   const ranked = tickers
-    .filter((t) => t.amount24 >= minVolumeUsdt && t.lastPrice >= minPrice)
-    .map((t) => ({ ...t, score: Math.abs(t.riseFallRate) * Math.log10(t.amount24 + 1) }))
+    .filter((t) => (t.amount24 ?? 0) >= minVolumeUsdt && t.lastPrice >= minPrice)
+    .map((t) => ({ ...t, score: Math.abs(t.riseFallRate ?? 0) * Math.log10((t.amount24 ?? 0) + 1) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, SCAN_LIMIT)
 

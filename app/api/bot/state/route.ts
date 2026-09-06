@@ -176,25 +176,31 @@ export async function GET() {
     const isLiveMode = cfg.mode === "live"
     const filteredOpenPosRows = openPosRows
     
-    const strategyBreakdown = {
+    const strategyBreakdown: Record<string, { unrealized: number; count: number }> = {
       grid: { unrealized: 0, count: 0 },
       sniper: { unrealized: 0, count: 0 },
       swing: { unrealized: 0, count: 0 },
       trend: { unrealized: 0, count: 0 },
       trend_rider: { unrealized: 0, count: 0 }
     }
-    
+
     for (const p of filteredOpenPosRows) {
       const mark = markBySymbol.get(p.symbol)
       if (!mark) continue
       const dir = p.side === "long" ? 1 : -1
       const pnl = (mark - p.entryPrice) * dir * p.quantity
       const strat = p.strategy || "trend"
-      if (strategyBreakdown[strat]) {
-        strategyBreakdown[strat].unrealized += pnl
-        strategyBreakdown[strat].count += 1
-      }
+      const bucket = strategyBreakdown[strat] ?? (strategyBreakdown[strat] = { unrealized: 0, count: 0 })
+      bucket.unrealized += pnl
+      bucket.count += 1
     }
+
+    // Positions-table unrealized (trend / scalp / swing / sniper rows).
+    // Captured BEFORE the grid bucket is overwritten from gridOrders below.
+    // Paper equity must include this — paperBalance alone only reflects
+    // settled cash, and gridUnrealized only covers the grid order book.
+    const positionsUnrealized = Object.values(strategyBreakdown)
+      .reduce((s, b) => s + (b.unrealized || 0), 0)
 
     // Fold swing unrealized PnL into the swing card's total PnL so the
     // displayed figure reflects open positions, not just closed trades.
@@ -334,8 +340,8 @@ export async function GET() {
     },
       watchdog: getWatchdogReport(),
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,
-      markPrice, unrealizedPnl: totalGridUnrealized,
-      equity: cfg.paperBalance + totalGridUnrealized,
+      markPrice, unrealizedPnl: totalGridUnrealized + positionsUnrealized,
+      equity: cfg.paperBalance + totalGridUnrealized + positionsUnrealized,
       trades: recentTrades, winRate, liveStats, modeStats, todayStats, swingStats, swingPositions: swingPositions, equityCurve: equity.filter((e: any) => e.live === (cfg.mode === "live")).reverse(), logs,
       model: modelRows[0] ?? null, classifierAnalytics, ticker, chart, liveAccount, regime, adxValue,
       grid: { orders: selectedGridOrders, allOrders: activeGridOrders, holdingCount: gridHolding.length, unrealizedPnl: gridUnrealized, realizedPnl: gridRealized },

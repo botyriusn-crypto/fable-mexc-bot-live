@@ -29,7 +29,7 @@ import { maybeRunGridAiAdvisorAuto } from "./ai-grid-advisor"
 import { runSniperCycle } from "./sniper"
 import { analyzeTradesForMarket, applyRecommendations } from "./ai-advisor"
 import { computeInitialStops, evaluateExit } from "./exits"
-import { MexcWebSocketManager } from './mexc/ws';
+import { MexcWebSocketManager, livePrices } from './mexc/ws';
 
 import {
   evaluatePortfolioRisk,
@@ -1404,9 +1404,10 @@ export async function initRealtimeEngine(symbol: string, timeframe: string) {
   
   console.log(`[Engine] Using REST polling for ${symbol} (no MEXC websocket)`)
   // REST polling fallback - fetch price every 15 seconds
+  const cfg = await getConfig()
   const pollInterval = setInterval(async () => {
     try {
-      const exchange = getExchangeClient(cfg.exchange)
+      const exchange = getExchangeClient(cfg.exchange as Exchange)
       const ticker = await exchange.fetchTicker(symbol)
       if (ticker?.lastPrice) {
         livePrices[symbol] = ticker.lastPrice
@@ -1414,10 +1415,8 @@ export async function initRealtimeEngine(symbol: string, timeframe: string) {
     } catch (err) { /* best-effort */ }
   }, 15000)
   const manager = { disconnect: () => clearInterval(pollInterval) }
-  
-  // Connect the WebSocket
-  await manager.connect()
-  console.log(`[Engine] WebSocket connected for ${symbol}`)
+
+  console.log(`[Engine] Polling started for ${symbol}`)
   
   // Store the manager
   ;(globalThis as any).__wsManagers[symbol] = manager

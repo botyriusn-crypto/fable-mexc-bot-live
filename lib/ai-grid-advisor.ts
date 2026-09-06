@@ -6,7 +6,7 @@ import { livePrices } from "./mexc/ws"
 import { fetchDepth, depthNotionalNearMid } from "./mexc/public"
 import type { Candle } from "./mexc/public"
 import { computeSafeGridSettings } from "./grid-sizing"
-import { getExchangeClient, type ExchangeClient, type Ticker } from "./exchange"
+import { getExchangeClient, type ExchangeClient, type Exchange, type Ticker } from "./exchange"
 import { getConfig } from "./engine"
 import { eq } from "drizzle-orm"
 
@@ -93,7 +93,7 @@ export interface GridAiResult {
 export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult> {
   try {
     const cfg = await getConfig()
-    const exchange = getExchangeClient(cfg.exchange)
+    const exchange = getExchangeClient(cfg.exchange as Exchange)
     
     // Exchange-aware ticker scanning
     let allTickers: Ticker[] = []
@@ -133,8 +133,8 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         if (LEVERAGED_ETF_DENYLIST.has(pair.symbol)) continue
         if (pair.symbol.includes("STOCK") || pair.symbol.includes("3L") || pair.symbol.includes("3S")) continue
         if (!candidates.find((c: any) => c.symbol === pair.symbol)) {
-          const ticker = (tickerJson.data as any[]).find((t: any) => t.symbol === pair.symbol)
-          if (ticker && ticker.amount24 > MIN_VOLUME_24H) candidates.push(ticker)
+          const ticker = allTickers.find((t: any) => t.symbol === pair.symbol)
+          if (ticker && Number((ticker as any).volume24 ?? (ticker as any).amount24 ?? 0) > MIN_VOLUME_24H) candidates.push(ticker)
         }
       }
     } catch (e) { console.error("Watchlist override error:", e) }
@@ -192,15 +192,16 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         const adxPen = Math.max(0, lastAdx - 25) * 4
         let score = atrSweet + chopScore - adxPen
 
+        const volUsdt = t.amount24 ?? t.volume24 ?? 0
         const dna = comboDna(candles, 0.6, lastAdx)
-        const params = comboParams(dna, lastClose, t.amount24)
-        console.log(`[LevDebug] ${t.symbol} vol=$${Math.round(t.amount24)} atrPct=${atrPct.toFixed(2)}% lev=${params.suggestedLeverage}x`)
+        const params = comboParams(dna, lastClose, volUsdt)
+        console.log(`[LevDebug] ${t.symbol} vol=$${Math.round(volUsdt)} atrPct=${atrPct.toFixed(2)}% lev=${params.suggestedLeverage}x`)
         if (dna.rejected) { gateStats.dnaRejected++; continue }
         const blendedScore = Math.round(Math.max(0, Math.min(100, score / 1.5)) * 0.35 + dna.score * 0.65)
 
         scoredMarkets.push({
           symbol: t.symbol,
-          volumeUsdt: Math.round(t.amount24),
+          volumeUsdt: Math.round(volUsdt),
           atrPct: parseFloat(atrPct.toFixed(2)),
           adx: parseFloat(lastAdx.toFixed(1)),
           chop: parseFloat(chop.toFixed(1)),

@@ -385,8 +385,8 @@ const handleToggleDirection = async () => {
         <span className={grid.unrealizedPnl >= 0 ? "text-success" : "text-danger"}>
           Unreal: {grid.unrealizedPnl >= 0 ? "+" : ""}{fmt(grid.unrealizedPnl, 2)}
         </span>
-        <span className={grid.realizedPnl >= 0 ? "text-success" : "text-danger"}>
-          Real: {grid.realizedPnl >= 0 ? "+" : ""}{fmt(grid.realizedPnl, 2)}
+        <span className={grid.realizedPnl >= 0 ? "text-success" : "text-danger"} title="Realized since this ladder was set up — resets on recenter">
+          Real (cycle): {grid.realizedPnl >= 0 ? "+" : ""}{fmt(grid.realizedPnl, 2)}
         </span>
         <span className="text-muted-foreground/50 text-[10px]">{expanded ? "▲" : "▼"}</span>
       </div>
@@ -622,7 +622,7 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
         )}
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 text-xs font-mono">
-          <span className={totalRealized >= 0 ? "text-success" : "text-danger"}>Real: {totalRealized >= 0 ? "+" : ""}{fmt(totalRealized, 2)}</span>
+          <span className={totalRealized >= 0 ? "text-success" : "text-danger"} title="Sum of current-cycle realized across pairs">Real (cycle): {totalRealized >= 0 ? "+" : ""}{fmt(totalRealized, 2)}</span>
           <span className={totalUnrealized >= 0 ? "text-success" : "text-danger"}>Unreal: {totalUnrealized >= 0 ? "+" : ""}{fmt(totalUnrealized, 2)}</span>
           <AddPairControl existingSymbols={grids.map((g) => g.symbol)} onAdded={handleRefresh} />
           <Button
@@ -645,7 +645,7 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
             const live = state.liveAccount && !("error" in state.liveAccount) ? state.liveAccount : null
             const committedMargin =
               (state.openPositions ?? []).reduce((s, p) => s + Number(p.sizeUsdt ?? 0), 0) +
-              (state.grid?.allOrders ?? []).reduce((s, o) => {
+              (state.grid?.allOrders ?? []).reduce((s: number, o: any) => {
                 const lev = Number(o.leverage ?? 1) || 1
                 const notional = (o.buyPrice != null ? Number(o.buyPrice) : Number(o.price)) * Number(o.quantity)
                 return s + notional / lev

@@ -81,7 +81,7 @@ export async function computeSafeGridSettings(
       }
       console.log(`[Grid Sizing] Paper mode: using latest equity snapshot=${availableBalance.toFixed(2)}`)
     } catch (e) {
-      console.log(`[Grid Sizing] Paper mode: error reading equity snapshot: ${e.message}`)
+      console.log(`[Grid Sizing] Paper mode: error reading equity snapshot: ${e instanceof Error ? e.message : String(e)}`)
       availableBalance = 0
     }
   } else {

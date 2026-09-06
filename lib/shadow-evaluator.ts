@@ -5,7 +5,8 @@ import { db } from "./db"
 import { classifierDecisions, gridConfigs } from "./db/schema"
 import { loadModelById, predict, trainShadowOnDecision, MODEL_IDS } from "./ml"
 import { heuristicScore } from "./advisor"
-import { getExchangeClient } from "./exchange"
+import { getExchangeClient, type Exchange } from "./exchange"
+import { botConfig } from "./db/schema"
 import { ema, rsi, macdHistogram, atr, rateOfChange, adx, volumeSurge } from "./indicators"
 import type { FeatureVector } from "./indicators"
 
@@ -18,9 +19,12 @@ const tfSeconds = (tf: string) => {
 
 async function computeLiveFeatures(symbol: string, timeframe: string): Promise<{ features: FeatureVector; price: number } | null> {
   try {
+    const cfgRows = await db.select().from(botConfig).limit(1)
+    const exchangeName = (cfgRows[0]?.exchange ?? "mexc") as Exchange
+    const exchange = getExchangeClient(exchangeName)
     const [ticker, candles] = await Promise.all([
-      fetchTicker(symbol),
-      fetchKlines(symbol, timeframe, 200),
+      exchange.fetchTicker(symbol),
+      exchange.fetchKlines(symbol, timeframe, 200),
     ])
     if (!ticker?.lastPrice || candles.length < 50) return null
 
@@ -123,11 +127,13 @@ export async function runShadowCycle(): Promise<void> {
   const unresolved = await db.select().from(classifierDecisions).where(
     and(eq(classifierDecisions.strategy, "shadow"), isNull(classifierDecisions.resolvedAt))
   )
+  const botRows = await db.select().from(botConfig).limit(1)
+  const exchangeName = (botRows[0]?.exchange ?? "mexc") as Exchange
   for (const d of unresolved) {
     const tfSec = tfSeconds(d.timeframe)
     const curBucket = Math.floor(Date.now() / 1000 / tfSec)
     if (curBucket - d.candleTime < RESOLVE_AFTER_BUCKETS) continue
-    const ticker: any = await getExchangeClient(cfg.exchange).fetchTicker(d.symbol).catch(() => null)
+    const ticker: any = await getExchangeClient(exchangeName).fetchTicker(d.symbol).catch(() => null)
     const price = ticker?.lastPrice ?? ticker?.price
     if (!price) continue
     const ret = ((price - d.entryPrice) / d.entryPrice) * 100

@@ -12,13 +12,13 @@ import { TradesTable } from "./trades-table"
 import { ActivityLog } from "./activity-log"
 import { SettingsPanel } from "./settings-panel"
 import { SniperAlertBubble, SniperCommand } from "./sniper-alerts"
+import SniperReadinessGauge from "../../app/components/SniperReadinessGauge"
 import { AdvisorCard } from "./advisor-card"
 import { MultiGridCard } from "./multi-grid-card"
 import { OpenPositionsCard } from "./open-positions-card"
 import { SwingCard } from "./swing-card"
 import { PerformanceAnalyzer } from "./performance-analyzer"
 import { MarketBar } from "./market-bar"
-import { MlCard } from "./ml-card"
 import { ClassifierCard } from "./classifier-card"
 import { ChevronUp, X, ExternalLink, ChevronDown, ChevronRight } from "lucide-react"
 
@@ -99,19 +99,7 @@ function TerminalPanel({ state, isOpen, onToggle }: { state: any; isOpen: boolea
   )
 }
 
-// ======================== STAT CARD ========================
-function StatCard({ label, value, tone }: { label: string; value: string; tone?: "pos" | "neg" | "neutral" }) {
-  return (
-    <div className="flex flex-col items-center justify-center rounded-lg border bg-card p-3 min-w-[110px]">
-      <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</span>
-      <span className={`text-lg font-bold font-mono mt-0.5 ${
-        tone === "pos" ? "text-success" : tone === "neg" ? "text-danger" : "text-foreground"
-      }`}>
-        {value}
-      </span>
-    </div>
-  )
-}
+// (StatCard removed: consolidated into the single account strip above.)
 
 // ======================== COLLAPSIBLE SECTION ========================
 function CollapsibleSection({
@@ -184,8 +172,6 @@ export function DashboardV2() {
   const grids = (state as any).gridConfigs || []
   
 
-  const pnlTone = (v: number) => v > 0 ? "pos" : v < 0 ? "neg" : "neutral"
-
   const toggleBot = async () => {
     setToggling(true)
     try {
@@ -226,14 +212,30 @@ export function DashboardV2() {
           <OpenPositionsCard state={state} />
         </div>
 
-        {/* STATS ROW */}
+        {/* ACCOUNT STRIP — one card: balances + mode performance */}
         <div className="flex gap-3 p-3 overflow-x-auto">
-          <StatCard label="Available" value={`${fmt(balance)} USDT`} tone="neutral" />
-          <StatCard label="Equity" value={`${fmt(equity)} USDT`} tone="neutral" />
-          <StatCard label={`Today (${modeLabel})`} value={`${todayPnl >= 0 ? "+" : ""}${fmt(todayPnl)}`} tone={pnlTone(todayPnl)} />
-          <StatCard label={`Win Rate (${modeLabel})`} value={totalTrades > 0 ? `${(winRate * 100).toFixed(0)}%` : "—"} tone="neutral" />
-          <StatCard label={`Trades (${modeLabel})`} value={String(totalTrades)} tone="neutral" />
-          <StatCard label="Today Trades" value={String(todayTrades)} tone="neutral" />
+          <div className="flex flex-1 items-center gap-6 rounded-lg border bg-card px-4 py-3 min-w-[560px]">
+            <div className="flex flex-col">
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Available</span>
+              <span className="text-lg font-bold font-mono mt-0.5">{fmt(balance)} USDT</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Equity</span>
+              <span className="text-lg font-bold font-mono mt-0.5">{fmt(equity)} USDT</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Today ({modeLabel})</span>
+              <span className={`text-lg font-bold font-mono mt-0.5 ${todayPnl > 0 ? "text-success" : todayPnl < 0 ? "text-danger" : "text-foreground"}`}>
+                {todayPnl >= 0 ? "+" : ""}{fmt(todayPnl)}
+              </span>
+            </div>
+            <div className="ml-auto flex flex-col items-end">
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{modeLabel} record</span>
+              <span className="text-sm font-mono mt-0.5">
+                {totalTrades > 0 ? `${(winRate * 100).toFixed(0)}% win · ${totalTrades} trades` : "no trades yet"} · {todayTrades} today
+              </span>
+            </div>
+          </div>
         </div>
 
         {/* 65/35 SPLIT */}
@@ -260,11 +262,13 @@ export function DashboardV2() {
 
           {/* RIGHT 35% */}
           <div className="w-[35%] flex flex-col gap-3">
-            <CollapsibleSection title="Managed Exposure" defaultOpen={true}>
+            <SniperReadinessGauge />
+
+            <CollapsibleSection title="Positions" defaultOpen={true}>
               <PositionCard state={state} />
             </CollapsibleSection>
 
-            <CollapsibleSection title="Shadow ML Trainer" defaultOpen={true}>
+            <CollapsibleSection title="Sniper intel" defaultOpen={true}>
               <ClassifierCard state={state} />
             <AdvisorCard />
             </CollapsibleSection>

@@ -1220,7 +1220,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
     if (restingBuys.length > 0) {
       let livePrice: number | null = null
       try {
-        livePrice = (await getExchangeClient(cfg.exchange).fetchTicker(gc.symbol)).lastPrice
+        livePrice = (await getExchangeClient(cfg.exchange as Exchange).fetchTicker(gc.symbol)).lastPrice
       } catch {}
       if (livePrice != null) {
         const minDrift = Math.min(...restingBuys.map((o) => Math.abs(livePrice! - o.price) / livePrice!))
@@ -1395,7 +1395,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
   if (heldSells.length > 0) {
     let currentPrice: number | null = null
     try {
-      currentPrice = (await getExchangeClient(cfg.exchange).fetchTicker(gc.symbol)).lastPrice
+      currentPrice = (await getExchangeClient(cfg.exchange as Exchange).fetchTicker(gc.symbol)).lastPrice
     } catch {}
     if (currentPrice != null) {
       for (const o of heldSells) {

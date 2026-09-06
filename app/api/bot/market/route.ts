@@ -3,7 +3,7 @@ import { db } from "@/lib/db"
 import { botConfig } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { getConfig } from "@/lib/engine"
-import { getExchangeClient } from "@/lib/exchange"
+import { getExchangeClient, type Exchange } from "@/lib/exchange"
 import { fetchMarkets as fetchMexcMarkets } from "@/lib/mexc/public"
 
 export const dynamic = "force-dynamic"
@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic"
 export async function GET() {
   try {
     const cfg = await getConfig()
-    const exchange = getExchangeClient(cfg.exchange)
+    const exchange = getExchangeClient(cfg.exchange as Exchange)
     
     let markets: any[] = []
     if (cfg.exchange === "bybit") {

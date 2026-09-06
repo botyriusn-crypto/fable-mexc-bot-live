@@ -10,7 +10,7 @@
   "atrPeriod": 14,
   "strategyMode": "auto",
   "adxTrendThreshold": 25,
-  "adxRangeThreshold": 29,
+  "adxRangeThreshold": 20,
   "bbPeriod": 20,
   "bbStd": 2,
   "slAtrMult": 1.5,

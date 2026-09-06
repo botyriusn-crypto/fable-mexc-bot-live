@@ -20,6 +20,8 @@ export interface Ticker {
   lastPrice: number
   fundingRate: number
   volume24: number
+  amount24?: number
+  riseFallRate?: number
 }
 
 export type Candle = MexcPublic.Candle

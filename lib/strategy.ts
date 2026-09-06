@@ -24,9 +24,19 @@ export interface Signal {
 // Regime detection: ADX above trend threshold → trending market (EMA crossover
 // strategy); ADX below range threshold → ranging market (mean-reversion
 // strategy); in between → neutral, stand aside.
+//
+// F9 guard: a misconfigured row (range >= trend, e.g. 29/25) makes "neutral"
+// unreachable and the trend branch shadows everything between the two values.
+// Normalize to the schema defaults (25/20) so the bot can always stand aside.
 export function detectRegime(snap: IndicatorSnapshot, cfg: BotConfig): Regime {
-  if (snap.adx >= cfg.adxTrendThreshold) return "trend"
-  if (snap.adx <= cfg.adxRangeThreshold) return "range"
+  let trend = cfg.adxTrendThreshold
+  let range = cfg.adxRangeThreshold
+  if (!(range < trend)) {
+    trend = 25
+    range = 20
+  }
+  if (snap.adx >= trend) return "trend"
+  if (snap.adx <= range) return "range"
   return "neutral"
 }
 
