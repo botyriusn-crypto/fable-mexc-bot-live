@@ -37,7 +37,9 @@ export async function fetchKlines(symbol: string, interval: string, limit = 200)
       throw new Error(`Bybit kline error (${retCode}): ${retMsg}`)
     }
     if (!json.result?.list) throw new Error("Bybit kline response invalid")
-    return json.result.list.map((c: any) => ({
+    // Bybit returns candles in DESCENDING order (newest first).
+    // Reverse to ASCENDING (oldest first) to match MEXC and detectSniper expectations.
+    return json.result.list.slice().reverse().map((c: any) => ({
       time: Math.floor(Number(c[0]) / 1000),
       open: Number(c[1]), high: Number(c[2]), low: Number(c[3]),
       close: Number(c[4]), volume: Number(c[5]),
