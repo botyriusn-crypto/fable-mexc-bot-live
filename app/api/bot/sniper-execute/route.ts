@@ -3,6 +3,7 @@ import { db } from "@/lib/db"
 import { botConfig } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { openPosition } from "@/lib/engine"
+import { evaluatePortfolioRisk } from "@/lib/risk-manager"
 import { computeSnapshot } from "@/lib/indicators"
 import { getExchangeClient } from "@/lib/exchange"
 import { requireAuth } from "@/lib/auth"
@@ -72,6 +73,12 @@ export async function POST(req: NextRequest) {
     snap.price = entry
 
     const features = { ...snap.features, sideLong: dir }
+
+    // Refresh the portfolio risk state before opening. openPosition() gates on
+    // the risk layer (halt / max-open / margin budget), but that layer relies
+    // on a freshly-computed state -- without this call the state could be stale
+    // or (after a cold start) null, which now fails closed and blocks entries.
+    await evaluatePortfolioRisk(marketCfg)
 
     const used = await openPosition(
       marketCfg,

@@ -7,7 +7,9 @@ import {
   boolean,
   timestamp,
   jsonb,
+  uniqueIndex,
 } from "drizzle-orm/pg-core"
+import { sql } from "drizzle-orm"
 
 export const botConfig = pgTable("bot_config", {
   id: integer("id").primaryKey().default(1),
@@ -163,7 +165,15 @@ export const positions = pgTable("positions", {
   fillConfirmed: boolean("fill_confirmed").notNull().default(true),
   openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
   closedAt: timestamp("closed_at", { withTimezone: true }),
-})
+}, (table) => ({
+  // At most one OPEN position per (symbol, timeframe, strategy). This is a
+  // DB-level backstop against concurrent double-opens (belt-and-braces with
+  // the runTick advisory lock). Partial index: closed rows are unconstrained,
+  // so historical duplicates are unaffected.
+  uniqueOpen: uniqueIndex("positions_unique_open")
+    .on(table.symbol, table.timeframe, table.strategy)
+    .where(sql`${table.status} = 'open'`),
+}))
 
 export const trades = pgTable("trades", {
   id: serial("id").primaryKey(),

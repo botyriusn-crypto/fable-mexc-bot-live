@@ -18,7 +18,10 @@ const isFlyInternal = /\.(flycast|internal)(:|$)/.test(dbUrl)
 
 export const pool = new Pool({
   connectionString: dbUrl,
-  ssl: isFlyInternal ? false : { rejectUnauthorized: false },
+  // Fly internal network: no TLS. Neon (public): verify the server certificate
+  // (rejectUnauthorized: true) instead of blindly accepting any cert, which
+  // would leave the connection open to MITM.
+  ssl: isFlyInternal ? false : { rejectUnauthorized: true },
   max: 2, // Keep pool small for serverless
   idleTimeoutMillis: 10000, // Shorter idle timeout
   connectionTimeoutMillis: 10000,
