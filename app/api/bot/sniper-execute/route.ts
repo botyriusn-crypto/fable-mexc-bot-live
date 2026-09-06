@@ -5,8 +5,13 @@ import { eq } from "drizzle-orm"
 import { openPosition } from "@/lib/engine"
 import { computeSnapshot } from "@/lib/indicators"
 import { getExchangeClient } from "@/lib/exchange"
+import { requireAuth } from "@/lib/auth"
 
 export async function POST(req: NextRequest) {
+  // Defense-in-depth: this endpoint opens real positions. Enforce auth here in
+  // addition to the central middleware.
+  const authError = await requireAuth(req)
+  if (authError) return authError
   try {
     const body = await req.json()
     console.log("[Sniper Execute] Received:", JSON.stringify(body))

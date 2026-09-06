@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { runWebhookSignal } from "@/lib/engine"
+import { safeEqual } from "@/lib/auth"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
@@ -33,9 +34,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
   }
 
-  // Constant-time-ish comparison to avoid trivial timing attacks
+  // Constant-time comparison (does not leak length or content via timing).
   const provided = String(body.password ?? "")
-  if (provided.length !== secret.length || !timingSafeEqual(provided, secret)) {
+  if (!(await safeEqual(provided, secret))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
@@ -49,12 +50,4 @@ export async function POST(request: Request) {
 
   const result = await runWebhookSignal(action)
   return NextResponse.json(result)
-}
-
-function timingSafeEqual(a: string, b: string): boolean {
-  let diff = 0
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
-  }
-  return diff === 0
 }

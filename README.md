@@ -21,6 +21,29 @@ Places buy orders below current price, sell orders above. When price moves, buys
 - **ATR Mult** — Higher = fewer fills, bigger profit each
 - **Budget %** — How much of balance this pair uses
 
+## Authentication (IMPORTANT)
+
+The dashboard and **all** API routes are protected by `middleware.ts`. Before
+deploying, set these secrets (e.g. `fly secrets set NAME=value`):
+
+- `DASHBOARD_PASSWORD` — password for the `/login` screen.
+- `AUTH_SECRET` — signs session cookies (`openssl rand -hex 32`). Falls back to
+  `DASHBOARD_PASSWORD` if unset.
+- `API_KEY` — for programmatic/automation access. Send it as
+  `Authorization: Bearer <API_KEY>` or `x-api-key: <API_KEY>`.
+- `WEBHOOK_PASSWORD` — for `/api/bot/webhook` (TradingView alerts).
+
+How access works:
+- **Browser** → log in at `/login`; an httpOnly session cookie (12 h) is set and
+  the dashboard works normally.
+- **Scripts / automation** → send the `API_KEY` header on each request.
+- **Webhook** → `/api/bot/webhook` keeps its own shared-password auth.
+
+If `DASHBOARD_PASSWORD` is not set the dashboard cannot be logged into, and if
+`API_KEY` is not set programmatic header auth is disabled — both fail closed.
+
+See `.env.example` for the full list of variables.
+
 ## Tips
 
 - Grid has 100% win rate in backtests
