@@ -150,6 +150,12 @@ export const positions = pgTable("positions", {
   rangeTarget: doublePrecision("range_target"), // mean-reversion TP (BB middle at entry)
   remainingQuantity: doublePrecision("remaining_quantity"),
   partialExitCount: integer("partial_exit_count").notNull().default(0),
+  // Native (exchange-side) reduce-only stop-loss backstop. stopOrderId is the
+  // venue's trigger/plan order id when it returns one (MEXC, Gate); Bybit
+  // attaches the stop to the position and returns none, so it stays null even
+  // when nativeStopPlaced is true.
+  stopOrderId: text("stop_order_id"),
+  nativeStopPlaced: boolean("native_stop_placed").notNull().default(false),
   status: text("status").notNull().default("open"), // 'open' | 'closed'
   openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
   closedAt: timestamp("closed_at", { withTimezone: true }),

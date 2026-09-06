@@ -289,10 +289,16 @@ export async function openPosition(
 
   const quantity = (sizeUsdt * cfg.leverage) / price
 
+  // Native (exchange-side) stop-loss backstop tracking — set only in live mode
+  // when the exchange accepts the reduce-only stop. The engine's soft stop in
+  // evaluateExit still drives all normal exits; this is defense-in-depth so the
+  // stop still fires if the bot process is down or a tick is delayed.
+  let stopOrderId: string | null = null
+  let nativeStopPlaced = false
+
   if (cfg.mode === "live") {
-    try {
-      const tickerCache = new Map()
     const exchange = getExchangeClient(cfg.exchange as Exchange)
+    try {
       await exchange.placeMarketOrder({
         symbol: cfg.symbol,
         side: direction === "long" ? 1 : 3,
@@ -302,6 +308,32 @@ export async function openPosition(
     } catch (err) {
       await log("error", `LIVE order failed: ${err instanceof Error ? err.message : String(err)}`)
       return 0
+    }
+
+    // Place the native reduce-only stop-loss as a best-effort backstop. A
+    // failure here must NEVER abort the position — the entry already filled and
+    // the soft stop remains active — so we log and continue.
+    if (stopLoss != null) {
+      try {
+        const r = await exchange.placeStopLoss({
+          symbol: cfg.symbol,
+          positionSide: direction,
+          stopPrice: stopLoss,
+          volume: quantity,
+          leverage: cfg.leverage,
+        })
+        nativeStopPlaced = r.placed
+        stopOrderId = r.orderId || null
+        await log(
+          "info",
+          `Native stop-loss placed @ ${stopLoss.toFixed(2)} for ${direction.toUpperCase()} ${cfg.symbol}${stopOrderId ? ` (id ${stopOrderId})` : ""}`,
+        )
+      } catch (err) {
+        await log(
+          "error",
+          `Native stop-loss placement FAILED for ${direction.toUpperCase()} ${cfg.symbol}; soft stop remains active: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
     }
   }
 
@@ -324,6 +356,8 @@ export async function openPosition(
     atrAtEntry: snap.atr,
     strategy,
     rangeTarget,
+    stopOrderId,
+    nativeStopPlaced,
   })
 
   await db
@@ -386,6 +420,11 @@ export async function takePartialProfit(
     partial: true,
   })
 
+  // The soft stop is tightened to break-even here. The native (exchange-side)
+  // stop backstop is intentionally NOT re-placed — it stays at the initial SL
+  // as a disaster floor. Its reduce-only order already covers only the (now
+  // smaller) live position, so it can never over-close; the soft stop drives
+  // the tighter break-even exit.
   await db
     .update(positions)
     .set({
@@ -437,6 +476,26 @@ export async function closePosition(
       }
       await log("error", `LIVE close failed: ${errMsg}`)
       return
+    }
+
+    // Cancel the native stop-loss backstop now that the position is closed.
+    // Best-effort: Bybit auto-cancels its position-attached stop on close, and
+    // a lingering reduce-only trigger on MEXC/Gate is harmless (it can only
+    // reduce a now-zero position), so a failure here is logged, never fatal.
+    if (position.nativeStopPlaced) {
+      try {
+        const exchange = getExchangeClient(cfg.exchange as Exchange)
+        await exchange.cancelStopLoss({
+          symbol: position.symbol,
+          positionSide: position.side as "long" | "short",
+          orderId: position.stopOrderId ?? "",
+        })
+      } catch (err) {
+        await log(
+          "error",
+          `Native stop-loss cancel failed for ${position.symbol} (harmless if already gone): ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
     }
   }
 
