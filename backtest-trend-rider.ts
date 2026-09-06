@@ -180,6 +180,9 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
   let position: TrendRiderPosition | null = null
   const NOTIONAL = 1000 // fixed notional per trade for consistent USDT PnL comparison
   const funnelTally = new Map<string, number>()
+  let graftSniperFires = 0
+  let graftConfirmFails = 0
+  let graftEntries = 0
 
   // Need enough lookback before we can evaluate; start where structureWindow is satisfied
   const minStart = cfg.structureWindow + cfg.swingLookback * 2 + 5
@@ -236,15 +239,23 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
 
     // EXPERIMENTAL sniper graft (--sniper-trigger): a sniper long replaces
     // the pullback + rejection + age entry gates (the scarcity source proven
-    // by the funnel: 79% no_clear_structure). Structure direction, 0.5
-    // strength, and the daily regime gate still required. Management after
-    // entry is 100% rider machinery (structure stop, chandelier, breakeven).
+    // by the funnel: 79% no_clear_structure). v2: the swing-structure
+    // detector itself is dropped too (10/10 confirm fails — structure never
+    // confirms at exhaustion moments by definition). Kept: signal-TF EMA50
+    // alignment + ADX floor + daily regime gate. Management after entry is
+    // 100% rider machinery (structure stop, chandelier, breakeven).
     let graftEnter: { side: "long"; price: number; confidence: number } | null = null
     if (args.sniperTrigger && !position && entrySlice.length >= 60) {
       const gSnap = computeSnapshot(entrySlice, { emaFast: 9, emaSlow: 21, rsiPeriod: 14, atrPeriod: 14 })
       const gSig = detectSniper(entrySlice, gSnap, 0)
       if (gSig.direction === "long" && gSig.confidence >= args.sniperFloor) {
-        const gState = detectTrendState(signalSlice.length ? signalSlice : entrySlice, null, cfg)
+        graftSniperFires++
+        const sSlice = signalSlice.length ? signalSlice : entrySlice
+        const sCloses = sSlice.map((cc) => cc.close)
+        const sEmaArr = ema(sCloses, cfg.emaSlowPeriod)
+        const sAdxArr = adx(sSlice, cfg.adxPeriod)
+        const sAligned = sCloses[sCloses.length - 1] > sEmaArr[sEmaArr.length - 1]
+        const sAdxOk = (sAdxArr[sAdxArr.length - 1] ?? 0) >= cfg.adxMinFloor
         let regimeOk = true
         if (regimeSlice.length >= cfg.regimeEmaPeriod + cfg.adxPeriod) {
           const rCl = regimeSlice.map((cc) => cc.close)
@@ -253,8 +264,11 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
           const rEmaArr = ema(rCl, cfg.regimeEmaPeriod)
           regimeOk = rLastAdx >= cfg.regimeAdxMin && rCl[rCl.length - 1] > rEmaArr[rEmaArr.length - 1]
         }
-        if (gState.direction === "long" && gState.strength >= 0.5 && regimeOk) {
+        if (sAligned && sAdxOk && regimeOk) {
           graftEnter = { side: "long", price: entrySlice[entrySlice.length - 1].close, confidence: gSig.confidence }
+          graftEntries++
+        } else {
+          graftConfirmFails++
         }
       }
     }
@@ -278,14 +292,17 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
       const lastAtrAtEntry = atrArr[atrArr.length - 1] || 0
       const stateNow = detectTrendState(signalSlice.length ? signalSlice : entrySlice, null, cfg)
 
-      if (stateNow.structureStopPrice == null) {
+      if (stateNow.structureStopPrice == null && !graftEnter) {
         continue // should not happen since entry was validated, but guard anyway
       }
 
-      const initialStop =
-        eside === "long"
-          ? stateNow.structureStopPrice - lastAtrAtEntry * cfg.atrStopBuffer
-          : stateNow.structureStopPrice + lastAtrAtEntry * cfg.atrStopBuffer
+      // Graft entries have no structure stop (none exists at exhaustion):
+      // 2x entry-ATR stop. The chandelier/breakeven trail takes over after.
+      const initialStop = graftEnter
+        ? eprice - lastAtrAtEntry * 2
+        : eside === "long"
+          ? stateNow.structureStopPrice! - lastAtrAtEntry * cfg.atrStopBuffer
+          : stateNow.structureStopPrice! + lastAtrAtEntry * cfg.atrStopBuffer
 
       // Diagnostic capture (step 1): ADX + regime + trend age at entry
       const entryAdxArr = adx(signalSlice.length ? signalSlice : entrySlice, cfg.adxPeriod)
@@ -341,6 +358,9 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
     for (const [reason, count] of [...funnelTally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)) {
       console.log(`    ${String(count).padStart(5)} (${((count / total) * 100).toFixed(1)}%)  ${reason}`)
     }
+  }
+  if (funnel && args.sniperTrigger) {
+    console.log(`  GRAFT: sniper_fires=${graftSniperFires} confirm_fails=${graftConfirmFails} entries=${graftEntries}`)
   }
 
   return trades
