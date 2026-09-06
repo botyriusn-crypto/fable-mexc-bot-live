@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { Client } from "pg"
+import { requireAuth } from "@/lib/auth"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 300
@@ -7,6 +8,10 @@ export const maxDuration = 300
 const TABLES = ["bot_config", "grid_configs", "trades", "trade_features", "ml_model", "classifier_decisions", "ai_recommendations"]
 
 export async function POST(req: Request) {
+  // Defense-in-depth: this endpoint can OVERWRITE the production database.
+  // Enforce auth here in addition to the central middleware.
+  const authError = await requireAuth(req)
+  if (authError) return authError
   const { sourceUrl } = await req.json()
   if (!sourceUrl?.startsWith("postgres")) return NextResponse.json({ error: "bad source url" }, { status: 400 })
   const src = new Client({ connectionString: sourceUrl, ssl: { rejectUnauthorized: false } })

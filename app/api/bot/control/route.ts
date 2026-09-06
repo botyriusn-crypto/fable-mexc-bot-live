@@ -5,11 +5,16 @@ import { eq, sql } from "drizzle-orm"
 import { getConfig, closePosition, stopRealtimeEngine, initRealtimeEngine, runTick } from "@/lib/engine"
 import { teardownGrid, getGridConfigs } from "@/lib/grid"
 import { fetchTicker } from "@/lib/mexc/public"
+import { requireAuth } from "@/lib/auth"
 
 export const dynamic = "force-dynamic"
 
 // Actions: start | stop | close_position | reset_paper | set_mode
 export async function POST(request: Request) {
+  // Defense-in-depth: this endpoint controls the live bot. Enforce auth here in
+  // addition to the central middleware.
+  const authError = await requireAuth(request)
+  if (authError) return authError
   try {
     const body = (await request.json()) as { action: string; mode?: string; positionId?: number }
 
