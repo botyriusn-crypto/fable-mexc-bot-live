@@ -159,6 +159,72 @@ export async function placeMarketOrder(opts: {
   })
 }
 
+// ── Native (exchange-side) stop-loss ──────────────────────────────
+// A reduce-only price-triggered order that lives ON Gate.io, so the stop
+// still fires if the bot process is down or a tick is delayed. This is a
+// defense-in-depth backstop; the engine's soft stop remains in charge of
+// normal exits.
+//
+// Gate.io price-triggered order (/futures/usdt/price_orders):
+//   trigger.rule: 1 = trigger when price >= trigger.price, 2 = when <=
+//   initial.size: signed contracts — negative closes a long (sell),
+//                 positive closes a short (buy); reduce_only guarantees
+//                 it can only ever reduce, never flip, the position.
+// For a LONG position the stop fires as price falls (price <= stop) -> rule 2,
+// closing with a negative (sell) size. For a SHORT position it fires as price
+// rises (price >= stop) -> rule 1, closing with a positive (buy) size.
+export function buildGateStopLossRequest(opts: {
+  symbol: string
+  positionSide: "long" | "short"
+  triggerPrice: number
+  contracts: number // positive integer contract count
+}): Record<string, unknown> {
+  const isLong = opts.positionSide === "long"
+  const size = isLong ? -opts.contracts : opts.contracts
+  const rule = isLong ? 2 : 1
+  return {
+    initial: {
+      contract: opts.symbol,
+      size,
+      price: "0", // market execution once triggered
+      tif: "ioc",
+      reduce_only: true,
+    },
+    trigger: {
+      strategy_type: 0, // price trigger
+      price_type: 0, // last price
+      price: String(opts.triggerPrice),
+      rule,
+    },
+  }
+}
+
+export async function placeStopLoss(opts: {
+  symbol: string
+  positionSide: "long" | "short"
+  stopPrice: number
+  volume: number
+  leverage: number
+}): Promise<unknown> {
+  const spec = await getGateSpec(opts.symbol)
+  const contracts = roundGateQty(opts.volume, spec)
+  const triggerPrice = roundGatePrice(opts.stopPrice, spec)
+  return privateRequest(
+    "POST",
+    "/futures/usdt/price_orders",
+    buildGateStopLossRequest({
+      symbol: opts.symbol,
+      positionSide: opts.positionSide,
+      triggerPrice,
+      contracts,
+    }),
+  )
+}
+
+export async function cancelStopLoss(orderId: string, _symbol: string): Promise<unknown> {
+  return privateRequest("DELETE", `/futures/usdt/price_orders/${orderId}`)
+}
+
 export async function getAccountAssets(): Promise<unknown> {
   return privateRequest("GET", "/futures/usdt/accounts")
 }

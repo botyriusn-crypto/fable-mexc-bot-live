@@ -64,6 +64,15 @@ export interface ConfirmedFill {
   confirmed: boolean    // true iff a real fill price was read back
 }
 
+// Result of placing a native (exchange-side) stop-loss. `orderId` is the
+// venue's trigger/plan order id when it returns one (MEXC, Gate); it is ""
+// for Bybit, which attaches the stop to the position itself and auto-cancels
+// it on close (nothing to track). `placed` is true when the venue accepted it.
+export interface StopLossResult {
+  orderId: string
+  placed: boolean
+}
+
 // ── MEXC mappers (already near-canonical; just coerce numbers) ────
 
 function mapMexcAssets(raw: any): AccountAsset[] {
@@ -298,6 +307,22 @@ export interface ExchangeClient {
   cancelOrders(orderIds: string[]): Promise<unknown>
   getAccountAssets(): Promise<AccountAsset[]>
   getOpenPositions(symbol?: string): Promise<OpenPosition[]>
+
+  // Native (exchange-side) reduce-only stop-loss. Defense-in-depth backstop
+  // placed at entry so the stop fires even if the bot process is down; the
+  // engine's soft stop still drives normal exits.
+  placeStopLoss(opts: {
+    symbol: string
+    positionSide: "long" | "short"
+    stopPrice: number
+    volume: number
+    leverage: number
+  }): Promise<StopLossResult>
+  cancelStopLoss(opts: {
+    symbol: string
+    positionSide: "long" | "short"
+    orderId: string
+  }): Promise<void>
 }
 
 export function getExchangeClient(exchange: Exchange): ExchangeClient {
@@ -319,6 +344,13 @@ export function getExchangeClient(exchange: Exchange): ExchangeClient {
         cancelOrders: GateioPrivate.cancelOrders,
         getAccountAssets: async () => mapGateAssets(await GateioPrivate.getAccountAssets()),
         getOpenPositions: async (symbol) => mapGatePositions(await GateioPrivate.getOpenPositions(symbol)),
+        placeStopLoss: async (opts) => {
+          const raw: any = await GateioPrivate.placeStopLoss(opts)
+          return { orderId: String(raw?.id ?? ""), placed: true }
+        },
+        cancelStopLoss: async (opts) => {
+          await GateioPrivate.cancelStopLoss(opts.orderId, opts.symbol)
+        },
       }
     }
     case "bybit": {
@@ -339,6 +371,14 @@ export function getExchangeClient(exchange: Exchange): ExchangeClient {
         cancelOrders: BybitPrivate.cancelOrders,
         getAccountAssets: async () => mapBybitAssets(await BybitPrivate.getAccountAssets()),
         getOpenPositions: async (symbol) => mapBybitPositions(await BybitPrivate.getOpenPositions(symbol)),
+        placeStopLoss: async (opts) => {
+          // Bybit attaches the stop to the position; no order id is returned.
+          await BybitPrivate.placeStopLoss(opts)
+          return { orderId: "", placed: true }
+        },
+        cancelStopLoss: async (opts) => {
+          await BybitPrivate.cancelStopLoss(opts.orderId, opts.symbol)
+        },
       }
     }
     case "mexc":
@@ -359,6 +399,14 @@ export function getExchangeClient(exchange: Exchange): ExchangeClient {
         cancelOrders: MexcPrivate.cancelOrders,
         getAccountAssets: async () => mapMexcAssets(await MexcPrivate.getAccountAssets()),
         getOpenPositions: async (symbol) => mapMexcPositions(await MexcPrivate.getOpenPositions(symbol)),
+        placeStopLoss: async (opts) => {
+          // MEXC plan order returns the trigger order id in `data`.
+          const raw: any = await MexcPrivate.placeStopLoss(opts)
+          return { orderId: String(raw?.data ?? ""), placed: true }
+        },
+        cancelStopLoss: async (opts) => {
+          await MexcPrivate.cancelStopLoss(opts.orderId, opts.symbol)
+        },
       }
     }
   }

@@ -98,6 +98,68 @@ export async function placeMarketOrder(opts: {
   return result
 }
 
+// ── Native (exchange-side) stop-loss ──────────────────────────────
+// A reduce-only trigger/plan order that lives ON MEXC, so the stop still
+// fires if the bot process is down or a tick is delayed. This is a
+// defense-in-depth backstop; the engine's soft stop remains in charge of
+// normal exits.
+//
+// MEXC plan order (/planorder/place):
+//   triggerType: 1 = trigger when price >= triggerPrice, 2 = when <=
+//   side: 4 = close long, 2 = close short
+//   orderType: 5 = market (execute at market once triggered)
+//   trend: 1 = latest price   openType: 1 = isolated
+// For a LONG position the stop fires as price falls (price <= stop) -> type 2.
+// For a SHORT position it fires as price rises (price >= stop) -> type 1.
+export function buildMexcStopLossRequest(opts: {
+  symbol: string
+  positionSide: "long" | "short"
+  triggerPrice: number
+  vol: number
+  leverage: number
+}): Record<string, unknown> {
+  const isLong = opts.positionSide === "long"
+  return {
+    symbol: opts.symbol,
+    triggerPrice: opts.triggerPrice,
+    triggerType: isLong ? 2 : 1,
+    trend: 1,
+    orderType: 5,
+    side: isLong ? 4 : 2,
+    vol: opts.vol,
+    leverage: opts.leverage,
+    openType: 1,
+    priceProtect: "0",
+  }
+}
+
+export async function placeStopLoss(opts: {
+  symbol: string
+  positionSide: "long" | "short"
+  stopPrice: number
+  volume: number
+  leverage: number
+}): Promise<unknown> {
+  const vol = roundMexcQuantity(opts.symbol, opts.stopPrice, opts.volume)
+  const triggerPrice = roundMexcPrice(opts.symbol, opts.stopPrice)
+  return privateRequest(
+    "POST",
+    "/planorder/place",
+    buildMexcStopLossRequest({
+      symbol: opts.symbol,
+      positionSide: opts.positionSide,
+      triggerPrice,
+      vol,
+      leverage: opts.leverage,
+    }),
+  )
+}
+
+export async function cancelStopLoss(orderId: string, symbol: string): Promise<unknown> {
+  // MEXC plan-order cancel takes an array of { symbol, orderId }.
+  return privateRequest("POST", "/planorder/cancel", [{ symbol, orderId }] as unknown as Record<string, unknown>)
+}
+
 export async function getAccountAssets(): Promise<any> {
   try {
     const result: any = await privateRequest("GET", "/account/assets")
