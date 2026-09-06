@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Grid max-hold backtest: 240m (range) vs 60m (trend) regime-aware policy.
+Grid max-hold backtest: regime-aware hold policy + recenter modeling.
+
+Synced to live lib/grid.ts (Sep 2026): holds 720m/180m, 4% maker stop,
+recenter at 15% drift closing held at market ("manual" exit class).
 
 Pulls historical klines from Bybit (public API, no keys), replays the grid's
 mean-reversion cycle with the exact constants from lib/grid.ts / indicators.ts,
@@ -19,8 +22,8 @@ TAKER_FEE = 0.0002
 MAKER_FEE = 0.0000
 MAKER_STOP_LOSS_PCT = 0.04
 GRID_STOP_LOSS_PCT = 0.05
-MAKER_MAX_HOLD_MINUTES = 240
-TREND_MAX_HOLD_MINUTES = 60
+MAKER_MAX_HOLD_MINUTES = 720  # live lib/grid.ts (was 240)
+TREND_MAX_HOLD_MINUTES = 180  # live lib/grid.ts (was 60)
 GRID_ADX_THRESHOLD = 32
 EMA_FAST = 9
 EMA_SLOW = 21
@@ -189,6 +192,7 @@ def simulate(candles, max_hold_range, max_hold_trend, range_atr_mult, entry_filt
     closed_pnl: List[Tuple[float, float]] = []  # (close_time, pnl%) for flow gate
 
     warmup = ADX_PERIOD * 2 + 1
+    anchor = None  # ladder center; re-anchored whenever the book goes empty
     for i in range(warmup, len(candles)):
         c = candles[i]
         price = c["close"]
@@ -234,6 +238,19 @@ def simulate(candles, max_hold_range, max_hold_trend, range_atr_mult, entry_filt
                 closed_pnl.append((c["time"], pnl))
                 open_positions.remove(p)
 
+        # 3b. Recenter (live: 15% drift from ladder anchor): close held
+        # at market as "manual", wipe the book, re-anchor. This models the
+        # live "manual" exit class (recenter + pause closes).
+        if anchor is not None and anchor > 0:
+            if abs(price - anchor) / anchor >= RECENTER_DRIFT_PCT:
+                for p in list(open_positions):
+                    pnl = (price - p.entry) / p.entry * 100
+                    trades.append((pnl, "manual", (c["time"] - p.entry_time) / 60))
+                    closed_pnl.append((c["time"], pnl))
+                    open_positions.remove(p)
+                resting_buys = []
+                anchor = None
+
         # 4. Fill resting buys (placed in prior candles); TP checked next candle
         filled = [b for b in resting_buys if c["low"] <= b]
         for b in filled:
@@ -264,6 +281,8 @@ def simulate(candles, max_hold_range, max_hold_trend, range_atr_mult, entry_filt
             if in_flow and should_enter(entry_filter, ema_f[i], ema_s[i], price, adx_val):
                 new_buy = price - spacing
                 if new_buy > 0 and new_buy not in resting_buys:
+                    if not resting_buys and not open_positions:
+                        anchor = price
                     resting_buys.append(new_buy)
 
     if return_closed:
@@ -301,8 +320,10 @@ DEFAULT_BASKET = ["ENA_USDT", "HYPE_USDT", "XRP_USDT", "SOL_USDT", "WIF_USDT",
                  "LINK_USDT", "AVAX_USDT", "ARB_USDT", "OP_USDT", "TIA_USDT",
                  "SEI_USDT", "INJ_USDT", "APT_USDT", "NEAR_USDT", "ATOM_USDT"]
 
+HOLD_POLICIES = [(720, 180), (360, 90), (1440, 180), (720, 60)]
+
 def run_symbol(symbol, interval, mult, total):
-    """Run baseline vs 6h flow vs adaptive kill-switch (6h + meta gate)."""
+    """Fetch once; flow-gate policies (live holds) + max-hold sweep."""
     candles = fetch_klines(symbol, interval, total)
     if len(candles) < ADX_PERIOD * 2 + 2:
         return None
@@ -312,7 +333,11 @@ def run_symbol(symbol, interval, mult, total):
     base_net = sum(t[0] for t in apply_fees(base_trades))
     f6_net = sum(t[0] for t in apply_fees(f6_trades))
     adapt_net = sum(t[0] for t in adapt)
-    return base_net, f6_net, adapt_net, len(base_trades)
+    holds = []
+    for hr, ht in HOLD_POLICIES:
+        ht_trades = apply_fees(simulate(candles, hr, ht, mult, "none"))
+        holds.append(sum(t[0] for t in ht_trades))
+    return base_net, f6_net, adapt_net, len(base_trades), holds
 
 WINDOWS = [(2880, "30d"), (5760, "60d"), (8640, "90d")]
 
@@ -329,8 +354,8 @@ def main():
 
     for total, wlabel in WINDOWS:
         print(f"\n--- Window: {wlabel} ({total} candles) ---")
-        print(f"{'symbol':12s} {'base%':>9s} {'f6h%':>9s} {'adapt%':>9s} {'d6':>8s} {'dadapt':>8s}")
-        print("-" * 60)
+        print(f"{'symbol':12s} {'base%':>9s} {'f6h%':>9s} {'adapt%':>9s} {'d6':>8s} {'dadapt':>8s} {'h720/180':>9s} {'h360/90':>9s} {'h1440/180':>10s} {'h720/60':>9s}")
+        print("-" * 105)
 
         rows = []
         for sym in symbols:
@@ -342,12 +367,12 @@ def main():
             if r is None:
                 print(f"{sym:12s}  insufficient data")
                 continue
-            base_net, f6_net, adapt_net, n = r
+            base_net, f6_net, adapt_net, n, holds = r
             d6 = f6_net - base_net
             dadapt = adapt_net - base_net
-            rows.append((sym, base_net, f6_net, adapt_net, d6, dadapt))
-            all_rows.append((wlabel, sym, base_net, f6_net, adapt_net, d6, dadapt))
-            print(f"{sym:12s} {base_net:9.2f} {f6_net:9.2f} {adapt_net:9.2f} {d6:+8.2f} {dadapt:+8.2f}")
+            rows.append((sym, base_net, f6_net, adapt_net, d6, dadapt, holds))
+            all_rows.append((wlabel, sym, base_net, f6_net, adapt_net, d6, dadapt, holds))
+            print(f"{sym:12s} {base_net:9.2f} {f6_net:9.2f} {adapt_net:9.2f} {d6:+8.2f} {dadapt:+8.2f} {holds[0]:9.2f} {holds[1]:9.2f} {holds[2]:10.2f} {holds[3]:9.2f}")
 
         if rows:
             n = len(rows)
@@ -356,11 +381,14 @@ def main():
             avg_adapt = sum(r[3] for r in rows) / n
             avg_d6 = sum(r[4] for r in rows) / n
             avg_dadapt = sum(r[5] for r in rows) / n
-            print("-" * 60)
-            print(f"{'AVERAGE':12s} {avg_base:9.2f} {avg_f6:9.2f} {avg_adapt:9.2f} {avg_d6:+8.2f} {avg_dadapt:+8.2f}")
+            avg_h = [sum(r[6][j] for r in rows) / n for j in range(len(HOLD_POLICIES))]
+            print("-" * 105)
+            print(f"{'AVERAGE':12s} {avg_base:9.2f} {avg_f6:9.2f} {avg_adapt:9.2f} {avg_d6:+8.2f} {avg_dadapt:+8.2f} {avg_h[0]:9.2f} {avg_h[1]:9.2f} {avg_h[2]:10.2f} {avg_h[3]:9.2f}")
             wins6 = sum(1 for r in rows if r[4] > 0)
             winsadapt = sum(1 for r in rows if r[5] > 0)
             print(f"  6h alone improved {wins6}/{n} | adaptive improved {winsadapt}/{n}")
+            best_h = max(range(len(HOLD_POLICIES)), key=lambda j: avg_h[j])
+            print(f"  best hold: {HOLD_POLICIES[best_h][0]}/{HOLD_POLICIES[best_h][1]} ({avg_h[best_h]:.2f}%)")
 
     # Cross-window summary
     print("\n" + "=" * 78)
