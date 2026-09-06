@@ -151,6 +151,10 @@ export const positions = pgTable("positions", {
   remainingQuantity: doublePrecision("remaining_quantity"),
   partialExitCount: integer("partial_exit_count").notNull().default(0),
   status: text("status").notNull().default("open"), // 'open' | 'closed'
+  // true = entry fill was confirmed against the exchange (or paper mode);
+  // false = live order placed but the actual fill price/qty could not be read
+  // back, so entryPrice/quantity fall back to the intended values.
+  fillConfirmed: boolean("fill_confirmed").notNull().default(true),
   openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
   closedAt: timestamp("closed_at", { withTimezone: true }),
 })
@@ -173,6 +177,10 @@ export const trades = pgTable("trades", {
   openedAt: timestamp("opened_at", { withTimezone: true }),
   closedAt: timestamp("closed_at", { withTimezone: true }).notNull().defaultNow(),
   live: boolean("live").notNull().default(false),
+  // true = exit fill was confirmed against the exchange (or paper mode);
+  // false = live exit order placed but the actual fill price could not be read
+  // back, so exitPrice falls back to the intended price.
+  fillConfirmed: boolean("fill_confirmed").notNull().default(true),
 })
 
 export const equitySnapshots = pgTable("equity_snapshots", {
