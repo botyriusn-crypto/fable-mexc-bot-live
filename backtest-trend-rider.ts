@@ -7,7 +7,8 @@
 //   tsx backtest-trend-rider.ts --symbol WLD_USDT --timeframe Min15 --days 10 --leverage 3
 
 import { evaluateTrendRider, detectTrendState, DEFAULT_TREND_RIDER_CONFIG, type TrendRiderPosition, type TrendRiderConfig } from "./lib/trend-rider"
-import { atr, adx } from "./lib/indicators"
+import { atr, adx, ema, computeSnapshot } from "./lib/indicators"
+import { detectSniper } from "./lib/sniper"
 import type { Candle } from "./lib/mexc/public"
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -31,6 +32,8 @@ interface CliArgs {
   regimeTf: string
   adxFloor: number
   sweep: boolean
+  sniperTrigger: boolean
+  sniperFloor: number
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -54,6 +57,8 @@ function parseArgs(argv: string[]): CliArgs {
     regimeTf: "Day1",
     adxFloor: 22,
     sweep: false,
+    sniperTrigger: false,
+    sniperFloor: 0.58,
   }
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i]
@@ -81,6 +86,8 @@ function parseArgs(argv: string[]): CliArgs {
       case "--htf-swing": a.htfSwing = v === "true"; i++; break
       case "--regime-tf": a.regimeTf = v; i++; break
       case "--sweep": a.sweep = true; break
+      case "--sniper-trigger": a.sniperTrigger = true; break
+      case "--sniper-floor": a.sniperFloor = Number(v); i++; break
     }
   }
   return a
@@ -157,7 +164,7 @@ interface TradeRecord {
   entryTrendAge: number
 }
 
-function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCandles: Candle[], args: CliArgs): TradeRecord[] {
+function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCandles: Candle[], args: CliArgs, funnel = false): TradeRecord[] {
   const cfg: TrendRiderConfig = {
     ...DEFAULT_TREND_RIDER_CONFIG,
     minStrength: args.minStrength,
@@ -172,6 +179,7 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
   const trades: TradeRecord[] = []
   let position: TrendRiderPosition | null = null
   const NOTIONAL = 1000 // fixed notional per trade for consistent USDT PnL comparison
+  const funnelTally = new Map<string, number>()
 
   // Need enough lookback before we can evaluate; start where structureWindow is satisfied
   const minStart = cfg.structureWindow + cfg.swingLookback * 2 + 5
@@ -222,8 +230,41 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
     // For now, pass entrySlice to evaluateTrendRider so existing logic still works.
     const signal = evaluateTrendRider(entrySlice, signalSlice.length ? signalSlice : null, position, cfg, regimeSlice.length ? regimeSlice : null)
 
-    if (signal.action === "enter" && !position && signal.side && signal.price != null) {
-      const entryFillPrice = signal.side === "long" ? signal.price * (1 + args.slipPct) : signal.price * (1 - args.slipPct)
+    if (funnel && signal.action === "none" && !position) {
+      funnelTally.set(signal.reason, (funnelTally.get(signal.reason) ?? 0) + 1)
+    }
+
+    // EXPERIMENTAL sniper graft (--sniper-trigger): a sniper long replaces
+    // the pullback + rejection + age entry gates (the scarcity source proven
+    // by the funnel: 79% no_clear_structure). Structure direction, 0.5
+    // strength, and the daily regime gate still required. Management after
+    // entry is 100% rider machinery (structure stop, chandelier, breakeven).
+    let graftEnter: { side: "long"; price: number; confidence: number } | null = null
+    if (args.sniperTrigger && !position && entrySlice.length >= 60) {
+      const gSnap = computeSnapshot(entrySlice, { emaFast: 9, emaSlow: 21, rsiPeriod: 14, atrPeriod: 14 })
+      const gSig = detectSniper(entrySlice, gSnap, 0)
+      if (gSig.direction === "long" && gSig.confidence >= args.sniperFloor) {
+        const gState = detectTrendState(signalSlice.length ? signalSlice : entrySlice, null, cfg)
+        let regimeOk = true
+        if (regimeSlice.length >= cfg.regimeEmaPeriod + cfg.adxPeriod) {
+          const rCl = regimeSlice.map((cc) => cc.close)
+          const rAdxArr = adx(regimeSlice, cfg.adxPeriod)
+          const rLastAdx = rAdxArr[rAdxArr.length - 1] ?? 0
+          const rEmaArr = ema(rCl, cfg.regimeEmaPeriod)
+          regimeOk = rLastAdx >= cfg.regimeAdxMin && rCl[rCl.length - 1] > rEmaArr[rEmaArr.length - 1]
+        }
+        if (gState.direction === "long" && gState.strength >= 0.5 && regimeOk) {
+          graftEnter = { side: "long", price: entrySlice[entrySlice.length - 1].close, confidence: gSig.confidence }
+        }
+      }
+    }
+
+    const nativeEnter = signal.action === "enter" && signal.side && signal.price != null
+    if ((nativeEnter || graftEnter) && !position) {
+      const eside = graftEnter ? graftEnter.side : signal.side!
+      const eprice = graftEnter ? graftEnter.price : signal.price!
+      const ereason = graftEnter ? `sniper_graft(conf=${graftEnter.confidence.toFixed(2)})` : signal.reason
+      const entryFillPrice = eside === "long" ? eprice * (1 + args.slipPct) : eprice * (1 - args.slipPct)
 
       // Derive the REAL initial stop directly from structure state at entry —
       // do not rely on a discarded follow-up evaluation. Must use the same
@@ -242,7 +283,7 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
       }
 
       const initialStop =
-        signal.side === "long"
+        eside === "long"
           ? stateNow.structureStopPrice - lastAtrAtEntry * cfg.atrStopBuffer
           : stateNow.structureStopPrice + lastAtrAtEntry * cfg.atrStopBuffer
 
@@ -255,11 +296,11 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
         const rLastAdx = rAdx[rAdx.length - 1] ?? 0
         entryRegime = rLastAdx >= cfg.regimeAdxMin ? "trending" : "ranging"
       }
-      const ageMatch = /age=(\d+)/.exec(signal.reason)
+      const ageMatch = /age=(\d+)/.exec(ereason)
       entryTrendAge = ageMatch ? Number(ageMatch[1]) : 0
 
       position = {
-        side: signal.side,
+        side: eside,
         entryPrice: entryFillPrice,
         entryTime: entryTime,
         stopPrice: initialStop,
@@ -291,6 +332,14 @@ function runBacktest(entryCandles: Candle[], signalCandles: Candle[], regimeCand
         entryTrendAge,
       })
       position = null
+    }
+  }
+
+  if (funnel && funnelTally.size > 0) {
+    console.log("  GATE FUNNEL (blocked-entry reasons, top 10):")
+    const total = [...funnelTally.values()].reduce((a, b) => a + b, 0)
+    for (const [reason, count] of [...funnelTally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)) {
+      console.log(`    ${String(count).padStart(5)} (${((count / total) * 100).toFixed(1)}%)  ${reason}`)
     }
   }
 
@@ -491,7 +540,7 @@ async function main() {
     return
   }
 
-  const trades = runBacktest(entryCandles, signalCandles, regimeCandles, args)
+  const trades = runBacktest(entryCandles, signalCandles, regimeCandles, args, true)
   report(trades, `TREND RIDER [${args.symbol} entry=${args.entryTf} signal=${args.signalTf} ${args.days}d]`, 1000)
 }
 
