@@ -289,11 +289,19 @@ export async function openPosition(
 
   const quantity = (sizeUsdt * cfg.leverage) / price
 
+  // Effective fill values. In paper mode these stay at the intended price/qty.
+  // In live mode we place the order AND confirm the actual fill, so the DB
+  // records what really executed (drives correct P&L and SL/TP), falling back
+  // to intended values only when the fill can't be confirmed.
+  let entryPrice = price
+  let filledQty = quantity
+  let fillConfirmed = true
+
   if (cfg.mode === "live") {
-    try {
-      const tickerCache = new Map()
     const exchange = getExchangeClient(cfg.exchange as Exchange)
-      await exchange.placeMarketOrder({
+    let fill
+    try {
+      fill = await exchange.placeMarketOrderConfirmed({
         symbol: cfg.symbol,
         side: direction === "long" ? 1 : 3,
         volume: quantity,
@@ -303,27 +311,52 @@ export async function openPosition(
       await log("error", `LIVE order failed: ${err instanceof Error ? err.message : String(err)}`)
       return 0
     }
+    if (fill.confirmed && fill.avgPrice > 0) {
+      entryPrice = fill.avgPrice
+      // Conservative quantity handling: exchanges report fill volume in
+      // venue-native units (contracts vs coins, contract multipliers) which we
+      // cannot verify offline. Only adopt the reported volume when it is within
+      // a sane ratio of what we intended; otherwise keep the intended qty and
+      // warn, so a unit mismatch can't silently corrupt position sizing.
+      const ratio = quantity > 0 ? fill.filledVolume / quantity : 0
+      if (fill.filledVolume > 0 && ratio >= 0.5 && ratio <= 1.5) {
+        filledQty = fill.filledVolume
+      } else if (fill.filledVolume > 0) {
+        await log(
+          "info",
+          `Fill volume ${fill.filledVolume} differs from intended ${quantity.toFixed(6)} beyond safe ratio; keeping intended qty for accounting`,
+        )
+      }
+    } else {
+      fillConfirmed = false
+      await log(
+        "error",
+        `LIVE entry fill unconfirmed (order ${fill.orderId || "unknown"}); recording intended price ${price} — P&L/SL/TP for this position may be inaccurate`,
+      )
+    }
   }
 
-  const openFee = sizeUsdt * cfg.leverage * TAKER_FEE
+  // Fee on the actual executed notional (falls back to intended when unconfirmed).
+  const openFee = filledQty * entryPrice * TAKER_FEE
 
   await db.insert(positions).values({
     symbol: cfg.symbol,
     timeframe: cfg.timeframe,
     side: direction,
-    entryPrice: price,
+    entryPrice,
     sizeUsdt,
-    quantity,
+    quantity: filledQty,
     leverage: cfg.leverage,
     stopLoss,
     takeProfit,
-    highestPrice: price,
-    lowestPrice: price,
+    highestPrice: entryPrice,
+    lowestPrice: entryPrice,
     entryConfidence: confidence,
     entryFeatures: features as unknown as Record<string, number>,
     atrAtEntry: snap.atr,
     strategy,
     rangeTarget,
+    fillConfirmed,
   })
 
   await db
@@ -333,7 +366,7 @@ export async function openPosition(
 
   await log(
     "trade",
-    `Opened ${direction.toUpperCase()} [${strategy}] @ ${price.toFixed(2)} | size ${sizeUsdt.toFixed(2)} USDT x${cfg.leverage} | SL ${stopLoss != null ? stopLoss.toFixed(2) : "none"} TP ${takeProfit != null ? takeProfit.toFixed(2) : "none"} | confidence ${(confidence * 100).toFixed(1)}%`,
+    `Opened ${direction.toUpperCase()} [${strategy}] @ ${entryPrice.toFixed(2)}${fillConfirmed ? "" : " (unconfirmed)"} | size ${sizeUsdt.toFixed(2)} USDT x${cfg.leverage} | SL ${stopLoss != null ? stopLoss.toFixed(2) : "none"} TP ${takeProfit != null ? takeProfit.toFixed(2) : "none"} | confidence ${(confidence * 100).toFixed(1)}%`,
   )
 
   return sizeUsdt
@@ -348,10 +381,16 @@ export async function takePartialProfit(
   const remainingQty = position.remainingQuantity ?? position.quantity
   const closeQty = remainingQty * fraction
 
+  // Effective exit price. In paper mode it stays at the intended price; in live
+  // mode we confirm the actual close fill so realized P&L reflects reality.
+  let effExitPrice = exitPrice
+  let fillConfirmed = true
+
   if (cfg.mode === "live") {
+    const exchange = getExchangeClient(cfg.exchange as Exchange)
+    let fill
     try {
-      const exchange = getExchangeClient(cfg.exchange as Exchange)
-      await exchange.placeMarketOrder({
+      fill = await exchange.placeMarketOrderConfirmed({
         symbol: position.symbol,
         side: position.side === "long" ? 4 : 2,
         volume: closeQty,
@@ -362,10 +401,19 @@ export async function takePartialProfit(
       await log("error", `LIVE partial close failed: ${errMsg}`)
       return
     }
+    if (fill.confirmed && fill.avgPrice > 0) {
+      effExitPrice = fill.avgPrice
+    } else {
+      fillConfirmed = false
+      await log(
+        "error",
+        `LIVE partial-close fill unconfirmed (order ${fill.orderId || "unknown"}); recording intended exit ${exitPrice} — realized P&L may be inaccurate`,
+      )
+    }
   }
 
   const dir = position.side === "long" ? 1 : -1
-  const grossPnl = (exitPrice - position.entryPrice) * dir * closeQty
+  const grossPnl = (effExitPrice - position.entryPrice) * dir * closeQty
   const closeFee = position.sizeUsdt * position.leverage * TAKER_FEE * fraction
   const netPnl = grossPnl - closeFee
 
@@ -374,7 +422,7 @@ export async function takePartialProfit(
     symbol: position.symbol,
     side: position.side,
     entryPrice: position.entryPrice,
-    exitPrice,
+    exitPrice: effExitPrice,
     sizeUsdt: position.sizeUsdt * fraction,
     leverage: position.leverage,
     pnl: netPnl,
@@ -384,6 +432,8 @@ export async function takePartialProfit(
     entryConfidence: position.entryConfidence,
     openedAt: position.openedAt,
     partial: true,
+    live: cfg.mode === "live",
+    fillConfirmed,
   })
 
   await db
@@ -403,7 +453,7 @@ export async function takePartialProfit(
 
   await log(
     "trade",
-    `Partial close ${position.side.toUpperCase()} @ ${exitPrice.toFixed(2)} | ${(fraction * 100).toFixed(0)}% of position | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT | SL → break-even`,
+    `Partial close ${position.side.toUpperCase()} @ ${effExitPrice.toFixed(2)}${fillConfirmed ? "" : " (unconfirmed)"} | ${(fraction * 100).toFixed(0)}% of position | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT | SL → break-even`,
   )
 }
 
@@ -413,11 +463,16 @@ export async function closePosition(
   reason: "tp" | "sl" | "trail" | "signal" | "manual" | "partial",
   cfg: BotConfig,
 ): Promise<void> {
+  // Effective exit price. In paper mode it stays at the intended price; in live
+  // mode we confirm the actual close fill so realized P&L reflects reality.
+  let effExitPrice = exitPrice
+  let fillConfirmed = true
+
   if (cfg.mode === "live") {
-    try {
-      const tickerCache = new Map()
     const exchange = getExchangeClient(cfg.exchange as Exchange)
-      await exchange.placeMarketOrder({
+    let fill
+    try {
+      fill = await exchange.placeMarketOrderConfirmed({
         symbol: position.symbol,
         side: position.side === "long" ? 4 : 2,
         volume: position.remainingQuantity ?? position.quantity,
@@ -438,9 +493,18 @@ export async function closePosition(
       await log("error", `LIVE close failed: ${errMsg}`)
       return
     }
+    if (fill.confirmed && fill.avgPrice > 0) {
+      effExitPrice = fill.avgPrice
+    } else {
+      fillConfirmed = false
+      await log(
+        "error",
+        `LIVE close fill unconfirmed (order ${fill.orderId || "unknown"}); recording intended exit ${exitPrice} — realized P&L may be inaccurate`,
+      )
+    }
   }
 
-  const grossPnl = unrealizedPnl(position, exitPrice)
+  const grossPnl = unrealizedPnl(position, effExitPrice)
   const remainingQty = position.remainingQuantity ?? position.quantity
   const remainingSize = position.sizeUsdt * (remainingQty / position.quantity)
   const closeFee = remainingSize * position.leverage * TAKER_FEE
@@ -454,7 +518,7 @@ export async function closePosition(
       symbol: position.symbol,
       side: position.side,
       entryPrice: position.entryPrice,
-      exitPrice,
+      exitPrice: effExitPrice,
       sizeUsdt: remainingSize,
       leverage: position.leverage,
       pnl: netPnl,
@@ -463,6 +527,8 @@ export async function closePosition(
       strategy: position.strategy ?? "trend",
       entryConfidence: position.entryConfidence,
       openedAt: position.openedAt,
+      live: cfg.mode === "live",
+      fillConfirmed,
     })
     .returning()
 
@@ -478,7 +544,7 @@ export async function closePosition(
 
   await log(
     "trade",
-    `Closed ${position.side.toUpperCase()} @ ${exitPrice.toFixed(2)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT (${pnlPct.toFixed(2)}%) | reason: ${reason.toUpperCase()}`,
+    `Closed ${position.side.toUpperCase()} @ ${effExitPrice.toFixed(2)}${fillConfirmed ? "" : " (unconfirmed)"} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT (${pnlPct.toFixed(2)}%) | reason: ${reason.toUpperCase()}`,
   )
 
   // Learning loop: every closed trade trains the model dedicated to its strategy
