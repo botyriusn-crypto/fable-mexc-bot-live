@@ -1,5 +1,5 @@
 import crypto from "crypto"
-import { roundMexcQuantity, roundMexcPrice } from "./precision"
+import { roundMexcQuantity, roundMexcPrice, ensureSpecsLoaded } from "./precision"
 
 const BASE_URL = "https://api.mexc.com/api/v1/private"
 
@@ -79,7 +79,32 @@ export async function placeMarketOrder(opts: {
   leverage: number
   price?: number
 }): Promise<unknown> {
+  // Refuse to size an order unless we have VERIFIED contract specs for this
+  // symbol. This throws on the generic fallback path (wrong contractSize can
+  // mis-size a live order by orders of magnitude).
+  const spec = await ensureSpecsLoaded(opts.symbol, opts.price ?? 0)
+
   const vol = roundMexcQuantity(opts.symbol, opts.price ?? 0, opts.volume)
+
+  // Post-rounding sanity checks: a non-positive contract count or a
+  // sub-1-USDT notional means the intended size collapsed below the
+  // exchange minimum -- refuse rather than fire a junk order.
+  if (!Number.isFinite(vol) || vol <= 0) {
+    throw new Error(
+      `Cannot place order for ${opts.symbol}: computed volume ${vol} is not a positive contract count.`,
+    )
+  }
+  // Notional check only when a price is known. Many close/reduce callers
+  // intentionally omit price (side 2/4), and we must not block those --
+  // enforcing a min-notional on a price-less order would break live exits.
+  if (opts.price != null && opts.price > 0) {
+    const notional = vol * spec.contractSize * opts.price
+    if (!(notional >= 1)) {
+      throw new Error(
+        `Cannot place order for ${opts.symbol}: notional ${notional.toFixed(6)} USDT is below the 1 USDT minimum.`,
+      )
+    }
+  }
 
   if (opts.side === 1 || opts.side === 3) {
     const positionType: 1 | 2 = opts.side === 1 ? 1 : 2
