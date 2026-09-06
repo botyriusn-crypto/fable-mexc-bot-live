@@ -178,6 +178,53 @@ export async function placeMarketOrder(opts: {
   })
 }
 
+// ── Native (exchange-side) stop-loss ──────────────────────────────
+// Bybit attaches the stop-loss to the whole position via
+// /v5/position/trading-stop (tpslMode "Full"). The exchange holds the stop
+// server-side and auto-cancels it when the position closes, so there is no
+// separate order id to track. This is a defense-in-depth backstop that fires
+// even when the bot process is down; the engine's soft stop still drives
+// normal exits. positionIdx 0 = one-way mode (matches the rest of this client).
+export function buildBybitStopLossRequest(opts: {
+  symbol: string // already normalized (no underscore)
+  stopPrice: number
+}): Record<string, unknown> {
+  return {
+    category: "linear",
+    symbol: opts.symbol,
+    stopLoss: String(opts.stopPrice),
+    slTriggerBy: "MarkPrice",
+    tpslMode: "Full",
+    positionIdx: 0,
+  }
+}
+
+export async function placeStopLoss(opts: {
+  symbol: string
+  positionSide: "long" | "short"
+  stopPrice: number
+  volume: number
+  leverage: number
+}): Promise<unknown> {
+  const bs = toBybitSymbol(opts.symbol)
+  const tick = await getTickSize(bs)
+  const price = roundPrice(opts.stopPrice, tick)
+  return privateRequest("POST", "/position/trading-stop", buildBybitStopLossRequest({ symbol: bs, stopPrice: price }))
+}
+
+// Clearing the stop is setting stopLoss back to "0". Bybit also auto-cancels
+// the stop when the position closes, so this is best-effort.
+export async function cancelStopLoss(_orderId: string, symbol: string): Promise<unknown> {
+  const bs = toBybitSymbol(symbol)
+  return privateRequest("POST", "/position/trading-stop", {
+    category: "linear",
+    symbol: bs,
+    stopLoss: "0",
+    tpslMode: "Full",
+    positionIdx: 0,
+  })
+}
+
 export async function getAccountAssets(): Promise<unknown> {
   return privateRequest("GET", "/account/wallet-balance", {
     accountType: "UNIFIED",
