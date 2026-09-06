@@ -73,13 +73,18 @@ export function isKillSwitchActive(): boolean {
 }
 /** True if another trend position can be opened (count + not halted). */
 export function canOpenNewPosition(): boolean {
-  if (!_state) return true
+  // Fail closed: if the risk state has never been computed we do NOT know
+  // how many positions are open or whether trading is halted, so refuse to
+  // open rather than assume it is safe.
+  if (!_state) return false
   if (_state.tradingHalted) return false
   return _state.openPositionCount < RISK_LIMITS.maxOpenPositions()
 }
 /** USDT of additional margin permitted right now under the total-margin cap. */
 export function marginBudgetRemaining(): number {
-  return _state?.marginBudgetRemaining ?? Number.POSITIVE_INFINITY
+  // Fail closed: with no computed state, treat the remaining budget as 0
+  // (no additional margin permitted) instead of unlimited.
+  return _state?.marginBudgetRemaining ?? 0
 }
 
 function utcDayStart(now = new Date()): Date {

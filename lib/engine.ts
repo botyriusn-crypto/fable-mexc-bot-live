@@ -3,7 +3,7 @@ let _tickInProgress = false
 // Tick orchestration: data → features → ML-gated signal → exit management →
 // paper/live execution → model update → persistence.
 
-import { db } from "./db"
+import { db, pool } from "./db"
 import {
   botConfig,
   positions,
@@ -705,6 +705,11 @@ export async function runWebhookSignal(
     }
 
     await log("info", `Webhook ${action.toUpperCase()} signal accepted: ${confirmationReason}`)
+    // Refresh the portfolio risk state before opening. Unlike runTick(), the
+    // webhook entry path does not otherwise recompute it, so openPosition()'s
+    // risk gate would run against a stale (or, after a cold start, null and now
+    // fail-closed) state. Compute it fresh here for long/short entries.
+    await evaluatePortfolioRisk(cfg)
     await openPosition(cfg, action, snap, confidence, features, "webhook")
     return { status: "ok", detail: `${action} opened via webhook` }
   } catch (err) {
@@ -839,12 +844,43 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     return { status: "skipped", detail: "Tick already in progress" }
   }
   _tickInProgress = true
+  // Cross-process mutual exclusion. `_tickInProgress` only guards re-entrance
+  // within a SINGLE process; when more than one instance/machine runs the
+  // engine (e.g. multiple Fly machines, or an overlapping cron + webhook tick),
+  // two ticks could still make trade decisions concurrently and double-open.
+  // A Postgres session-level advisory lock serializes ticks across ALL
+  // processes sharing the database. We hold it on a dedicated client for the
+  // whole tick and release it in `finally`.
+  let lockClient: import("pg").PoolClient | null = null
+  let lockAcquired = false
   // The whole body runs inside try/finally so the reentrance lock is ALWAYS
   // released — on normal return, on any early return (bot stopped, kill switch),
   // and on any thrown exception. Previously the flag was cleared only on the
   // happy path, so a single early return or error left it stuck `true` forever,
   // making every subsequent tick bail out as "busy" and silently freezing the bot.
   try {
+    // Acquire the cross-process advisory lock before any trade decisions.
+    // pg_try_advisory_lock is non-blocking: if another process holds it we
+    // skip this tick rather than queue up behind it.
+    try {
+      lockClient = await pool.connect()
+      const res = await lockClient.query(
+        "SELECT pg_try_advisory_lock(hashtext('engine:runTick')) AS locked",
+      )
+      lockAcquired = res.rows[0]?.locked === true
+    } catch (err) {
+      if (lockClient) {
+        lockClient.release()
+        lockClient = null
+      }
+      await log("error", `Tick advisory-lock acquire failed: ${err instanceof Error ? err.message : String(err)}`)
+      return { status: "error", detail: "Advisory lock acquire failed" }
+    }
+    if (!lockAcquired) {
+      console.log("TICK SKIPPED: advisory lock held by another process")
+      return { status: "skipped", detail: "Tick already running on another process" }
+    }
+
     const cfg = await getConfig()
     await reconcilePositions(cfg)
     console.log("TICK: bot running"); if (cfg.status !== "running") return { status: "skipped", detail: "Bot is stopped" }
@@ -1521,6 +1557,19 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     await log("error", `Tick failed: ${message}`)
     return { status: "error", detail: message }
   } finally {
+    // Release the cross-process advisory lock (only if we acquired it) and
+    // return its dedicated client to the pool, then clear the in-process flag.
+    if (lockClient) {
+      try {
+        if (lockAcquired) {
+          await lockClient.query("SELECT pg_advisory_unlock(hashtext('engine:runTick'))")
+        }
+      } catch (err) {
+        await log("error", `Tick advisory-unlock failed: ${err instanceof Error ? err.message : String(err)}`)
+      } finally {
+        lockClient.release()
+      }
+    }
     _tickInProgress = false
   }
 }

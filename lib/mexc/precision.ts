@@ -147,10 +147,34 @@ export function getMexcSpec(symbol: string, price: number): MexcSymbolSpec {
 
 export function roundMexcQuantity(symbol: string, price: number, coinQuantity: number): number {
   const spec = getMexcSpec(symbol, price);
-  let vol = Math.round(coinQuantity / spec.contractSize);
+  // Floor (not round) contract count: rounding UP can size an order larger
+  // than the intended notional / available margin, so always round DOWN to
+  // the nearest whole contract. Bybit/Gate.io sizing already floors -- this
+  // brings MEXC in line.
+  let vol = Math.floor(coinQuantity / spec.contractSize);
   if (!Number.isFinite(vol) || vol < spec.minVol) vol = spec.minVol;
   if (vol > spec.maxVol) vol = spec.maxVol;
   return vol;
+}
+
+// Guard for the order-placement path: makes sure we have VERIFIED contract
+// specs (live MEXC data in the cache, or an explicit KNOWN_SPECS entry)
+// before an order is sized. The generic last-resort fallback in
+// getMexcSpecAsync/getMexcSpec silently assumes contractSize=1, which can be
+// off by orders of magnitude (e.g. AKE_USDT real contractSize is 1000) and
+// lead to catastrophically mis-sized live orders. Callers on the real
+// order path must await this and let it throw rather than trade blind.
+export async function ensureSpecsLoaded(symbol: string, price: number): Promise<MexcSymbolSpec> {
+  const spec = await getMexcSpecAsync(symbol, price);
+  // If, after the async fetch attempt, the symbol is present in neither the
+  // live cache nor the hardcoded KNOWN_SPECS table, then getMexcSpecAsync
+  // returned the generic fallback -- which is NOT safe to size an order on.
+  if (!specCache[symbol] && !KNOWN_SPECS[symbol]) {
+    throw new Error(
+      `Cannot place order: no verified contract specs for ${symbol}. Wait for spec cache warmup or add to KNOWN_SPECS.`,
+    );
+  }
+  return spec;
 }
 
 export function roundMexcPrice(symbol: string, price: number): number {
