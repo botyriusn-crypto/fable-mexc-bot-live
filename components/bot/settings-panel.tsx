@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import Toggle3D from "@/app/components/Toggle3D"
+import Button3D from "@/app/components/Button3D"
 import { Separator } from "@/components/ui/separator"
 import { botAction, updateConfig, type BotState } from "@/lib/use-bot-state"
 import { useSWRConfig } from "swr"
@@ -451,8 +453,8 @@ export function SettingsPanel({ state }: { state: BotState }) {
               </Button>
               <Button size="sm" variant="outline" onClick={() => setConfirmLive(false)}>
                 Cancel
-              </Button>
-            </div>
+              </Button3D>
+                </div>
           </div>
         )}
 
