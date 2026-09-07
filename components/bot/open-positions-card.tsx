@@ -1,11 +1,18 @@
 "use client"
 import { Card, CardContent } from "@/components/ui/card"
 
+const SLOT_DEFS = [
+  { key: "grid", label: "grid" },
+  { key: "funding_carry", label: "funding" },
+  { key: "swing", label: "swing" },
+  { key: "sniper", label: "sniper" },
+] as const
+
 export function OpenPositionsCard({ state }: { state: any }) {
-  const breakdown = state?.strategyBreakdown || { grid: { unrealized: 0, count: 0 }, sniper: { unrealized: 0, count: 0 }, swing: { unrealized: 0, count: 0 }, trend: { unrealized: 0, count: 0 } }
+  const breakdown = state?.strategyBreakdown || { grid: { unrealized: 0, count: 0 }, sniper: { unrealized: 0, count: 0 }, swing: { unrealized: 0, count: 0 }, funding_carry: { unrealized: 0, count: 0 } }
   const total = Object.values(breakdown).reduce((s: number, b: any) => s + (b.unrealized || 0), 0)
   const totalOpen = Object.values(breakdown).reduce((s: number, b: any) => s + (b.count || 0), 0)
-  
+
   const fmt = (v: number) => v >= 0 ? `+$${v.toFixed(2)}` : `-$${Math.abs(v).toFixed(2)}`
   const tone = (v: number) => v > 0 ? "text-green-400" : v < 0 ? "text-red-400" : "text-muted-foreground"
   
@@ -21,14 +28,14 @@ export function OpenPositionsCard({ state }: { state: any }) {
         </div>
         
         <div className="grid grid-cols-4 gap-2">
-          {(['grid', 'trend', 'swing', 'sniper'] as const).map(strat => (
-            <div key={strat} className="rounded-lg border border-blue-400/20 bg-blue-950/30 p-2">
-              <div className="text-xs text-blue-200/60 capitalize mb-1">{strat}</div>
-              <div className={`text-lg font-semibold ${tone(breakdown[strat]?.unrealized || 0)}`}>
-                {fmt(breakdown[strat]?.unrealized || 0)}
+          {SLOT_DEFS.map(({ key, label }) => (
+            <div key={key} className="rounded-lg border border-blue-400/20 bg-blue-950/30 p-2">
+              <div className="text-xs text-blue-200/60 capitalize mb-1">{label}</div>
+              <div className={`text-lg font-semibold ${tone(breakdown[key]?.unrealized || 0)}`}>
+                {fmt(breakdown[key]?.unrealized || 0)}
               </div>
               <div className="text-xs text-blue-200/50 mt-0.5">
-                {breakdown[strat]?.count || 0} open
+                {breakdown[key]?.count || 0} open
               </div>
             </div>
           ))}
