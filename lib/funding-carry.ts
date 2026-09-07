@@ -22,11 +22,11 @@ export const DEFAULT_FUNDING_CARRY_CONFIG: FundingCarryConfig = {
   enabled: false,
   fundingThreshold: 0.0001,
   momentumLookbackSec: 259200,
-  horizonSec: 86400,
+  horizonSec: 28800,
   sizeUsdt: 50,
   leverage: 3,
-  tpBps: 50,
-  slBps: 30,
+  tpBps: 100,
+  slBps: 25,
 }
 
 export interface FundingCarrySignal {
