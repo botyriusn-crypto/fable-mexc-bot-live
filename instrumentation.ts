@@ -77,20 +77,8 @@ export async function register() {
         }
       }, 5 * 60 * 60 * 1000)
 
-      // Swing Breakout (4H) was never actually scheduled anywhere — the
-      // "Active" toggle only set a DB flag, and runSwingBreakoutTick() was
-      // only ever reachable via a manual hit to /api/bot/swing-tick. 4H
-      // candles close every 4 hours, so a 15-minute check cadence is more
-      // than enough to catch a fresh close promptly.
-      const { runSwingBreakoutTick } = await import("./lib/swing-breakout")
-      setInterval(async () => {
-        try {
-          if (!(await isRunning())) return
-          await runSwingBreakoutTick()
-        } catch (e) {
-          console.error("[Swing] Scheduled swing-breakout tick failed:", e)
-        }
-      }, 15 * 60 * 1000)
+      // Swing Breakout removed (replaced by Funding Fade). Funding runs
+      // inside runTick itself (runFundingCarry), so no separate interval.
     } catch (err) {
       console.error("[Startup] Failed to initialize WebSockets:", err)
       if (await isRunning()) {

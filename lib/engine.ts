@@ -742,21 +742,16 @@ async function fetchTickerWithRetry(exchange: any, symbol: string, cache: Map<st
 async function runFundingCarry(cfg: BotConfig): Promise<void> {
   if (!cfg.fundingCarryEnabled) return
   if (cfg.exchange !== "bybit") return
-  if (cfg.mode !== "live") return
+  // Runs in paper AND live: openPosition/closePosition own the paper/live
+  // split (paper records, live confirms fills + native stops).
+
+  // Bybit prints funding every 8h (28800s). Depth follows the configured
+  // lookback instead of a fixed 20 prints.
+  const PRINT_SEC = 28800
+  const historyLimit = Math.max(3, Math.min(60, Math.round(cfg.fundingCarryMomentumLookbackSec / PRINT_SEC)))
 
   try {
-    const symbol = cfg.symbol
-
-    const [currentRate, history] = await Promise.all([
-      getFundingRate(symbol),
-      getFundingHistory(symbol, 20),
-    ])
-
-    const mean = trailingMeanFunding(history)
-    if (mean == null) {
-      await log("warn", `FundingCarry: insufficient funding history for ${symbol}`)
-      return
-    }
+    const exchange = getExchangeClient("bybit")
 
     const fcCfg: FundingCarryConfig = {
       enabled: true,
@@ -769,69 +764,100 @@ async function runFundingCarry(cfg: BotConfig): Promise<void> {
       slBps: cfg.fundingCarrySlBps,
     }
 
-    const signal = detectFundingCarry(currentRate, mean, fcCfg)
-
+    // ── Manage ALL open funding_carry positions (universe, not one symbol) ──
     const openPositions = await getOpenPositions()
-    const fcPosition = openPositions.find(
-      (p) => p.symbol === symbol && p.strategy === "funding_carry",
-    )
-
-    // ── Manage an existing position ──
-    if (fcPosition) {
-      const ticker = await getExchangeClient("bybit").fetchTicker(symbol)
-      const mark = ticker.lastPrice
+    const fcPositions = openPositions.filter((p) => p.strategy === "funding_carry")
+    for (const fcPosition of fcPositions) {
+      const fcCfgForPos = { ...cfg, symbol: fcPosition.symbol } as BotConfig
+      let mark: number
+      try {
+        mark = (await exchange.fetchTicker(fcPosition.symbol)).lastPrice
+      } catch { continue }
 
       const ageSec = (Date.now() - fcPosition.openedAt.getTime()) / 1000
       if (ageSec >= cfg.fundingCarryHorizonSec) {
-        await closePosition(fcPosition, mark, "signal", cfg)
-        await log("trade", `FundingCarry closed ${symbol} (horizon ${cfg.fundingCarryHorizonSec}s reached)`)
-        return
+        await closePosition(fcPosition, mark, "signal", fcCfgForPos)
+        await log("trade", `FundingCarry closed ${fcPosition.symbol} (horizon ${cfg.fundingCarryHorizonSec}s reached)`)
+        continue
       }
 
       const dir = fcPosition.side === "long" ? 1 : -1
       const tp = fcPosition.takeProfit
       const sl = fcPosition.stopLoss
       if (tp != null && dir * (mark - tp) >= 0) {
-        await closePosition(fcPosition, mark, "tp", cfg)
-        await log("trade", `FundingCarry TP hit ${symbol} @ ${mark.toFixed(6)}`)
+        await closePosition(fcPosition, mark, "tp", fcCfgForPos)
+        await log("trade", `FundingCarry TP hit ${fcPosition.symbol} @ ${mark.toFixed(6)}`)
       } else if (sl != null && dir * (mark - sl) <= 0) {
-        await closePosition(fcPosition, mark, "sl", cfg)
-        await log("trade", `FundingCarry SL hit ${symbol} @ ${mark.toFixed(6)}`)
+        await closePosition(fcPosition, mark, "sl", fcCfgForPos)
+        await log("trade", `FundingCarry SL hit ${fcPosition.symbol} @ ${mark.toFixed(6)}`)
+      }
+    }
+
+    // ── Universe scan: rank all USDT perps by |funding|, probe the top
+    // extremes only (history calls cost rate limit; tickers are one call) ──
+    const heldSymbols = new Set(fcPositions.map((p) => p.symbol))
+    let tickers: { symbol: string; fundingRate: number }[] = []
+    try {
+      const all = exchange.fetchAllTickers ? await exchange.fetchAllTickers() : []
+      tickers = all
+        .filter((t) => t.symbol.endsWith("_USDT") && Math.abs(t.fundingRate ?? 0) >= cfg.fundingCarryThreshold)
+        .sort((a, b) => Math.abs(b.fundingRate ?? 0) - Math.abs(a.fundingRate ?? 0))
+        .slice(0, 3)
+    } catch {
+      // Fall back to the selected market when the bulk scan fails.
+      try {
+        const rate = await getFundingRate(cfg.symbol)
+        if (Math.abs(rate) >= cfg.fundingCarryThreshold) tickers = [{ symbol: cfg.symbol, fundingRate: rate }]
+      } catch { return }
+    }
+
+    // ── One new position per tick max: first extreme that confirms ──
+    for (const t of tickers) {
+      if (heldSymbols.has(t.symbol)) continue
+      let history: number[]
+      try {
+        history = await getFundingHistory(t.symbol, historyLimit)
+      } catch { continue }
+      const mean = trailingMeanFunding(history)
+      if (mean == null) continue
+      const signal = detectFundingCarry(t.fundingRate, mean, fcCfg)
+      if (!signal) continue
+
+      let price: number
+      try {
+        price = (await exchange.fetchTicker(t.symbol)).lastPrice
+      } catch { continue }
+      const stops = computeFundingStops(price, signal.direction, fcCfg)
+
+      const candles = await exchange.fetchKlines(t.symbol, cfg.timeframe, 200).catch(() => null)
+      if (!candles || candles.length < 60) {
+        await log("warn", `FundingCarry: insufficient candles for ${t.symbol}`)
+        continue
+      }
+      const snap = computeSnapshot(candles, cfg)
+      snap.price = price
+
+      const features: FeatureVector = {
+        ...snap.features,
+        sideLong: signal.direction === "long" ? 1 : -1,
+      }
+
+      const fcMarketCfg = {
+        ...cfg,
+        symbol: t.symbol,
+        leverage: cfg.fundingCarryLeverage,
+        positionSizeUsdt: cfg.fundingCarrySizeUsdt,
+      } as BotConfig
+
+      const used = await openPosition(fcMarketCfg, signal.direction, snap, 0.5, features, "funding_carry", {
+        stopLoss: stops.stopLoss,
+        takeProfit: stops.takeProfit,
+      })
+      if (used > 0) {
+        await log("trade", `FundingCarry opened ${signal.direction} ${t.symbol}: ${signal.reason}`)
       }
       return
     }
-
-    // ── Open a new position on signal ──
-    if (!signal) return
-
-    const ticker = await getExchangeClient("bybit").fetchTicker(symbol)
-    const price = ticker.lastPrice
-    const stops = computeFundingStops(price, signal.direction, fcCfg)
-
-    const candles = await getExchangeClient("bybit").fetchKlines(symbol, cfg.timeframe, 200)
-    if (candles.length < 60) {
-      await log("warn", `FundingCarry: insufficient candles for ${symbol}`)
-      return
-    }
-    const snap = computeSnapshot(candles, cfg)
-    snap.price = price
-
-    const features: FeatureVector = {
-      ...snap.features,
-      sideLong: signal.direction === "long" ? 1 : -1,
-    }
-
-    const fcMarketCfg = {
-      ...cfg,
-      leverage: cfg.fundingCarryLeverage,
-      positionSizeUsdt: cfg.fundingCarrySizeUsdt,
-    } as BotConfig
-
-    await openPosition(fcMarketCfg, signal.direction, snap, 0.5, features, "funding_carry", {
-      stopLoss: stops.stopLoss,
-      takeProfit: stops.takeProfit,
-    })
-    await log("trade", `FundingCarry opened ${signal.direction} ${symbol}: ${signal.reason}`)
   } catch (err) {
     await log("error", `FundingCarry error: ${err instanceof Error ? err.message : String(err)}`)
   }

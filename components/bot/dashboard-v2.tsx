@@ -16,7 +16,7 @@ import SniperReadinessGauge from "../../app/components/SniperReadinessGauge"
 import { AdvisorCard } from "./advisor-card"
 import { MultiGridCard } from "./multi-grid-card"
 import { OpenPositionsCard } from "./open-positions-card"
-import { SwingCard } from "./swing-card"
+import { FundingCard } from "./funding-card"
 import { PerformanceAnalyzer } from "./performance-analyzer"
 import { MarketBar } from "./market-bar"
 import { ClassifierCard } from "./classifier-card"
@@ -244,8 +244,8 @@ export function DashboardV2() {
           {/* LEFT 65% */}
           <div className="w-[65%] flex flex-col gap-3 pr-3">
             <MultiGridCard />
-            <CollapsibleSection title="Swing Breakout (4H)" defaultOpen={false}>
-              <SwingCard state={state} />
+            <CollapsibleSection title="Funding Fade (Bybit)" defaultOpen={false}>
+              <FundingCard state={state} />
             </CollapsibleSection>
 
             <CollapsibleSection title="Charts" defaultOpen={true}>
