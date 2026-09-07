@@ -1208,7 +1208,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
       await log("info", `Grid ${gc.symbol} (maker): flow gate active (6h PnL < 0) — skipping new entries`)
       return
     }
-    await log("info", `Grid ${gc.symbol} (maker): setting up fresh resting ladder`)
+    // NOTE: no "setting up" log here — setupGrid logs its own outcome.
     await setupGrid(cfg, gc, snap, volatility, undefined, true)
     return
   }
@@ -1474,7 +1474,9 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
       await log("info", `Grid ${gc.symbol}: force-rebuilding after ${emptyTicks} empty ticks`)
     }
     (gc as any)._emptyTicks = emptyTicks + 1
-    await log("info", `Grid ${gc.symbol}: setting up fresh ladder`)
+    // NOTE: no "setting up" log here — setupGrid logs its own outcome
+    // (previously this line printed BEFORE the cooldown/flow/risk checks,
+    // producing contradictory "skipping setup" + "setting up" pairs).
     await setupGrid(cfg, gc, snap, volatility, exchange, true)
     return
   }
