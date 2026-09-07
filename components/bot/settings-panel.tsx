@@ -453,7 +453,7 @@ export function SettingsPanel({ state }: { state: BotState }) {
               </Button>
               <Button size="sm" variant="outline" onClick={() => setConfirmLive(false)}>
                 Cancel
-              </Button3D>
+              </Button>
                 </div>
           </div>
         )}
