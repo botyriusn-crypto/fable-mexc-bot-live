@@ -144,7 +144,7 @@ export function FundingCard({ state }: { state: any }) {
           <div>
             <label className="text-xs font-medium mb-2 block">Extreme threshold (bps)</label>
             <div className="flex gap-2">
-              {[1, 5, 10, 25].map((v) => (
+              {[1, 2, 5, 10, 25].map((v) => (
                 <Button
                   key={v}
                   size="sm"
