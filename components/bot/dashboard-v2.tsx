@@ -244,7 +244,7 @@ export function DashboardV2() {
           {/* LEFT 65% */}
           <div className="w-[65%] flex flex-col gap-3 pr-3">
             <MultiGridCard />
-            <CollapsibleSection title="Funding Fade (Bybit)" defaultOpen={false}>
+            <CollapsibleSection title="Funding Momentum (Bybit)" defaultOpen={false}>
               <FundingCard state={state} />
             </CollapsibleSection>
 

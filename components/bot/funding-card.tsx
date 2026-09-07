@@ -95,7 +95,7 @@ export function FundingCard({ state }: { state: any }) {
         <div className="flex items-center justify-between">
           <CardTitle className="flex items-center gap-2">
             {config.enabled ? <TrendingUp className="h-5 w-5 text-primary" /> : <TrendingDown className="h-5 w-5 text-muted-foreground" />}
-            Funding Fade
+            Funding Momentum
           </CardTitle>
           <div className="flex items-center gap-2">
             <Badge variant={config.enabled ? "default" : "secondary"}>
@@ -112,7 +112,7 @@ export function FundingCard({ state }: { state: any }) {
           </div>
         </div>
         <p className="text-xs text-muted-foreground">
-          Bybit funding extremes + rollover fade. Scans all USDT perps, one position per tick max. Bybit only.
+          Bybit funding extremes + crowding momentum. Scans all USDT perps, one position per tick, max 3 open. Bybit only.
         </p>
         {bybitOnly && (
           <p className="text-xs text-danger">Switch exchange to Bybit for this strategy to trade.</p>
