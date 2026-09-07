@@ -451,9 +451,9 @@ export function SettingsPanel({ state }: { state: BotState }) {
               <Button size="sm" variant="destructive" onClick={() => handleModeSwitch(true)}>
                 Enable Live Trading
               </Button>
-              <Button size="sm" variant="outline" onClick={() => setConfirmLive(false)}>
+              <Button3D size="sm" onClick={() => setConfirmLive(false)}>
                 Cancel
-              </Button>
+              </Button3D>
                 </div>
           </div>
         )}
