@@ -811,7 +811,9 @@ async function runFundingCarry(cfg: BotConfig): Promise<void> {
       } catch { return }
     }
 
-    // ── One new position per tick max: first extreme that confirms ──
+    // ── One new position per tick max, max 3 concurrent: the 1-min tick
+    // with a top-3 scan churned 211 trades/15h live. Cap the book. ──
+    if (fcPositions.length >= 3) return
     for (const t of tickers) {
       if (heldSymbols.has(t.symbol)) continue
       let history: number[]

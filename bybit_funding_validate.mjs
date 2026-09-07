@@ -88,7 +88,9 @@ function main() {
           if (ev.settleTime < gmin || ev.settleTime > gmax) continue;
           if (Math.abs(ev.fundingRate) <= th) continue;
           // mean-reversion: high funding = crowded long -> short; low funding = crowded short -> long
-          const direction = ev.fundingRate > 0 ? "short" : "long";
+          // INVERT=1 flips to momentum (follow funding direction).
+          const fade = ev.fundingRate > 0 ? "short" : "long";
+          const direction = process.env.INVERT === "1" ? (fade === "short" ? "long" : "short") : fade;
           const entryIdx = firstIdxGE(c, ev.settleTime);
           if (entryIdx < 0) continue;
           const r = forwardReturn(c, entryIdx, direction, hz);

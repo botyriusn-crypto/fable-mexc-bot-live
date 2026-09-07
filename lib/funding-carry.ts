@@ -1,8 +1,9 @@
 // lib/funding-carry.ts — "Bybit Funding Trading" strategy.
 //
-// Mean-reversion on extreme funding: when funding is extreme AND rolling over
-// (current rate below its trailing mean), the crowded side is unwinding, so we
-// fade it. High funding = crowded long -> short; low funding = crowded short -> long.
+// Momentum on extreme funding (default): when funding is extreme AND still
+// crowding (at/above its trailing mean), ride WITH the crowded side — price
+// continues with funding direction OOS (15/18 cells positive, 8h best).
+// Legacy fade mode (followTrend=false): fade the rollover. Lost OOS 18/18.
 //
 // Pure signal module — no I/O, no DB, fully unit-testable. The engine feeds it
 // the current funding rate + trailing mean and acts on the returned signal.
@@ -16,6 +17,10 @@ export interface FundingCarryConfig {
   leverage: number              // leverage (set via /position/set-leverage, not on the order)
   tpBps: number                 // take-profit in basis points
   slBps: number                 // stop-loss in basis points
+  // true (default, validated): ride crowding with the funding direction.
+  // false: fade the rollover. OOS 180d/24-symbol: fade loses in 18/18
+  // cells, momentum wins in 15/18 (8h: +74/+172/+205bps, t 2.3-2.7).
+  followTrend?: boolean
 }
 
 export const DEFAULT_FUNDING_CARRY_CONFIG: FundingCarryConfig = {
@@ -45,6 +50,23 @@ export function detectFundingCarry(
 
   // 1. Funding must be extreme (beyond threshold in either direction).
   if (Math.abs(currentFundingRate) <= cfg.fundingThreshold) return null
+
+  // 2-3. Momentum (default): crowding still building — ride WITH it.
+  // Fade (legacy): rollover + fade the crowded side. Fade lost OOS 18/18.
+  if (cfg.followTrend ?? true) {
+    if (currentFundingRate > 0) {
+      if (currentFundingRate < trailingMeanFunding) return null
+      return {
+        direction: "long",
+        reason: `funding +${(currentFundingRate * 100).toFixed(4)}% crowding (mean +${(trailingMeanFunding * 100).toFixed(4)}%)`,
+      }
+    }
+    if (currentFundingRate > trailingMeanFunding) return null
+    return {
+      direction: "short",
+      reason: `funding ${(currentFundingRate * 100).toFixed(4)}% crowding (mean ${(trailingMeanFunding * 100).toFixed(4)}%)`,
+    }
+  }
 
   // 2. Funding must be rolling over (current below trailing mean = crowd unwinding).
   if (currentFundingRate >= trailingMeanFunding) return null
