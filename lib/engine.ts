@@ -15,7 +15,7 @@ import {
   type BotConfig,
   type Position,
 } from "./db/schema"
-import { and, eq, isNull, sql } from "drizzle-orm"
+import { and, desc, eq, isNull, sql } from "drizzle-orm"
 import { type Candle, fetchDeals, computeTakerFlow } from "./mexc/public"
 import { getExchangeClient, type Exchange } from "./exchange"
 import { classifyLorentzian, combineConfirmation } from "./lorentzian"
@@ -816,6 +816,29 @@ async function runFundingCarry(cfg: BotConfig): Promise<void> {
     if (fcPositions.length >= 3) return
     for (const t of tickers) {
       if (heldSymbols.has(t.symbol)) continue
+      // ── Adaptive symbol filter (permanent, property-based): only trade
+      // coins whose own recent record is healthy AT SCAN TIME. Skips symbols
+      // on a 2-loss streak or -$5 over their last 10 funding trades. This
+      // auto-blacklists persistent losers (ONG/HEMI/ACE on Sep 8) and
+      // re-admits them when their regime flips — no name list to maintain.
+      try {
+        const recent = await db
+          .select({ pnl: trades.pnl })
+          .from(trades)
+          .where(and(eq(trades.strategy, "funding_carry"), eq(trades.symbol, t.symbol)))
+          .orderBy(desc(trades.closedAt))
+          .limit(10)
+        let streak = 0
+        for (const r of recent) {
+          if ((r.pnl ?? 0) <= 0) streak++
+          else break
+        }
+        const net10 = recent.reduce((s, r) => s + (r.pnl ?? 0), 0)
+        if (streak >= 2 || net10 < -5) {
+          await log("info", `FundingCarry skipping ${t.symbol}: losing streak (streak=${streak}, last10=${net10.toFixed(2)})`)
+          continue
+        }
+      } catch { /* filter best-effort: DB error must not block trading */ }
       let history: number[]
       try {
         history = await getFundingHistory(t.symbol, historyLimit)
