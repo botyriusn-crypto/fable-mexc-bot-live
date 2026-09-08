@@ -15,7 +15,7 @@ import {
   type BotConfig,
   type Position,
 } from "./db/schema"
-import { and, desc, eq, isNull, sql } from "drizzle-orm"
+import { and, desc, eq, gte, isNull, sql } from "drizzle-orm"
 import { type Candle, fetchDeals, computeTakerFlow } from "./mexc/public"
 import { getExchangeClient, type Exchange } from "./exchange"
 import { classifyLorentzian, combineConfirmation } from "./lorentzian"
@@ -818,14 +818,17 @@ async function runFundingCarry(cfg: BotConfig): Promise<void> {
       if (heldSymbols.has(t.symbol)) continue
       // ── Adaptive symbol filter (permanent, property-based): only trade
       // coins whose own recent record is healthy AT SCAN TIME. Skips symbols
-      // on a 2-loss streak or -$5 over their last 10 funding trades. This
-      // auto-blacklists persistent losers (ONG/HEMI/ACE on Sep 8) and
+      // on a 2-loss streak or -$5 over their last 10 funding trades (24h
+      // window — a benched symbol must become tradeable again once its
+      // losses age out, otherwise it could never break the streak).
+      // This auto-blacklists persistent losers (ONG/HEMI/ACE on Sep 8) and
       // re-admits them when their regime flips — no name list to maintain.
       try {
+        const dayAgo = new Date(Date.now() - 24 * 3600 * 1000)
         const recent = await db
           .select({ pnl: trades.pnl })
           .from(trades)
-          .where(and(eq(trades.strategy, "funding_carry"), eq(trades.symbol, t.symbol)))
+          .where(and(eq(trades.strategy, "funding_carry"), eq(trades.symbol, t.symbol), gte(trades.closedAt, dayAgo)))
           .orderBy(desc(trades.closedAt))
           .limit(10)
         let streak = 0
