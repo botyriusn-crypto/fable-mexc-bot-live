@@ -13,6 +13,23 @@ import { isTradingHalted, marginBudgetRemaining, getRiskState } from "./risk-man
 import { shouldGateEntry, recordShadowEntry, resolveShadowEntries, evaluateKillSwitch } from "./grid-flow"
 import { checkGridExposureGate } from "./exposure"
 
+// ── Coin-aware trend pause ──
+// A fixed ADX>=32 bar is too slow for fast-trending, high-volatility coins
+// (e.g. ENA): by the time ADX(14) on Min15 crosses 32, the grid has already
+// filled several losing buy legs against the trend. This helper makes the
+// pause decision coin-aware:
+//   1. Lower the ADX bar (32 -> 24) for high-ATR% coins, which bleed faster
+//      against a trend and need to pause sooner.
+//   2. Add a fast ROC trigger so a sharp directional move pauses the grid
+//      before the lagging ADX confirms — gated on ADX>=18 to avoid whipsaw
+//      on a single ranging spike.
+function resolveTrendPause(snap: IndicatorSnapshot): boolean {
+  const atrPct = snap.price > 0 ? (snap.atr / snap.price) * 100 : 0
+  const adxBar = atrPct >= 1.5 ? 24 : 32
+  const fastTrend = Math.abs(snap.roc) >= 2.5 && snap.adx >= 18
+  return snap.adx >= adxBar || fastTrend
+}
+
 
 // ── Setup cooldown (DB-backed, atomic) ──
 // Previously these were in-memory Maps (`GRID_SETUP_COOLDOWN`,
@@ -1144,8 +1161,7 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   await resolveShadowEntries(gc.symbol, snap.price)
   await evaluateKillSwitch(gc.symbol)
   const volatility = detectVolatilitySurge(gc.symbol, snap)
-  const gridAdxThreshold = 32 // Grids handle mild trends better than single positions
-const paused = gc.autoPause && snap.adx >= gridAdxThreshold
+  const paused = gc.autoPause && resolveTrendPause(snap)
 
   const gridConfigRow = await db.select().from(gridConfigs).where(
     and(eq(gridConfigs.symbol, gc.symbol), eq(gridConfigs.timeframe, gc.timeframe))
@@ -1497,8 +1513,7 @@ hi = Math.max(price, cur.high)
 lo = Math.min(price, cur.low)
 }
   let spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
-  const gridAdxThreshold = 32 // Grids handle mild trends better than single positions
-const paused = gc.autoPause && snap.adx >= gridAdxThreshold
+  const paused = gc.autoPause && resolveTrendPause(snap)
   
   // Phantom trend order removed
 

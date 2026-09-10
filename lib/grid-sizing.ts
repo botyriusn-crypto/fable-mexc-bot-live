@@ -131,6 +131,17 @@ export async function computeSafeGridSettings(
     ? (MIN_NOTIONAL * COMBO_MARGIN_MULTIPLIER * 100) / (availableBalance * leverage)
     : MIN_BUDGET_PCT
   budgetPct = Math.max(minBudgetPctForNotional, Math.min(MAX_BUDGET_PCT, budgetPct))
+
+  // EXPOSURE-CAP CLAMP: the entry gate (lib/exposure.ts) measures GROSS
+  // notional = budgetPct x leverage and blocks entries when it exceeds
+  // MAX_GROSS_EXPOSURE_PCT (35%). The margin math above never checks this,
+  // so a budget that is fine on margin can still self-block on exposure
+  // (e.g. 11.7% x 3x = 35.1% > 35%). Clamp so budgetPct x leverage stays
+  // under the cap with a safety margin before rounding.
+  const MAX_GROSS_EXPOSURE_PCT = 0.35
+  const maxBudgetPctForExposure = (MAX_GROSS_EXPOSURE_PCT * 100) / leverage
+  budgetPct = Math.min(budgetPct, maxBudgetPctForExposure - 0.5)
+
   budgetPct = Math.round(budgetPct * 10) / 10
 
   return {
