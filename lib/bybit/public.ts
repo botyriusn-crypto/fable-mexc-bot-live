@@ -3,7 +3,7 @@
 const BASE_URL = "https://api.bybit.com/v5"
 
 function toBybitSymbol(symbol: string): string {
-  return symbol.replace(/_/g, "")  // BTC_USDT -> BTCUSDT
+  return symbol.replace(/[_\-\/]/g, "")  // BTC_USDT / BTC-USDT / BTC/USDT -> BTCUSDT
 }
 
 export interface Candle {

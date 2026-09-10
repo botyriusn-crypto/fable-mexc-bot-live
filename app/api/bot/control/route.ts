@@ -5,6 +5,7 @@ import { eq, sql } from "drizzle-orm"
 import { getConfig, closePosition, stopRealtimeEngine, initRealtimeEngine, runTick } from "@/lib/engine"
 import { teardownGrid, getGridConfigs } from "@/lib/grid"
 import { fetchTicker } from "@/lib/mexc/public"
+import { getExchangeClient, type Exchange } from "@/lib/exchange"
 import { requireAuth } from "@/lib/auth"
 
 export const dynamic = "force-dynamic"
@@ -52,8 +53,12 @@ export async function POST(request: Request) {
         const open = await db.select().from(positions).where(eq(positions.status, "open"))
         const target = body.positionId ? open.find((position) => position.id === body.positionId) : open[0]
         if (!target) return NextResponse.json({ error: "Open position not found" }, { status: 400 })
-        const ticker = await fetchTicker(target.symbol)
-        await closePosition(target, ticker.lastPrice, "manual", { ...cfg, symbol: target.symbol, timeframe: target.timeframe })
+        // Route the close through the position's actual venue. funding_carry
+        // positions live on Bybit; everything else is MEXC. The stored symbol is
+        // underscore-format (CL_USDT), so infer from strategy, not symbol shape.
+        const exchange: Exchange = target.strategy === "funding_carry" ? "bybit" : (cfg.exchange as Exchange)
+        const ticker = await getExchangeClient(exchange).fetchTicker(target.symbol)
+        await closePosition(target, ticker.lastPrice, "manual", { ...cfg, symbol: target.symbol, timeframe: target.timeframe, exchange })
         return NextResponse.json({ ok: true })
       }
       case "reset_paper": {

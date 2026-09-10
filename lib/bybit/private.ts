@@ -6,7 +6,7 @@ const BASE_URL = "https://api.bybit.com/v5"
 const RECV_WINDOW = "5000"
 
 function toBybitSymbol(symbol: string): string {
-  return symbol.replace(/_/g, "") // BTC_USDT -> BTCUSDT
+  return symbol.replace(/[_\-\/]/g, "") // BTC_USDT / BTC-USDT / BTC/USDT -> BTCUSDT
 }
 
 // Bybit v5 signature: HMAC-SHA256(secret, timestamp + apiKey + recvWindow + paramString)

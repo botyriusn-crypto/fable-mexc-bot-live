@@ -326,35 +326,19 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
 // The resolved side only changes which NEW rungs get placed on the next
 // rebuild — it never force-closes an existing position, so switching modes
 // carries no cliff and no forced liquidation.
-const AUTO_SIDE_CONFIRM_TICKS = 3
-const AUTO_SIDE_STATE = new Map<string, { confirmed: "long" | "short" | "neutral"; pending: "long" | "short" | "neutral"; pendingCount: number }>()
-
 function effectiveDirection(gc: GridConfig): "long" | "short" | "neutral" {
   if (gc.direction === "auto") return (gc as any)._autoSide || "neutral"
   return gc.direction
 }
 
 function resolveAutoSide(gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): "long" | "short" | "neutral" {
-  let desired: "long" | "short" | "neutral"
-  if (regime === "range") desired = "neutral"
-  else if (regime === "trend") desired = snap.emaFast > snap.emaSlow ? "long" : "short"
-  else desired = "neutral" // neutral regime → default to COMBO (safe)
-
-  const key = gc.symbol
-  let st = AUTO_SIDE_STATE.get(key)
-  if (!st) {
-    st = { confirmed: "neutral", pending: desired, pendingCount: 0 }
-    AUTO_SIDE_STATE.set(key, st)
-  }
-
-  if (st.pending === desired) st.pendingCount++
-  else { st.pending = desired; st.pendingCount = 1 }
-
-  if (st.pendingCount >= AUTO_SIDE_CONFIRM_TICKS && st.pending !== st.confirmed) {
-    st.confirmed = st.pending
-  }
-
-  return st.confirmed
+  // AUTO = flexible two-sided COMBO grid. We deliberately do NOT flip to a
+  // one-sided side in trending regimes: there is no one-sided long handler,
+  // so a "long" resolution silently downgrades to COMBO while a "short"
+  // resolution routes to the one-sided short path — which shorts into rising
+  // markets. Keeping AUTO on neutral (two-sided) is the flexible,
+  // mean-reversion behavior that captures both directions.
+  return "neutral"
 }
 
 export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorSnapshot, volatility?: VolatilityState, exchange?: ExchangeClient, startAtPrice = false): Promise<void> {
@@ -467,7 +451,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   const entryFeeRate = isMakerSymbol(gc) ? realMakerFeeRate : realTakerFeeRate
   const breakeven = center * (entryFeeRate + realTakerFeeRate)
   const feeBasedMin = breakeven * gc.feeMarginMult
-  const pctBasedMin = center * 0.005 // 0.5% floor — prevents zero-movement TP at high price magnitudes
+  const pctBasedMin = center * 0.015 // 1.5% floor — clears fees with margin on low-priced coins (0.5% was breakeven)
   const minSpacing = Math.max(feeBasedMin, pctBasedMin)
   // GEOMETRIC SPACING: Widens gap between orders as price moves away from center.
   // Protects budget from deploying too fast during flash crashes/pumps.
@@ -606,11 +590,11 @@ let orders: any[] = []
       if (o.side === "buy") {
         const spacingBased = o.price - perRungSlDist
         const capBased = o.price * (1 - absoluteCap)
-        o.slPrice = Math.max(spacingBased, capBased) // tighter (higher for a long SL = smaller loss)
+        o.slPrice = Math.min(spacingBased, capBased) // WIDER: stop at least absoluteCap% below entry (lower = further)
       } else if (o.side === "sell") {
         const spacingBased = o.price + perRungSlDist
         const capBased = o.price * (1 + absoluteCap)
-        o.slPrice = Math.min(spacingBased, capBased) // tighter (lower for a short SL = smaller loss)
+        o.slPrice = Math.max(spacingBased, capBased) // WIDER: stop at least absoluteCap% above entry (higher = further)
       }
     }
     await log("info", `Grid ${gc.symbol}: per-rung SL at ${PER_RUNG_SL_SPACING_MULT}x spacing = ${perRungSlDist.toFixed(6)} per rung (cap ${(absoluteCap*100).toFixed(2)}%)`)
@@ -1069,7 +1053,7 @@ const [trade] = await db
 .values({
 symbol: order.symbol, side: "short", entryPrice, exitPrice,
 sizeUsdt, leverage: order.leverage, pnl: netPnl, fees,
-exitReason: reason, strategy: "grid", live: cfg.mode === "live",
+exitReason: reason, strategy: "grid", openedAt: order.createdAt, live: cfg.mode === "live",
 })
 .returning({ id: trades.id })
 await db.update(gridOrders).set({ status: "filled", exchangeStatus: "cancelled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, order.id))
@@ -1287,7 +1271,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
         await db.insert(trades).values({
           symbol: o.symbol, side: "short", entryPrice, exitPrice: fillPrice,
           sizeUsdt, leverage: o.leverage, pnl: netPnl, fees,
-          exitReason: "tp", strategy: "grid", live: cfg.mode === "live",
+          exitReason: "tp", strategy: "grid", openedAt: o.createdAt, live: cfg.mode === "live",
         })
         if (cfg.mode === "paper") {
           await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
@@ -1351,7 +1335,7 @@ const paused = gc.autoPause && snap.adx >= gridAdxThreshold
         await db.update(gridOrders)
           .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
           .where(eq(gridOrders.id, o.id))
-        const closePrice = fillPrice - (snap.atr * gc.rangeAtrMult)
+        const closePrice = fillPrice - (o.spacing ?? snap.atr * gc.rangeAtrMult)
         try {
           const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage, exchange)
           const bid = extractOrderId(res)
@@ -1459,8 +1443,19 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
       return
     }
     // ── Cross-strategy exposure gate for grid ──
-    const gridNotional = (gc.budgetPct / 100) * cfg.paperBalance * gc.leverage
-    const gridEquity = cfg.paperBalance || 1
+    // Use live exchange balance in live mode — paperBalance is a paper-only
+    // figure and inflates/deflates the gate incorrectly against real equity.
+    let gateBalance = cfg.paperBalance
+    if (cfg.mode === "live") {
+      try {
+        const client = exchange ?? getExchangeClient(cfg.exchange as Exchange)
+        const assets = await client.getAccountAssets()
+        const usdt = assets.find((a) => a.currency === "USDT") ?? null
+        if (usdt) gateBalance = Number(usdt.availableBalance)
+      } catch (err) { await log("warn", `Grid ${gc.symbol}: live balance fetch failed, falling back to paper: ${dbErr(err)}`) }
+    }
+    const gridNotional = (gc.budgetPct / 100) * gateBalance * gc.leverage
+    const gridEquity = gateBalance || 1
     const gridDirection = gc.direction === "auto" ? "neutral" : gc.direction as "long" | "short"
     const gridExposure = await checkGridExposureGate(gc.symbol, gridDirection, gridNotional, gridEquity)
     if (!gridExposure.allowed) {
@@ -1625,7 +1620,7 @@ if (o.buyPrice != null && (gc as any).direction === "neutral") {
   const netPnl = grossPnl - fees
   await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
 await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
-await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: entry * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: false })
+await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: entry * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", openedAt: o.createdAt, live: false })
 await log("trade", `Grid ${o.symbol} COMBO short closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
 await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell", price: entry, quantity: o.quantity, status: "pending" })
 continue
@@ -1702,7 +1697,7 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
     if (Number(st.state) === 3) {
       const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      const closePrice = fillPrice - (snap.atr * gc.rangeAtrMult)
+      const closePrice = fillPrice - (o.spacing ?? snap.atr * gc.rangeAtrMult)
       try {
         const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage, exchange)
         const bid = extractOrderId(res)
@@ -1729,7 +1724,7 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
       if (cfg.mode === "paper") {
         await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
       }
-      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice, sizeUsdt: entryPrice * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
+      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice, sizeUsdt: entryPrice * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", openedAt: o.createdAt, live: cfg.mode === "live" })
       await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(6)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
       try {
         const res: any = await placeRoundedMakerOrder(o.symbol, 3, entryPrice, o.quantity, o.leverage, exchange)
@@ -1779,7 +1774,7 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
       if (st && Number(st.state) === 3) {
         const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
         await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-        const closePrice = fillPrice - (snap.atr * gc.rangeAtrMult)
+        const closePrice = fillPrice - (o.spacing ?? snap.atr * gc.rangeAtrMult)
         if (cfg.mode === "live") {
           try {
             const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage, client)
@@ -1796,7 +1791,7 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
         try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 3, volume: o.quantity, leverage: o.leverage }) } catch (err) { await log("error", `Short open failed: ${dbErr(err)}`) }
       }
       await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      const closePrice = o.price - (snap.atr * gc.rangeAtrMult)
+      const closePrice = o.price - (o.spacing ?? snap.atr * gc.rangeAtrMult)
       await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, status: "pending" })
       await log("trade", `Short ${o.symbol} sell @ ${o.price.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
     }
@@ -1814,7 +1809,7 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
         if (cfg.mode === "paper") {
           await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
         }
-        await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice, sizeUsdt: entryPrice * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
+        await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice, sizeUsdt: entryPrice * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", openedAt: o.createdAt, live: cfg.mode === "live" })
         await log("trade", `Short ${o.symbol} closed @ ${exitPrice.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
         const newSellPrice = entryPrice
         if (cfg.mode === "live") {
@@ -1841,7 +1836,7 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
       if (cfg.mode === "paper") {
         await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
       }
-      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice: o.price, sizeUsdt: entryPrice * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", live: cfg.mode === "live" })
+      await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice, exitPrice: o.price, sizeUsdt: entryPrice * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", openedAt: o.createdAt, live: cfg.mode === "live" })
       await log("trade", `Short ${o.symbol} closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
       const newSellPrice = entryPrice
       if (cfg.mode === "live") {
