@@ -22,7 +22,7 @@ import { classifyLorentzian, combineConfirmation } from "./lorentzian"
 import { computeSnapshot, type FeatureVector, type IndicatorSnapshot } from "./indicators"
 import { loadModelFor, trainOnTrade, gateEntry, MODEL_IDS } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
-import { runGridTick, gridUnrealizedPnl, getGridConfigs, type GridConfig } from "./grid"
+import { getActiveOrders, runGridTick, gridUnrealizedPnl, getGridConfigs, type GridConfig } from "./grid"
 import { detectFlashFade, executeFlashFade } from "./flash-fade"
 import { maybeRunGridAiAdvisorAuto } from "./ai-grid-advisor"
 import { analyzeTradesForMarket, applyRecommendations } from "./ai-advisor"
@@ -37,6 +37,28 @@ import {
   getRiskState,
 } from "./risk-manager"
 import { evaluateScalpSignal } from "./trend-scalper"
+import { buildAwareness, decide } from "./awareness"
+
+// Net grid inventory for a symbol/timeframe. Open inventory = pending orders
+// that carry a paired entry (buyPrice): a pending sell with buyPrice is an open
+// LONG (buy filled, sell is the TP exit); a pending buy with buyPrice is an open
+// SHORT (short filled, buy is the close). This mirrors checkGridStopLoss.
+async function computeGridInventory(symbol: string, timeframe: string, markPrice: number) {
+  const active = await getActiveOrders(symbol, timeframe)
+  let longQty = 0, longNotional = 0, shortQty = 0, shortNotional = 0
+  for (const o of active) {
+    if (o.buyPrice == null) continue
+    if (o.side === "sell") { longQty += o.quantity; longNotional += o.quantity * o.buyPrice }
+    else if (o.side === "buy") { shortQty += o.quantity; shortNotional += o.quantity * o.buyPrice }
+  }
+  const netQty = longQty - shortQty
+  const netExposure = longNotional - shortNotional
+  let avgEntry: number | null = null
+  if (longQty > 0) avgEntry = longNotional / longQty
+  else if (shortQty > 0) avgEntry = shortNotional / shortQty
+  const unrealizedPnl = avgEntry != null ? (markPrice - avgEntry) * netQty : 0
+  return { netExposure, avgEntry, unrealizedPnl }
+}
 import { checkExposureGate } from "./exposure"
 import { evaluateAdvancedEntry, type AdvancedConfig, cvdRollingStats } from "./advanced-strategy"
 
@@ -81,9 +103,7 @@ function lorentzianOptions(cfg: BotConfig) {
     confidenceThreshold: cfg.lorentzianConfidenceThreshold,
     useVolatilityFilter: cfg.lorentzianUseVolatilityFilter,
     useRegimeFilter: cfg.lorentzianUseRegimeFilter,
-    useAdxFilter: cfg.lorentzianUseAdxFilter,
     regimeThreshold: cfg.lorentzianRegimeThreshold,
-    adxThreshold: cfg.lorentzianAdxThreshold,
     useKernelFilter: cfg.lorentzianKernelFilter,
   }
 }
@@ -894,6 +914,26 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
               // the learning signal reflect BOTH the setup quality and the model.
               const blended = Math.max(0, Math.min(1, scalp.confidence * (mlConf || 0.5) * 2))
               const reason = `SCALP: ${scalp.reason}; ${confirmation.reason}; ${lorentzian.reason}`
+
+              // ── One organism: build the shared state and let decide() choose ──
+              const rs = getRiskState()
+              const gridInv = await computeGridInventory(symbol, timeframe, snap.price)
+              const awareness = buildAwareness(
+                symbol,
+                timeframe,
+                snap,
+                marketCfg,
+                scalp,
+                gridInv,
+                {
+                  exposurePct: rs?.usedMarginPct ?? 0,
+                  marginRemaining: rs?.marginBudgetRemaining ?? 0,
+                  killSwitch: rs?.killSwitch ?? false,
+                },
+                { logistic: mlConf, lorentzian: lorentzian.confidence, allowed: confirmation.allowed },
+              )
+              const decision = decide(awareness)
+
               await db.insert(classifierDecisions).values({
                 symbol,
                 timeframe,
@@ -910,22 +950,43 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
                 lorentzianConfidence: lorentzian.confidence,
                 lorentzianAllowed: lorentzian.allowed,
                 lorentzianFilters: lorentzian.filters,
-                finalAllowed: confirmation.allowed,
+                finalAllowed: decision.action === "scalp-trend",
                 reason,
               }).onConflictDoNothing()
-              if (confirmation.allowed) {
-                await log("info", `SCALP ${scalp.direction.toUpperCase()} candidate: ${reason}`, {
+              if (decision.action === "scalp-trend") {
+                await log("info", `SCALP ${decision.direction.toUpperCase()} candidate: ${reason}`, {
                   scalpConfluence: scalp.confidence,
                   mlConfidence: mlConf,
                   lorentzianConfidence: lorentzian.confidence,
                   rMultiple: scalp.rMultiple,
                 })
-                await openPosition(marketCfg, scalp.direction, snap, blended, scalpFeatures, "scalp", {
+                await openPosition(marketCfg, decision.direction, snap, blended, scalpFeatures, "scalp", {
                   sizeUsdtOverride: scalp.suggestedSizeUsdt ?? undefined,
                   stopLoss: scalp.stopLoss ?? undefined,
                   takeProfit: scalp.takeProfit ?? undefined,
                 })
                 scalpHandled = true
+              } else if (decision.action === "trail-inventory") {
+                // Single ATR trailing stop on the aligned inventory. A trail only
+                // ever moves TIGHTER (in our favor) — it never widens a stop.
+                const trailStop = decision.direction === "long"
+                  ? snap.price - marketCfg.trailAtrMult * snap.atr
+                  : snap.price + marketCfg.trailAtrMult * snap.atr
+                const active = await getActiveOrders(symbol, timeframe)
+                let trailed = 0
+                for (const o of active) {
+                  if (o.buyPrice == null) continue
+                  const isLong = o.side === "sell"
+                  if (isLong !== (decision.direction === "long")) continue
+                  const newSl = decision.direction === "long"
+                    ? Math.max(o.slPrice ?? -Infinity, trailStop)
+                    : Math.min(o.slPrice ?? Infinity, trailStop)
+                  if (o.slPrice == null || newSl !== o.slPrice) {
+                    await db.update(gridOrders).set({ slPrice: newSl }).where(eq(gridOrders.id, o.id))
+                    trailed++
+                  }
+                }
+                await log("info", `TRAIL-INVENTORY ${decision.direction}: trailing stop → ${trailStop.toFixed(6)} (${trailed} rung(s) tightened)`)
               }
             }
           }

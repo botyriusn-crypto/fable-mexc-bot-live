@@ -13,9 +13,7 @@ export interface LorentzianOptions {
   confidenceThreshold: number
   useVolatilityFilter: boolean
   useRegimeFilter: boolean
-  useAdxFilter: boolean
   regimeThreshold: number
-  adxThreshold: number
   useKernelFilter: boolean
 }
 
@@ -30,7 +28,6 @@ export interface LorentzianResult {
   filters: {
     volatility: boolean
     regime: boolean
-    adx: boolean
     kernel: boolean
   }
 }
@@ -45,7 +42,7 @@ const neutralResult = (reason: string): LorentzianResult => ({
   allowed: false,
   ready: false,
   reason,
-  filters: { volatility: false, regime: false, adx: false, kernel: false },
+  filters: { volatility: false, regime: false, kernel: false },
 })
 
 function normalize(values: number[], smooth = 1): number[] {
@@ -137,8 +134,6 @@ export function classifyLorentzian(candles: Candle[], options: LorentzianOptions
   const atrFast = atr(candles, 1)[currentIndex]
   const atrSlow = atr(candles, 10)[currentIndex]
   const volatility = !sniperOptions.useVolatilityFilter || atrFast > atrSlow
-  const adxValue = adx(candles, 14)[currentIndex]
-  const adxPass = !sniperOptions.useAdxFilter || adxValue >= sniperOptions.adxThreshold
   const longEma = ema(closes, 200)
   const slope = currentIndex < 4 || longEma[currentIndex - 4] === 0
     ? 0
@@ -151,7 +146,7 @@ export function classifyLorentzian(candles: Candle[], options: LorentzianOptions
       ? "short"
       : "neutral"
   const kernelPass = !sniperOptions.useKernelFilter || direction === kernelDirection
-  const filters = { volatility, regime, adx: adxPass, kernel: kernelPass }
+  const filters = { volatility, regime, kernel: kernelPass }
   const filtersPass = Object.values(filters).every(Boolean)
   const allowed = direction !== "neutral" && confidence >= sniperOptions.confidenceThreshold && filtersPass
 

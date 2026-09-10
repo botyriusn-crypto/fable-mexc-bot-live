@@ -23,9 +23,12 @@ import { checkGridExposureGate } from "./exposure"
 //   2. Add a fast ROC trigger so a sharp directional move pauses the grid
 //      before the lagging ADX confirms — gated on ADX>=18 to avoid whipsaw
 //      on a single ranging spike.
-function resolveTrendPause(snap: IndicatorSnapshot): boolean {
+function resolveTrendPause(snap: IndicatorSnapshot, cfg: BotConfig): boolean {
   const atrPct = snap.price > 0 ? (snap.atr / snap.price) * 100 : 0
-  const adxBar = atrPct >= 1.5 ? 24 : 32
+  // Anchor the coin-aware bar to the single source of truth (adxTrendThreshold)
+  // instead of hardcoded 24/32. Preserves current behavior at the default (25):
+  //   normal coins: 25 + 7 = 32, high-ATR% coins: 25 - 1 = 24.
+  const adxBar = cfg.adxTrendThreshold + (atrPct >= 1.5 ? -1 : 7)
   const fastTrend = Math.abs(snap.roc) >= 2.5 && snap.adx >= 18
   return snap.adx >= adxBar || fastTrend
 }
@@ -1161,7 +1164,7 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   await resolveShadowEntries(gc.symbol, snap.price)
   await evaluateKillSwitch(gc.symbol)
   const volatility = detectVolatilitySurge(gc.symbol, snap)
-  const paused = gc.autoPause && resolveTrendPause(snap)
+  const paused = gc.autoPause && resolveTrendPause(snap, cfg)
 
   const gridConfigRow = await db.select().from(gridConfigs).where(
     and(eq(gridConfigs.symbol, gc.symbol), eq(gridConfigs.timeframe, gc.timeframe))
@@ -1513,7 +1516,7 @@ hi = Math.max(price, cur.high)
 lo = Math.min(price, cur.low)
 }
   let spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
-  const paused = gc.autoPause && resolveTrendPause(snap)
+  const paused = gc.autoPause && resolveTrendPause(snap, cfg)
   
   // Phantom trend order removed
 
