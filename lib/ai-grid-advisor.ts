@@ -9,6 +9,7 @@ import { computeSafeGridSettings } from "./grid-sizing"
 import { getExchangeClient, type ExchangeClient, type Exchange, type Ticker } from "./exchange"
 import { getConfig } from "./engine"
 import { eq } from "drizzle-orm"
+import { VALIDATED_SYMBOLS } from "./validated-symbols"
 
 // Known leveraged-ETF / tokenized-stock tickers on MEXC. These often can't
 // open a short (MEXC rejects with 2009 Position is nonexistent), which
@@ -144,6 +145,12 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
 
     for (const t of candidates) {
       try {
+        // 0. Validated-basket allowlist: skip any symbol not in the OOS
+        // walk-forward validated basket (lib/validated-symbols.ts). This is
+        // the hard gate that stops autonomous deployment of unvalidated
+        // microcaps. The advisor may only ever enable a validated symbol.
+        if (!VALIDATED_SYMBOLS.has(t.symbol)) continue
+
         // 1.1 Feedback loop: skip any symbol that lost money in a grid within
         // the last 48h (cool-off blacklist to avoid re-picking repeat losers).
         if (isRecentLoser(t.symbol)) { gateStats.recentLoser++; continue }

@@ -3,6 +3,7 @@ import { gridConfigs, gridOrders, trades, botConfig } from "./db/schema"
 import { eq, and, sql } from "drizzle-orm"
 import { log } from "./logger"
 import { recordGridOutcome } from "./ai-grid-advisor"
+import { VALIDATED_SYMBOLS } from "./validated-symbols"
 
 const ROTATION_INTERVAL_MS = 4 * 60 * 60 * 1000 // 4 hours
 const MIN_AGE_HOURS = 6 // Don't kill grids younger than 6h
@@ -85,7 +86,7 @@ export async function checkAndRotate(exchange: any): Promise<void> {
       return
     }
     const aiData = await aiRes.json()
-    const candidates = aiData.recommendations || []
+    const candidates = (aiData.recommendations || []).filter((c: any) => VALIDATED_SYMBOLS.has(c.symbol))
 
     if (candidates.length === 0) {
       await log("info", "AI Advisor returned no candidates - skipping rotation")
