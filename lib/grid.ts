@@ -1471,7 +1471,7 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
         const assets = await client.getAccountAssets()
         const usdt = assets.find((a) => a.currency === "USDT") ?? null
         if (usdt) gateBalance = Number(usdt.availableBalance)
-      } catch (err) { await log("warn", `Grid ${gc.symbol}: live balance fetch failed, falling back to paper: ${dbErr(err)}`) }
+      } catch (err) { await log("info", `Grid ${gc.symbol}: live balance fetch failed, falling back to paper: ${dbErr(err)}`) }
     }
     const gridNotional = (gc.budgetPct / 100) * gateBalance * gc.leverage
     const gridEquity = gateBalance || 1

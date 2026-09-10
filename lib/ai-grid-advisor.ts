@@ -154,7 +154,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
 
 
     const scoredMarkets: any[] = []
-    const gateStats = { total: candidates.length, alreadyOpen: 0, paused: 0, alreadyOpen: 0, paused: 0, recentLoser: 0, feeGate: 0, klineFail: 0, tooFewCandles: 0, momentumGate: 0, dnaRejected: 0, scored: 0 }
+    const gateStats = { total: candidates.length, alreadyOpen: 0, paused: 0, recentLoser: 0, feeGate: 0, klineFail: 0, tooFewCandles: 0, momentumGate: 0, dnaRejected: 0, scored: 0 }
 
     for (const t of candidates) {
       try {

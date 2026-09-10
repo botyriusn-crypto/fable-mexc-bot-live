@@ -103,16 +103,6 @@ export const botConfig = pgTable("bot_config", {
   advancedMaxRiskPct: doublePrecision("advanced_max_risk_pct").notNull().default(0.02),
   advancedConfidenceFloor: doublePrecision("advanced_confidence_floor").notNull().default(0.5),
   advancedMaxPositionPct: doublePrecision("advanced_max_position_pct").notNull().default(0.25),
-  // Trend Rider strategy (4H detection + 15m entry + daily regime gate)
-  trendRiderEnabled: boolean("trend_rider_enabled").notNull().default(false),
-  trendRiderPositionSizeUsdt: doublePrecision("trend_rider_position_size_usdt").notNull().default(500),
-  trendRiderLeverage: integer("trend_rider_leverage").notNull().default(3),
-  trendRiderPullbackAtr: doublePrecision("trend_rider_pullback_atr").notNull().default(0.3),
-  trendRiderMinTrendAge: integer("trend_rider_min_trend_age").notNull().default(3),
-  trendRiderChandelierMult: doublePrecision("trend_rider_chandelier_mult").notNull().default(3.0),
-  trendRiderRegimeGate: boolean("trend_rider_regime_gate").notNull().default(true),
-  trendRiderRegimeAdxMin: integer("trend_rider_regime_adx_min").notNull().default(20),
-trendRiderHtfTrailUseSwing: boolean("trend_rider_htf_trail_use_swing").notNull().default(true),
   // Funding carry (Bybit funding trading)
   fundingCarryEnabled: boolean("funding_carry_enabled").notNull().default(false),
   fundingCarryThreshold: doublePrecision("funding_carry_threshold").notNull().default(0.0001),

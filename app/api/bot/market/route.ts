@@ -38,7 +38,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json()
-    const { symbol, timeframe, leverage } = body
+    const { symbol, timeframe, leverage, positionSizeUsdt } = body
     
     if (!symbol || !timeframe) {
       return NextResponse.json({ error: "symbol and timeframe required" }, { status: 400 })
@@ -48,6 +48,7 @@ export async function POST(request: Request) {
       symbol: symbol.toUpperCase(),
       timeframe,
       ...(leverage ? { leverage: Number(leverage) } : {}),
+      ...(positionSizeUsdt != null ? { positionSizeUsdt: Number(positionSizeUsdt) } : {}),
     }).where(eq(botConfig.id, 1))
 
     return NextResponse.json({ ok: true, symbol: symbol.toUpperCase(), timeframe })

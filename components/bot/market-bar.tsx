@@ -42,6 +42,7 @@ export function MarketBar({ state }: { state: BotState }) {
   const [symbol, setSymbol] = useState(state.config.symbol)
   const [timeframe, setTimeframe] = useState(state.config.timeframe)
   const [leverage, setLeverage] = useState(String(state.config.leverage))
+  const [positionSizeUsdt, setPositionSizeUsdt] = useState(String(state.config.positionSizeUsdt))
   const [saving, setSaving] = useState(false)
   const [feedback, setFeedback] = useState<string | null>(null)
   const [comboOpen, setComboOpen] = useState(false)
@@ -69,7 +70,8 @@ export function MarketBar({ state }: { state: BotState }) {
     setSymbol(state.config.symbol)
     setTimeframe(state.config.timeframe)
     setLeverage(String(state.config.leverage))
-  }, [state.config.symbol, state.config.timeframe, state.config.leverage])
+    setPositionSizeUsdt(String(state.config.positionSizeUsdt))
+  }, [state.config.symbol, state.config.timeframe, state.config.leverage, state.config.positionSizeUsdt])
 
   const selectedMarket = useMemo(
     () => data?.markets.find((market) => market.symbol === (symbol || "").toUpperCase()),
@@ -78,7 +80,8 @@ export function MarketBar({ state }: { state: BotState }) {
   const dirty =
     (symbol || "").toUpperCase() !== state.config.symbol ||
     timeframe !== state.config.timeframe ||
-    Number(leverage) !== state.config.leverage
+    Number(leverage) !== state.config.leverage ||
+    Number(positionSizeUsdt) !== state.config.positionSizeUsdt
 
   const applyMarket = async () => {
     setSaving(true)
@@ -87,7 +90,7 @@ export function MarketBar({ state }: { state: BotState }) {
       const response = await fetch("/api/bot/market", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol: (symbol || "").toUpperCase(), timeframe, leverage: Number(leverage) }),
+        body: JSON.stringify({ symbol: (symbol || "").toUpperCase(), timeframe, leverage: Number(leverage), positionSizeUsdt: Number(positionSizeUsdt) }),
       })
       const json = await response.json()
       if (!response.ok) throw new Error(json.error ?? "Market switch failed")
@@ -219,6 +222,19 @@ export function MarketBar({ state }: { state: BotState }) {
                 .filter((value) => value <= (selectedMarket?.maxLeverage ?? 100))
                 .map((value) => <option key={value} value={String(value)}>{value}x</option>)}
             </select>
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+            Budget (USDT)
+            <input
+              type="number"
+              value={positionSizeUsdt}
+              onChange={(event) => setPositionSizeUsdt(event.target.value)}
+              min="0"
+              step="10"
+              className="h-9 min-w-24 rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            />
+            <span className="text-[10px] text-muted-foreground">risk {((state.scalpRiskPct ?? 0.01) * 100).toFixed(1)}% / trade (global)</span>
           </label>
 
           <Button className="h-9" disabled={!dirty || saving} onClick={applyMarket}>

@@ -57,6 +57,7 @@ export interface BotState {
     | null
   regime: "trend" | "range" | "neutral" | null
   adxValue: number | null
+  scalpRiskPct: number
   grid: {
     orders: GridOrder[]
     allOrders?: GridOrder[]

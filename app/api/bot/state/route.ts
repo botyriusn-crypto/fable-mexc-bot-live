@@ -310,6 +310,7 @@ export async function GET() {
       equity: cfg.paperBalance + totalGridUnrealized + positionsUnrealized,
       trades: recentTrades, winRate, liveStats, modeStats, todayStats, swingStats, swingPositions: swingPositions, equityCurve: equity.filter((e: any) => e.live === (cfg.mode === "live")).reverse(), logs,
       model: modelRows[0] ?? null, classifierAnalytics, ticker, chart, liveAccount, regime, adxValue,
+      scalpRiskPct: Number(process.env.SCALP_RISK_PCT ?? 0.01),
       grid: { orders: selectedGridOrders, allOrders: activeGridOrders, holdingCount: gridHolding.length, unrealizedPnl: gridUnrealized, realizedPnl: gridRealized },
       gridConfigs: gridConfigsState,
     })
