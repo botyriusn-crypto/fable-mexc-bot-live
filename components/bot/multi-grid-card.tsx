@@ -4,46 +4,33 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { useBotState } from "@/lib/use-bot-state"
 import { useSWRConfig } from "swr"
 import useSWR from "swr"
-import { ChevronsUpDown, Plus } from "lucide-react"
-
-interface MarketOption { symbol: string; displayName: string; maxLeverage: number }
+import { CoinSelector } from "./coin-selector"
+import { buildAddPairPayload, buildMarketUrl, excludeMarkets, normalizeExchange, type CoinMarket } from "@/lib/coin-selector-utils"
 
 const marketsFetcher = async (url: string) => {
+
   const response = await fetch(url)
   if (!response.ok) throw new Error("Could not load exchange markets")
-  return response.json() as Promise<{ markets: MarketOption[] }>
+  return response.json() as Promise<{ markets: CoinMarket[]; exchange: string }>
 }
 
-function AddPairControl({ existingSymbols, onAdded }: { existingSymbols: string[]; onAdded: () => void }) {
-  const { data, error: swrError, isLoading } = useSWR("/api/bot/market", marketsFetcher, { 
+function AddPairControl({ existingSymbols, exchange, timeframe, onAdded }: { existingSymbols: string[]; exchange: string; timeframe: string; onAdded: () => void }) {
+  const normalized = normalizeExchange(exchange)
+  const { data, error: swrError, isLoading } = useSWR(buildMarketUrl(normalized), marketsFetcher, {
     revalidateOnFocus: false,
-    onError: (err) => console.error("[AddPairControl] SWR error:", err)
   })
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState("")
   const [adding, setAdding] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const ref = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false)
-    }
-    document.addEventListener("mousedown", handleClickOutside)
-    return () => document.removeEventListener("mousedown", handleClickOutside)
-  }, [])
-
-  const filtered = useMemo(() => {
-    if (!data?.markets) return []
-    const q = (query || "").trim().toUpperCase()
-    const pool = data.markets.filter((m) => !existingSymbols.includes(m.symbol)) // Prevents adding duplicates
-    const matched = q ? pool.filter((m) => m.symbol.includes(q) || (m?.displayName || "unknown").toUpperCase().includes(q)) : pool
-    return matched.slice(0, 50)
-  }, [data?.markets, query, existingSymbols])
+  // Complete addable list for the current exchange: every listed coin except
+  // the pairs already on the grid.
+  const addable = useMemo(
+    () => excludeMarkets(data?.markets ?? [], existingSymbols),
+    [data?.markets, existingSymbols],
+  )
 
   const addPair = async (symbol: string) => {
     setAdding(true)
@@ -52,12 +39,10 @@ function AddPairControl({ existingSymbols, onAdded }: { existingSymbols: string[
       const res = await fetch("/api/bot/grid-config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol, timeframe: "Min15" }),
+        body: JSON.stringify(buildAddPairPayload(symbol, timeframe)),
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error ?? "Failed to add pair")
-      setOpen(false)
-      setQuery("")
       onAdded()
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add pair")
@@ -67,46 +52,23 @@ function AddPairControl({ existingSymbols, onAdded }: { existingSymbols: string[
   }
 
   return (
-    <div ref={ref} className="relative">
-      <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs" onClick={() => setOpen((v) => !v)}>
-        <Plus className="size-3" aria-hidden="true" /> Add pair
-      </Button>
-      {open && (
-        <div className="absolute right-0 top-full z-20 mt-1 w-64 rounded-lg border border-border bg-card shadow-lg">
-          <div className="relative border-b border-border p-2">
-            <Input
-              autoFocus
-              value={query}
-              onChange={(e) => setQuery(e.target.value.toUpperCase())}
-              placeholder="Search coins…"
-              className="h-8 pr-7 font-mono text-xs"
-              autoComplete="off"
-            />
-            <ChevronsUpDown aria-hidden="true" className="pointer-events-none absolute right-4 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-          </div>
-          <div className="max-h-56 overflow-y-auto">
-            {error && <div className="px-3 py-2 text-xs text-danger">Add error: {error}</div>}
-            {swrError && <div className="px-3 py-2 text-xs text-danger">Failed to load markets: {swrError.message}</div>}
-            {isLoading && <div className="px-3 py-2 text-xs text-muted-foreground">Loading markets...</div>}
-            {!isLoading && !swrError && filtered.length === 0 ? (
-              <div className="px-3 py-2 text-xs text-muted-foreground">No matching contracts (total: {data?.markets?.length || 0})</div>
-            ) : (
-              filtered.map((m) => (
-                <button
-                  key={m.symbol}
-                  type="button"
-                  disabled={adding}
-                  onMouseDown={(e) => { e.preventDefault(); addPair(m.symbol) }}
-                  className="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs font-mono text-foreground hover:bg-accent disabled:opacity-50"
-                >
-                  <span>{m.displayName}</span>
-                  <span className="text-[10px] text-muted-foreground">{m.maxLeverage}x max</span>
-                </button>
-              ))
-            )}
-          </div>
-        </div>
-      )}
+    <div className="w-60">
+      <CoinSelector
+        key={normalized}
+        compact
+        exchange={normalized}
+        value=""
+        markets={addable}
+        isLoading={isLoading}
+        error={swrError ?? (error ? { message: error } : null)}
+        disabled={adding}
+        placeholder="+ Add pair"
+        onSelect={addPair}
+        onOpenChange={(isOpen) => {
+          // Drop a stale add error once the picker is reopened.
+          if (isOpen) setError(null)
+        }}
+      />
     </div>
   )
 }
@@ -624,7 +586,7 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
         <div className="flex flex-wrap items-center justify-end gap-2 text-xs font-mono">
           <span className={totalRealized >= 0 ? "text-success" : "text-danger"} title="Sum of current-cycle realized across pairs">Real (cycle): {totalRealized >= 0 ? "+" : ""}{fmt(totalRealized, 2)}</span>
           <span className={totalUnrealized >= 0 ? "text-success" : "text-danger"}>Unreal: {totalUnrealized >= 0 ? "+" : ""}{fmt(totalUnrealized, 2)}</span>
-          <AddPairControl existingSymbols={grids.map((g) => g.symbol)} onAdded={handleRefresh} />
+          <AddPairControl existingSymbols={grids.map((g) => g.symbol)} exchange={state.config.exchange} timeframe={newTf} onAdded={handleRefresh} />
           <Button
             variant="outline"
             size="sm"

@@ -48,6 +48,41 @@ export async function fetchKlines(
   }))
 }
 
+export interface BulkTicker {
+  symbol: string
+  lastPrice: number
+  fundingRate: number
+  volume24: number
+  turnover24h: number
+  riseFallRate: number
+}
+
+/** All USDT futures tickers in one call (for universe screening). */
+export async function fetchAllTickers(): Promise<BulkTicker[]> {
+  const res = await fetch(`${BASE_URL}/futures/usdt/tickers`, { cache: "no-store" })
+  if (!res.ok) {
+    throw new Error(`Gate.io tickers fetch failed: ${res.status} ${res.statusText}`)
+  }
+  const data = (await res.json()) as Array<{
+    contract: string
+    last: string
+    funding_rate: string
+    volume_24h_quote: string
+    change_percentage: string
+  }>
+  if (!Array.isArray(data)) throw new Error("Gate.io tickers response invalid")
+  return data
+    .filter((t) => typeof t.contract === "string" && t.contract.endsWith("_USDT"))
+    .map((t) => ({
+      symbol: t.contract,
+      lastPrice: Number(t.last),
+      fundingRate: Number(t.funding_rate),
+      volume24: Number(t.volume_24h_quote),
+      turnover24h: Number(t.volume_24h_quote),
+      riseFallRate: Number(t.change_percentage) / 100,
+    }))
+}
+
 export async function fetchTicker(symbol: string): Promise<Ticker> {
   const res = await fetch(`${BASE_URL}/futures/usdt/tickers?contract=${symbol}`, {
     cache: "no-store",

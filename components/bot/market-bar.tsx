@@ -2,10 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import useSWR, { useSWRConfig } from "swr"
-import { ArrowRightLeft, Check, ChevronsUpDown, LoaderCircle, Radio } from "lucide-react"
+import { ArrowRightLeft, Check, Crosshair, LoaderCircle, Radio } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
+import { CoinSelector } from "./coin-selector"
+import { buildMarketUrl, findMarket, normalizeExchange } from "@/lib/coin-selector-utils"
+import { isFlatForAutoSwitch } from "@/lib/trend-candidate"
 import type { BotState } from "@/lib/use-bot-state"
 
 interface Market {
@@ -17,6 +19,8 @@ interface Market {
 interface MarketOptions {
   markets: Market[]
   timeframes: string[]
+  exchange: string
+  count: number
 }
 
 const fetcher = async (url: string) => {
@@ -38,33 +42,21 @@ const timeframeLabel: Record<string, string> = {
 
 export function MarketBar({ state }: { state: BotState }) {
   const { mutate } = useSWRConfig()
-  const { data } = useSWR<MarketOptions>("/api/bot/market", fetcher, { revalidateOnFocus: false })
+  // Exchange-aware key: switching exchange changes the URL, so SWR drops the
+  // previous exchange's coin list and fetches the current one. The old static
+  // "/api/bot/market" key kept showing the previous exchange's coins.
+  const exchange = normalizeExchange(state.config.exchange)
+  const marketUrl = buildMarketUrl(exchange)
+  const { data, error: marketsError } = useSWR<MarketOptions>(marketUrl, fetcher, {
+    revalidateOnFocus: false,
+  })
   const [symbol, setSymbol] = useState(state.config.symbol)
   const [timeframe, setTimeframe] = useState(state.config.timeframe)
   const [leverage, setLeverage] = useState(String(state.config.leverage))
   const [positionSizeUsdt, setPositionSizeUsdt] = useState(String(state.config.positionSizeUsdt))
   const [saving, setSaving] = useState(false)
+  const [scanning, setScanning] = useState(false)
   const [feedback, setFeedback] = useState<string | null>(null)
-  const [comboOpen, setComboOpen] = useState(false)
-  const [query, setQuery] = useState("")
-  const comboRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (comboRef.current && !comboRef.current.contains(event.target as Node)) {
-        setComboOpen(false)
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside)
-    return () => document.removeEventListener("mousedown", handleClickOutside)
-  }, [])
-
-  const filteredMarkets = useMemo(() => {
-    if (!data?.markets) return []
-    const q = (query || "").trim().toUpperCase()
-    const pool = q ? data.markets.filter((m) => m.symbol.includes(q) || (m?.displayName || "unknown").toUpperCase().includes(q)) : data.markets
-    return pool.slice(0, 50)
-  }, [data?.markets, query])
 
   useEffect(() => {
     setSymbol(state.config.symbol)
@@ -74,32 +66,146 @@ export function MarketBar({ state }: { state: BotState }) {
   }, [state.config.symbol, state.config.timeframe, state.config.leverage, state.config.positionSizeUsdt])
 
   const selectedMarket = useMemo(
-    () => data?.markets.find((market) => market.symbol === (symbol || "").toUpperCase()),
+    () => findMarket(data?.markets, symbol),
     [data?.markets, symbol],
   )
+  // Coin changes apply instantly via the selector, so "dirty" only tracks the
+  // fields that still need the Apply button.
   const dirty =
-    (symbol || "").toUpperCase() !== state.config.symbol ||
     timeframe !== state.config.timeframe ||
     Number(leverage) !== state.config.leverage ||
     Number(positionSizeUsdt) !== state.config.positionSizeUsdt
+
+  const postMarket = async (next: { symbol: string; timeframe: string; leverage: number; positionSizeUsdt: number }) => {
+    const response = await fetch("/api/bot/market", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(next),
+    })
+    const json = await response.json()
+    if (!response.ok) throw new Error(json.error ?? "Market switch failed")
+    await mutate("/api/bot/state")
+  }
 
   const applyMarket = async () => {
     setSaving(true)
     setFeedback(null)
     try {
-      const response = await fetch("/api/bot/market", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol: (symbol || "").toUpperCase(), timeframe, leverage: Number(leverage), positionSizeUsdt: Number(positionSizeUsdt) }),
+      await postMarket({
+        symbol: (symbol || "").toUpperCase(),
+        timeframe,
+        leverage: Number(leverage),
+        positionSizeUsdt: Number(positionSizeUsdt),
       })
-      const json = await response.json()
-      if (!response.ok) throw new Error(json.error ?? "Market switch failed")
-      await mutate("/api/bot/state")
       setFeedback("Market active")
     } catch (error) {
       setFeedback(error instanceof Error ? error.message : "Market switch failed")
     } finally {
       setSaving(false)
+    }
+  }
+
+  // Clicking a coin in the dropdown selects AND populates it immediately —
+  // no second Apply click needed.
+  const handleCoinSelect = async (nextSymbol: string) => {
+    const s = (nextSymbol || "").toUpperCase()
+    if (!s || s === (symbol || "").toUpperCase()) return
+    const market = findMarket(data?.markets, s)
+    // Clamp leverage to the new coin's max so the instant apply never rejects.
+    const maxLev = market?.maxLeverage ?? 100
+    const lev = Math.min(Number(leverage) || state.config.leverage || 1, maxLev)
+    setSymbol(s)
+    setLeverage(String(lev))
+    setSaving(true)
+    setFeedback(null)
+    try {
+      await postMarket({
+        symbol: s,
+        timeframe,
+        leverage: lev,
+        positionSizeUsdt: Number(positionSizeUsdt),
+      })
+      setFeedback(`${s.replace("_", "/")} active`)
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "Market switch failed")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const [autoScan, setAutoScan] = useState(
+    () => typeof localStorage !== "undefined" && localStorage.getItem("findAuto") === "1",
+  )
+  const [autoMinutes, setAutoMinutes] = useState(() => {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem("findAutoMin") : null
+    const n = Number(raw)
+    return [1, 5, 15].includes(n) ? n : 5
+  })
+  const [autoNote, setAutoNote] = useState<string | null>(null)
+
+  // FIND: scan the current exchange for the best trend setup and load the
+  // winner straight into the coin picker (auto-applied via handleCoinSelect).
+  // In auto mode the winner is only applied when fully flat — never mid-trade.
+  const runScan = async (auto: boolean) => {
+    if (auto && !isFlatForAutoSwitch(state)) {
+      setAutoNote("skipped — position open")
+      return
+    }
+    setScanning(true)
+    if (!auto) setFeedback(null)
+    try {
+      const res = await fetch(`/api/bot/scan-trend?exchange=${encodeURIComponent(exchange)}&top=8`)
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? "Trend scan failed")
+      if (json.winner) {
+        const w = json.winner as { symbol: string; direction: string; score: number; grade: string }
+        if (auto && w.symbol.toUpperCase() === (symbol || "").toUpperCase()) {
+          setAutoNote(`already on ${w.symbol.replace("_", "/")} ${w.score} (${w.grade})`)
+          return
+        }
+        await handleCoinSelect(w.symbol)
+        const msg = `${w.symbol.replace("_", "/")} ${String(w.direction).toUpperCase()} ${w.score} (${w.grade}) — best of ${json.scanned} scanned`
+        if (auto) setAutoNote(`applied ${msg}`)
+        else setFeedback(`FIND: ${msg}`)
+      } else {
+        const best = (json.scores as Array<{ symbol: string; score: number; grade: string }> | undefined)?.[0]
+        const msg = best
+          ? `no tradable setup right now (best ${best.symbol.replace("_", "/")} ${best.score} ${best.grade})`
+          : "no candidates scored"
+        if (auto) setAutoNote(msg)
+        else setFeedback(`FIND: ${msg}`)
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Trend scan failed"
+      if (auto) setAutoNote(msg)
+      else setFeedback(msg)
+    } finally {
+      setScanning(false)
+    }
+  }
+  const handleFind = () => runScan(false)
+
+  // Auto-scan timer. The ref always points at the latest run so the interval
+  // never acts on stale state.
+  const autoRunRef = useRef<() => void>(() => {})
+  autoRunRef.current = () => { void runScan(true) }
+  useEffect(() => {
+    if (!autoScan) return
+    const id = setInterval(() => autoRunRef.current(), autoMinutes * 60_000)
+    return () => clearInterval(id)
+  }, [autoScan, autoMinutes])
+
+  const toggleAutoScan = () => {
+    const next = !autoScan
+    setAutoScan(next)
+    try {
+      localStorage.setItem("findAuto", next ? "1" : "0")
+    } catch { /* private mode — auto simply won't persist */ }
+    if (next) {
+      setAutoNote("scanning…")
+      void runScan(true)
+    } else {
+      setAutoNote(null)
     }
   }
 
@@ -159,44 +265,70 @@ export function MarketBar({ state }: { state: BotState }) {
         </div>
 
         <div className="flex flex-col gap-2 lg:flex-row lg:items-end">
-          <div ref={comboRef} className="relative flex min-w-44 flex-1 flex-col gap-1 text-xs text-muted-foreground">
-            Contract
-            <div className="relative">
-              <Input
-                value={comboOpen ? query : symbol}
-                onFocus={() => { setQuery(""); setComboOpen(true) }}
-                onChange={(event) => setQuery(event.target.value.toUpperCase())}
-                placeholder="Search coins…"
-                className="h-9 pr-8 font-mono text-foreground"
-                autoComplete="off"
-              />
-              <ChevronsUpDown aria-hidden="true" className="pointer-events-none absolute right-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <div className="flex flex-col gap-1 text-xs text-muted-foreground">
+            <span className="flex items-center justify-between gap-2">
+              Scan
+              <button
+                type="button"
+                role="switch"
+                aria-checked={autoScan}
+                onClick={toggleAutoScan}
+                title="Auto-scan: re-scan on a timer and switch the market only when fully flat (no positions, no pending orders)"
+                className={`rounded-full border px-1.5 py-px text-[10px] font-semibold transition-colors ${
+                  autoScan
+                    ? "border-success/50 bg-success/15 text-success"
+                    : "border-border text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                AUTO {autoScan ? "ON" : "OFF"}
+              </button>
+            </span>
+            <div className="flex items-center gap-1.5">
+              <Button
+                variant="outline"
+                className="h-9 shrink-0 gap-1.5 px-3 font-semibold"
+                disabled={saving || scanning}
+                onClick={handleFind}
+                title={`Scan ${exchange} for the best trend setup and load it into the picker`}
+              >
+                {scanning
+                  ? <LoaderCircle data-icon="inline-start" className="animate-spin" />
+                  : <Crosshair data-icon="inline-start" />}
+                {scanning ? "…" : "FIND"}
+              </Button>
+              {autoScan && (
+                <select
+                  value={autoMinutes}
+                  onChange={(event) => {
+                    const n = Number(event.target.value)
+                    setAutoMinutes(n)
+                    try {
+                      localStorage.setItem("findAutoMin", String(n))
+                    } catch { /* private mode — interval simply won't persist */ }
+                  }}
+                  className="h-9 rounded-lg border border-input bg-background px-1.5 text-xs text-foreground outline-none focus-visible:border-ring"
+                  title="Auto-scan interval"
+                >
+                  <option value={1}>1m</option>
+                  <option value={5}>5m</option>
+                  <option value={15}>15m</option>
+                </select>
+              )}
             </div>
-            {comboOpen && (
-              <div className="absolute top-full z-20 mt-1 max-h-64 w-full min-w-56 overflow-y-auto rounded-lg border border-border bg-card shadow-lg">
-                {filteredMarkets.length === 0 ? (
-                  <div className="px-3 py-2 text-sm text-muted-foreground">No matching contracts</div>
-                ) : (
-                  filteredMarkets.map((market) => (
-                    <button
-                      key={market.symbol}
-                      type="button"
-                      onMouseDown={(event) => {
-                        event.preventDefault()
-                        setSymbol(market.symbol)
-                        setQuery("")
-                        setComboOpen(false)
-                      }}
-                      className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-mono text-foreground hover:bg-accent"
-                    >
-                      <span>{market.displayName}</span>
-                      <span className="text-xs text-muted-foreground">{market.maxLeverage}x max</span>
-                    </button>
-                  ))
-                )}
-              </div>
+            {autoScan && autoNote && (
+              <span className="max-w-56 truncate text-[10px]" title={autoNote}>· {autoNote}</span>
             )}
           </div>
+          <CoinSelector
+            key={exchange}
+            exchange={exchange}
+            value={symbol}
+            markets={data?.markets}
+            isLoading={!data && !marketsError}
+            error={marketsError}
+            disabled={saving || scanning}
+            onSelect={handleCoinSelect}
+          />
 
           <label className="flex flex-col gap-1 text-xs text-muted-foreground">
             Timeframe
