@@ -140,8 +140,21 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
       }
     } catch (e) { console.error("Watchlist override error:", e) }
 
+    // Live-state snapshot: which symbols already have an enabled grid, and
+    // which are currently paused (trending). The advisor must not re-suggest
+    // a symbol that is already deployed, nor one the engine has auto-paused
+    // for trending — re-picking either is a bug.
+    const liveRows = await db.select({ symbol: gridConfigs.symbol, enabled: gridConfigs.enabled, paused: gridConfigs.paused }).from(gridConfigs)
+    const alreadyOpen = new Set<string>()
+    const currentlyPaused = new Set<string>()
+    for (const r of liveRows) {
+      if (r.enabled) alreadyOpen.add(r.symbol)
+      if (r.paused) currentlyPaused.add(r.symbol)
+    }
+
+
     const scoredMarkets: any[] = []
-    const gateStats = { total: candidates.length, recentLoser: 0, feeGate: 0, klineFail: 0, tooFewCandles: 0, momentumGate: 0, dnaRejected: 0, scored: 0 }
+    const gateStats = { total: candidates.length, alreadyOpen: 0, paused: 0, alreadyOpen: 0, paused: 0, recentLoser: 0, feeGate: 0, klineFail: 0, tooFewCandles: 0, momentumGate: 0, dnaRejected: 0, scored: 0 }
 
     for (const t of candidates) {
       try {
@@ -150,6 +163,17 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         // the hard gate that stops autonomous deployment of unvalidated
         // microcaps. The advisor may only ever enable a validated symbol.
         if (!VALIDATED_SYMBOLS.has(t.symbol)) continue
+
+        // 0.1 Already-open gate: skip any symbol that already has an enabled
+        // grid. Re-suggesting a deployed pair is a bug — the advisor should
+        // only surface NEW candidates.
+        if (alreadyOpen.has(t.symbol)) { gateStats.alreadyOpen++; continue }
+
+        // 0.2 Paused/trending gate: skip any symbol the engine has auto-paused
+        // (ADX trending). A paused grid means the pair is in a trend, not a
+        // range, so a COMBO grid would be immediately paused again.
+        if (currentlyPaused.has(t.symbol)) { gateStats.paused++; continue }
+
 
         // 1.1 Feedback loop: skip any symbol that lost money in a grid within
         // the last 48h (cool-off blacklist to avoid re-picking repeat losers).
