@@ -1,52 +1,19 @@
-# Large files
-claude-desktop_*.deb
-pumpfun-bot/
-*.exe
-*.dmg
-*.iso
-*.zip
-*.tar.gz
-*.rar
+# Python bytecode
+__pycache__/
+*.pyc
 
-# Dependencies
-node_modules/
+# One-off patch / scratch scripts
+apply_*.py
+create_*.py
+dedup_*.py
+fix_*.py
+patch_*.py
+safe_3d.py
+tune_*.py
 
-# Next.js
-.next/
-out/
-build/
-dist/
+# Backup files
+*.bak*
 
-# Environment
-.env
-.env.local
-
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-
-# TypeScript
-*.tsbuildinfo
-
-# local caches & accidental artifacts
-*_cache.json
-*_klines_cache.json
-/0
-/long
-/short
-
-# local artifacts (not source)
-logs/
-*.log
-*.csv
-
-# local scratch / stray copies
-fable-mexc-bot-live/
-patch-*.mjs
-*.bak
-*.bak-*
-*.bak
-*.bak-*
+# Scratch test files
+test-sniper-*.ts
+bybit_funding_backtest.mjs
