@@ -13,6 +13,7 @@ import { getLastRotationTime } from "@/lib/portfolio-rotator"
 import { getShadowStats, runShadowCycle } from "@/lib/shadow-evaluator"
 import { getWatchdogReport } from "@/lib/watchdog"
 import { evaluatePortfolioRisk, getRiskState } from "@/lib/risk-manager"
+import { getLastAwareness } from "@/lib/awareness"
 
 interface AccountAsset {
   currency: string; availableBalance: number; equity: number;
@@ -303,6 +304,7 @@ export async function GET() {
       lastRotationTime: getLastRotationTime(),
       shadowStats,
       risk,
+      awareness: getLastAwareness(),
     strategyBreakdown,
       watchdog: getWatchdogReport(),
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,

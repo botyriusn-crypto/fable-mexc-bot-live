@@ -56,7 +56,7 @@ const LORENTZIAN_FIELDS: FieldDef[] = [
   { key: "lorentzianConfidenceThreshold", label: "Minimum confidence", step: "0.05" },
   { key: "lorentzianNeighbors", label: "Neighbors", step: "1" },
   { key: "lorentzianLookback", label: "Closed-bar lookback", step: "20" },
-  { key: "lorentzianAdxThreshold", label: "ADX threshold", step: "1" },
+  { key: "lorentzianRegimeThreshold", label: "Regime threshold", step: "0.05" },
 ]
 
 const CONFIRMATION_MODES = [
@@ -303,7 +303,6 @@ export function SettingsPanel({ state }: { state: BotState }) {
           {[
             ["lorentzianUseVolatilityFilter", "Volatility filter"],
             ["lorentzianUseRegimeFilter", "Regime filter"],
-            ["lorentzianUseAdxFilter", "ADX filter"],
             ["lorentzianKernelFilter", "Kernel direction filter"],
             ["lorentzianWebhooks", "Apply confirmation to webhooks"],
           ].map(([key, label]) => (

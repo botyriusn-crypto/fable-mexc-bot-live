@@ -119,6 +119,53 @@ export interface BotState {
     openPositionCount: number
     updatedAt: number
   } | null
+  awareness?: {
+    state: {
+      symbol: string
+      timeframe: string
+      regime: "trend" | "range" | "neutral"
+      trendThreshold: number
+      rangeThreshold: number
+      trend: "long" | "short" | "none"
+      trendStrength: number
+      atr: number
+      mlConfidence: number
+      logisticConfidence: number
+      lorentzianConfidence: number | null
+      mlAllowed: boolean
+      scalp: {
+        direction: "long" | "short" | null
+        triggered: boolean
+        confidence: number
+        reason: string
+        stopLoss: number | null
+        takeProfit: number | null
+        atr: number
+        suggestedSizeUsdt: number | null
+        rMultiple: number
+        filters: {
+          adxOk: boolean
+          volatilityOk: boolean
+          trendAligned: boolean
+          pulledBack: boolean
+          resuming: boolean
+        }
+      } | null
+      gridNetExposure: number
+      gridAvgEntry: number | null
+      gridUnrealizedPnl: number
+      exposurePct: number
+      marginRemaining: number
+      killSwitch: boolean
+    }
+    decision: {
+      action: "scalp-trend" | "grid-mean-revert" | "trail-inventory" | "stand-aside"
+      direction?: "long" | "short"
+      confidence?: number
+      reason?: string
+    }
+    at: number
+  } | null
 }
 
 const fetcher = async (url: string) => {

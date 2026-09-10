@@ -11,6 +11,7 @@ import { PositionCard } from "./position-card"
 import { TradesTable } from "./trades-table"
 import { ActivityLog } from "./activity-log"
 import { SettingsPanel } from "./settings-panel"
+import { AwarenessPanel } from "./awareness-panel"
 import { MultiGridCard } from "./multi-grid-card"
 import { OpenPositionsCard } from "./open-positions-card"
 import { PerformanceAnalyzer } from "./performance-analyzer"
@@ -256,6 +257,10 @@ export function DashboardV2() {
           <div className="w-[35%] flex flex-col gap-3">
             <CollapsibleSection title="Positions" defaultOpen={true}>
               <PositionCard state={state} />
+            </CollapsibleSection>
+
+            <CollapsibleSection title="Awareness" defaultOpen={true}>
+              <AwarenessPanel state={state} />
             </CollapsibleSection>
 
             <CollapsibleSection title="Strategy Settings" defaultOpen={false}>

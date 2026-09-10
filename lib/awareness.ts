@@ -146,3 +146,17 @@ export function buildAwareness(
     killSwitch: risk.killSwitch,
   }
 }
+
+// --- Last-tick awareness cache (written by engine, read by /api/bot/state) ---
+// The engine computes buildAwareness() + decide() on every trend-scalper tick.
+// We cache the result here so the UI renders the *actual* last decision the
+// organism made, rather than a re-computation that could drift from the engine.
+let _lastAwareness: { state: AwarenessState; decision: Decision; at: number } | null = null
+
+export function setLastAwareness(state: AwarenessState, decision: Decision): void {
+  _lastAwareness = { state, decision, at: Date.now() }
+}
+
+export function getLastAwareness(): { state: AwarenessState; decision: Decision; at: number } | null {
+  return _lastAwareness
+}

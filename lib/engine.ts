@@ -37,7 +37,7 @@ import {
   getRiskState,
 } from "./risk-manager"
 import { evaluateScalpSignal } from "./trend-scalper"
-import { buildAwareness, decide } from "./awareness"
+import { buildAwareness, decide, setLastAwareness } from "./awareness"
 
 // Net grid inventory for a symbol/timeframe. Open inventory = pending orders
 // that carry a paired entry (buyPrice): a pending sell with buyPrice is an open
@@ -933,6 +933,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
                 { logistic: mlConf, lorentzian: lorentzian.confidence, allowed: confirmation.allowed },
               )
               const decision = decide(awareness)
+              setLastAwareness(awareness, decision)
 
               await db.insert(classifierDecisions).values({
                 symbol,
