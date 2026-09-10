@@ -3,12 +3,12 @@ import { Card, CardContent } from "@/components/ui/card"
 
 const SLOT_DEFS = [
   { key: "grid", label: "grid" },
-  { key: "funding_carry", label: "funding" },
-  { key: "sniper", label: "sniper" },
+  { key: "trend", label: "trend" },
+  { key: "flash-fade", label: "fade" },
 ] as const
 
 export function OpenPositionsCard({ state }: { state: any }) {
-  const breakdown = state?.strategyBreakdown || { grid: { unrealized: 0, count: 0 }, sniper: { unrealized: 0, count: 0 }, funding_carry: { unrealized: 0, count: 0 } }
+  const breakdown = state?.strategyBreakdown || { grid: { unrealized: 0, count: 0 }, trend: { unrealized: 0, count: 0 } }
   const total = Object.values(breakdown).reduce((s: number, b: any) => s + (b.unrealized || 0), 0)
   const totalOpen = Object.values(breakdown).reduce((s: number, b: any) => s + (b.count || 0), 0)
 

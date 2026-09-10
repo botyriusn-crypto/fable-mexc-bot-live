@@ -11,15 +11,10 @@ import { PositionCard } from "./position-card"
 import { TradesTable } from "./trades-table"
 import { ActivityLog } from "./activity-log"
 import { SettingsPanel } from "./settings-panel"
-import { SniperAlertBubble, SniperCommand } from "./sniper-alerts"
-import SniperReadinessGauge from "../../app/components/SniperReadinessGauge"
-import { AdvisorCard } from "./advisor-card"
 import { MultiGridCard } from "./multi-grid-card"
 import { OpenPositionsCard } from "./open-positions-card"
-import { FundingCard } from "./funding-card"
 import { PerformanceAnalyzer } from "./performance-analyzer"
 import { MarketBar } from "./market-bar"
-import { ClassifierCard } from "./classifier-card"
 import { ChevronUp, X, ExternalLink, ChevronDown, ChevronRight } from "lucide-react"
 
 const fmt = (v: number | null | undefined, digits = 2) =>
@@ -244,9 +239,6 @@ export function DashboardV2() {
           {/* LEFT 65% */}
           <div className="w-[65%] flex flex-col gap-3 pr-3">
             <MultiGridCard />
-            <CollapsibleSection title="Funding Momentum (Bybit)" defaultOpen={false}>
-              <FundingCard state={state} />
-            </CollapsibleSection>
 
             <CollapsibleSection title="Charts" defaultOpen={true}>
               <div>
@@ -262,19 +254,11 @@ export function DashboardV2() {
 
           {/* RIGHT 35% */}
           <div className="w-[35%] flex flex-col gap-3">
-            <SniperReadinessGauge />
-
             <CollapsibleSection title="Positions" defaultOpen={true}>
               <PositionCard state={state} />
             </CollapsibleSection>
 
-            <CollapsibleSection title="Sniper intel" defaultOpen={true}>
-              <ClassifierCard state={state} />
-            <AdvisorCard />
-            </CollapsibleSection>
-
             <CollapsibleSection title="Strategy Settings" defaultOpen={false}>
-              <SniperCommand state={state} />
               <SettingsPanel state={state} />
             </CollapsibleSection>
           </div>
@@ -283,7 +267,6 @@ export function DashboardV2() {
 
       {/* TERMINAL */}
       <TerminalPanel state={state} isOpen={terminalOpen} onToggle={() => setTerminalOpen(!terminalOpen)} />
-      <SniperAlertBubble />
     </div>
   )
 }

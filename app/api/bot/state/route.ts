@@ -12,7 +12,6 @@ import { getGridConfigs, gridUnrealizedPnl } from "@/lib/grid"
 import { getLastRotationTime } from "@/lib/portfolio-rotator"
 import { getShadowStats, runShadowCycle } from "@/lib/shadow-evaluator"
 import { getWatchdogReport } from "@/lib/watchdog"
-import { getSniperStats, runSniperCycle } from "@/lib/sniper"
 import { evaluatePortfolioRisk, getRiskState } from "@/lib/risk-manager"
 
 interface AccountAsset {
@@ -33,21 +32,14 @@ async function fetchLiveAccount(exchange: Exchange) {
 
 export const dynamic = "force-dynamic"
 let lastShadowRun = 0
-let lastSniperRun = 0
 
 export async function GET() {
   const nowMs = Date.now()
   if (nowMs - lastShadowRun > 60_000) {
     lastShadowRun = nowMs
     runShadowCycle().catch(() => {})
-    if (nowMs - lastSniperRun > 60_000) {
-      lastSniperRun = nowMs
-      runSniperCycle().catch(() => {})
-    }
   }
   let shadowStats: any = null
-  let sniperStats: any = null
-  try { sniperStats = await getSniperStats() } catch { sniperStats = null }
   try {
     shadowStats = await getShadowStats()
   } catch {
@@ -172,16 +164,12 @@ export async function GET() {
     })
     const unrealizedPnl = exposures.reduce((t, e) => t + e.unrealizedPnl, 0)
 
-    // Strategy breakdown for open positions (mode-filtered)
-    const isLiveMode = cfg.mode === "live"
     const filteredOpenPosRows = openPosRows
     
     const strategyBreakdown: Record<string, { unrealized: number; count: number }> = {
       grid: { unrealized: 0, count: 0 },
-      sniper: { unrealized: 0, count: 0 },
       swing: { unrealized: 0, count: 0 },
-      trend: { unrealized: 0, count: 0 },
-      trend_rider: { unrealized: 0, count: 0 }
+      trend: { unrealized: 0, count: 0 }
     }
 
     for (const p of filteredOpenPosRows) {
@@ -195,7 +183,7 @@ export async function GET() {
       bucket.count += 1
     }
 
-    // Positions-table unrealized (trend / scalp / swing / sniper rows).
+    // Positions-table unrealized (trend / scalp / swing / flash-fade rows).
     // Captured BEFORE the grid bucket is overwritten from gridOrders below.
     // Paper equity must include this — paperBalance alone only reflects
     // settled cash, and gridUnrealized only covers the grid order book.
@@ -206,18 +194,6 @@ export async function GET() {
     // displayed figure reflects open positions, not just closed trades.
     swingStats.totalPnl += strategyBreakdown.swing.unrealized
     
-    // Sniper profitability (all-time, mode-filtered)
-    const sniperTrades = await db.select().from(trades).where(eq(trades.strategy, "sniper"))
-    const filteredSniperTrades = sniperTrades.filter(t => isLiveMode ? t.live === true : t.live !== true)
-    const sniperWins = filteredSniperTrades.filter(t => t.pnl > 0)
-    const sniperLosses = filteredSniperTrades.filter(t => t.pnl <= 0)
-    const sniperTotalPnl = filteredSniperTrades.reduce((s, t) => s + t.pnl, 0)
-    const sniperWinRate = filteredSniperTrades.length > 0 ? sniperWins.length / filteredSniperTrades.length : 0
-    const sniperAvgR = filteredSniperTrades.length > 0 ? sniperTotalPnl / (filteredSniperTrades.length * (cfg.sniperTargetRiskUsdt || 5)) : 0
-    const sniperProfitFactor = sniperLosses.length > 0 
-      ? Math.abs(sniperWins.reduce((s, t) => s + t.pnl, 0) / sniperLosses.reduce((s, t) => s + t.pnl, 0))
-      : sniperWins.length > 0 ? Infinity : 0
-
     const wins = recentTrades.filter(t => t.pnl > 0).length
     const winRate = recentTrades.length > 0 ? wins / recentTrades.length : 0
 
@@ -327,17 +303,7 @@ export async function GET() {
       lastRotationTime: getLastRotationTime(),
       shadowStats,
       risk,
-      sniperStats,
     strategyBreakdown,
-    sniperProfitability: {
-      winRate: sniperWinRate,
-      avgR: sniperAvgR,
-      totalPnl: sniperTotalPnl,
-      profitFactor: sniperProfitFactor,
-      totalTrades: filteredSniperTrades.length,
-      wins: sniperWins.length,
-      losses: sniperLosses.length
-    },
       watchdog: getWatchdogReport(),
       config: cfg, openPosition, openPositions: openPosRows, exposures, managedMarkets,
       markPrice, unrealizedPnl: totalGridUnrealized + positionsUnrealized,

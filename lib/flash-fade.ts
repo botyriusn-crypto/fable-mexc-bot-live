@@ -1,4 +1,5 @@
 import type { Candle } from "./mexc/public"
+import { and, eq } from "drizzle-orm"
 import { db } from "./db"
 import { botLogs, positions } from "./db/schema"
 
@@ -35,8 +36,27 @@ export function detectFlashFade(candles: Candle[], config?: Partial<FlashFadeCon
   return { detected: true, direction, entryPrice, stopLoss, takeProfit, reason: `${direction.toUpperCase()} fade: ${Math.abs(movePct).toFixed(1)}% move`, movePct: Math.abs(movePct), volumeMultiplier }
 }
 
+// Pure entry gate (unit-testable): never stack a second flash-fade position
+// on the same symbol, and cap total concurrent flash-fade positions at
+// config.maxPositions. A choppy listing printing back-to-back ±20% candles
+// would otherwise open overlapping positions on the same coin.
+export function flashFadeEntryAllowed(
+  openFlashPositions: { symbol: string }[],
+  symbol: string,
+  maxPositions: number,
+): boolean {
+  if (openFlashPositions.some((p) => p.symbol === symbol)) return false
+  if (openFlashPositions.length >= maxPositions) return false
+  return true
+}
+
 export async function executeFlashFade(symbol: string, timeframe: string, signal: FlashFadeSignal, config: FlashFadeConfig): Promise<boolean> {
   if (!signal.detected || !signal.direction) return false
+  const open = await db.select({ symbol: positions.symbol }).from(positions)
+    .where(and(eq(positions.status, "open"), eq(positions.strategy, "flash-fade")))
+  // Skip silently, like below-threshold signals: detection runs every tick per
+  // coin, so a skip log here would spam on every tick while a position is open.
+  if (!flashFadeEntryAllowed(open, symbol, config.maxPositions)) return false
   const quantity = (config.positionSizeUsdt * config.leverage) / signal.entryPrice
   await db.insert(positions).values({
     symbol, timeframe, side: signal.direction, entryPrice: signal.entryPrice,

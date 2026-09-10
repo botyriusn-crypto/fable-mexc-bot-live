@@ -26,16 +26,6 @@ export const FIELD_LIMITS: Record<string, FieldLimit> = {
   rsiPeriod:             { min: 5,   max: 30,  maxStep: 5,   maxRelStep: 0.5 },
   momentumThreshold:     { min: 0.2, max: 1.5, maxStep: 0.3, maxRelStep: 0.5 },
   positionSizeUsdt:      { min: 5,   max: 100, maxStep: 25,  maxRelStep: 0.5 },
-  sniperSigmaExtreme:    { min: 2.0, max: 6.0, maxStep: 0.5, maxRelStep: 0.3 },
-  sniperVolumeSurgeMult: { min: 1.0, max: 5.0, maxStep: 0.5, maxRelStep: 0.3 },
-  sniperMinVolumeUsdt:   { min: 100000, max: 10000000, maxStep: 1000000, maxRelStep: 0.5 },
-  sniperMaxEntries:      { min: 1,   max: 10,  maxStep: 2,   maxRelStep: 0.5 },
-  sniperPositionSizeUsdt:{ min: 5,   max: 500, maxStep: 50,  maxRelStep: 0.5 },
-  sniperLeverage:        { min: 1,   max: 10,  maxStep: 2,   maxRelStep: 0.5 },
-  sniperConfidenceFloor: { min: 0.5, max: 0.9, maxStep: 0.05, maxRelStep: 0.2 },
-  sniperCorrThreshold:   { min: 0.5, max: 0.95, maxStep: 0.05, maxRelStep: 0.2 },
-  sniperMomentumThreshold: { min: 0.3, max: 1.5, maxStep: 0.1, maxRelStep: 0.3 },
-  sniperTrailAtrMult:   { min: 0.2, max: 2.0, maxStep: 0.2, maxRelStep: 0.3 },
 }
 
 export interface RecommendationInput {

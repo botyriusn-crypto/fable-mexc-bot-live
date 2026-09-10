@@ -78,7 +78,7 @@ export async function register() {
       }, 5 * 60 * 60 * 1000)
 
       // Swing Breakout removed (replaced by Funding Fade). Funding runs
-      // inside runTick itself (runFundingCarry), so no separate interval.
+      // inside runTick itself, so no separate interval.
     } catch (err) {
       console.error("[Startup] Failed to initialize WebSockets:", err)
       if (await isRunning()) {

@@ -1,8 +1,8 @@
 // lib/exposure.ts
 // Cross-strategy exposure aggregation.
 //
-// The entry engines (trend, scalp, sniper, trend-rider, funding-carry, webhook)
-// each size their own position off their own risk rule, and grid deploys its
+// The entry engines (trend, scalp, webhook) each size their own position off
+// their own risk rule, and grid deploys its
 // own ladder. Nothing stops three of them from going long the same symbol at
 // once, so the portfolio's real directional exposure to a single coin can be
 // 3x what any one engine's risk check assumes.
@@ -38,7 +38,7 @@ export interface SymbolExposure {
   byStrategy: Record<string, number> // signed net notional per strategy
 }
 
-// Sum notional exposure to `symbol` across trend/scalp/sniper/rider positions
+// Sum notional exposure to `symbol` across trend/scalp/flash-fade positions
 // AND grid held inventory.
 //
 // Notional conventions (important — they differ by table):

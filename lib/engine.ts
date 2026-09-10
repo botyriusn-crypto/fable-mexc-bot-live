@@ -19,14 +19,12 @@ import { and, desc, eq, gte, isNull, sql } from "drizzle-orm"
 import { type Candle, fetchDeals, computeTakerFlow } from "./mexc/public"
 import { getExchangeClient, type Exchange } from "./exchange"
 import { classifyLorentzian, combineConfirmation } from "./lorentzian"
-import { evaluateTrendRider, detectTrendState } from "./trend-rider"
 import { computeSnapshot, type FeatureVector, type IndicatorSnapshot } from "./indicators"
 import { loadModelFor, trainOnTrade, gateEntry, MODEL_IDS } from "./ml"
 import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
 import { runGridTick, gridUnrealizedPnl, getGridConfigs, type GridConfig } from "./grid"
 import { detectFlashFade, executeFlashFade } from "./flash-fade"
 import { maybeRunGridAiAdvisorAuto } from "./ai-grid-advisor"
-import { runSniperCycle } from "./sniper"
 import { analyzeTradesForMarket, applyRecommendations } from "./ai-advisor"
 import { computeInitialStops, evaluateExit } from "./exits"
 import { MexcWebSocketManager, livePrices } from './mexc/ws';
@@ -40,10 +38,7 @@ import {
 } from "./risk-manager"
 import { evaluateScalpSignal } from "./trend-scalper"
 import { checkExposureGate } from "./exposure"
-import { sniperEntryGuard, withSniperLock, SNIPER_GUARDS } from "./sniper-guards"
 import { evaluateAdvancedEntry, type AdvancedConfig, cvdRollingStats } from "./advanced-strategy"
-import { detectFundingCarry, trailingMeanFunding, computeFundingStops, type FundingCarryConfig } from "./funding-carry"
-import { getFundingRate, getFundingHistory } from "./bybit/public"
 
 const TAKER_FEE = 0.0002 // 0.02%
 
@@ -150,34 +145,6 @@ export function unrealizedPnl(position: Position, markPrice: number): number {
   return (markPrice - position.entryPrice) * dir * qty
 }
 
-// Pearson correlation of close-to-close returns over the overlapping window.
-// Used by the sniper to avoid entering two coins that move in lockstep.
-function priceCorrelation(a: Candle[], b: Candle[]): number {
-  const n = Math.min(a.length, b.length)
-  if (n < 30) return 0
-  const ra: number[] = []
-  const rb: number[] = []
-  for (let i = 1; i < n; i++) {
-    ra.push((a[i].close - a[i - 1].close) / a[i - 1].close)
-    rb.push((b[i].close - b[i - 1].close) / b[i - 1].close)
-  }
-  const m = ra.length
-  const meanA = ra.reduce((sum, v) => sum + v, 0) / m
-  const meanB = rb.reduce((sum, v) => sum + v, 0) / m
-  let num = 0
-  let denA = 0
-  let denB = 0
-  for (let i = 0; i < m; i++) {
-    const da = ra[i] - meanA
-    const db = rb[i] - meanB
-    num += da * db
-    denA += da * da
-    denB += db * db
-  }
-  if (denA === 0 || denB === 0) return 0
-  return num / Math.sqrt(denA * denB)
-}
-
 // Reconcile DB open positions against the exchange's actual open positions.
 // If a position is no longer open on MEXC (liquidated, manually closed, or
 // exchange-side stop), mark it closed in the DB so the UI and risk layer stop
@@ -210,7 +177,7 @@ export async function openPosition(
   snap: IndicatorSnapshot,
   confidence: number,
   features: FeatureVector,
-  strategy: "trend" | "range" | "webhook" | "scalp" | "sniper" | "trend_rider" | "funding_carry" = "trend",
+  strategy: "trend" | "range" | "webhook" | "scalp" = "trend",
   opts?: { sizeUsdtOverride?: number; stopLoss?: number; takeProfit?: number },
 ): Promise<number> {
   // ── Portfolio risk gate ── never ADD risk while halted / over caps.
@@ -226,13 +193,11 @@ export async function openPosition(
   const price = snap.price
 
   // Determine SL/TP first — risk-based sizing needs the stop distance.
-  // Explicit overrides (scalper/sniper) win; otherwise strategy default.
+  // Explicit overrides (scalper) win; otherwise strategy default.
   let stopLoss: number | null = null
   let takeProfit: number | null = null
   let rangeTarget: number | null = null
-  // Apply overrides independently. Trend Rider passes only a structure stop
-  // (no fixed TP by design), so requiring BOTH here silently discarded its
-  // stop and fell through to a generic ATR stop + fixed TP.
+  // Apply overrides independently.
   if (opts?.stopLoss != null) stopLoss = opts.stopLoss
   if (opts?.takeProfit != null) takeProfit = opts.takeProfit
   if (strategy === "range") {
@@ -241,7 +206,7 @@ export async function openPosition(
     rangeTarget = snap.bbMiddle
     if (takeProfit == null) takeProfit = snap.bbMiddle
     if (stopLoss == null) stopLoss = direction === "long" ? price - snap.atr * 1.0 : price + snap.atr * 1.0
-  } else if (strategy !== "trend_rider") {
+  } else {
     const stops = computeInitialStops(direction, price, snap.atr, cfg)
     if (stopLoss == null) stopLoss = stops.stopLoss
     if (takeProfit == null) takeProfit = stops.takeProfit
@@ -253,18 +218,6 @@ export async function openPosition(
   const MIN_MARGIN_USDT = 5
   const budget = marginBudgetRemaining()
   let sizeUsdt = cfg.positionSizeUsdt
-
-  // Risk-based sizing: normalize per-trade dollar risk to a fixed target.
-  // sizeUsdt = targetRiskUsdt * entry / (leverage * risk), capped at the
-  // per-position ceiling and the remaining margin budget. A wide-stop coin
-  // gets less margin, a tight-stop coin gets more — same dollars at risk.
-  if (strategy === "sniper" && stopLoss != null && cfg.sniperTargetRiskUsdt != null && cfg.sniperTargetRiskUsdt > 0) {
-    const risk = Math.abs(price - stopLoss)
-    if (risk > 0) {
-      const riskSized = (cfg.sniperTargetRiskUsdt * price) / (cfg.leverage * risk)
-      sizeUsdt = Math.min(sizeUsdt, riskSized)
-    }
-  }
 
   if (opts?.sizeUsdtOverride != null && opts.sizeUsdtOverride > 0) {
     sizeUsdt = Math.min(opts.sizeUsdtOverride, sizeUsdt)
@@ -719,7 +672,6 @@ export async function runWebhookSignal(
   }
 }
 
-
 async function fetchTickerWithRetry(exchange: any, symbol: string, cache: Map<string, any>) {
   if (cache.has(symbol)) return cache.get(symbol)
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -733,162 +685,6 @@ async function fetchTickerWithRetry(exchange: any, symbol: string, cache: Map<st
     }
   }
   throw new Error("Ticker fetch failed after 3 retries")
-}
-
-// ── Bybit Funding Trading (funding-carry) ──
-// Live-only, Bybit-only, settlement-triggered mean-reversion on extreme funding.
-// Fades the crowded side when funding is extreme AND rolling over. Managed by
-// its own TP/SL/horizon logic (not the generic ATR exit loop).
-async function runFundingCarry(cfg: BotConfig): Promise<void> {
-  if (!cfg.fundingCarryEnabled) return
-  if (cfg.exchange !== "bybit") return
-  // Runs in paper AND live: openPosition/closePosition own the paper/live
-  // split (paper records, live confirms fills + native stops).
-
-  // Bybit prints funding every 8h (28800s). Depth follows the configured
-  // lookback instead of a fixed 20 prints.
-  const PRINT_SEC = 28800
-  const historyLimit = Math.max(3, Math.min(60, Math.round(cfg.fundingCarryMomentumLookbackSec / PRINT_SEC)))
-
-  try {
-    const exchange = getExchangeClient("bybit")
-
-    const fcCfg: FundingCarryConfig = {
-      enabled: true,
-      fundingThreshold: cfg.fundingCarryThreshold,
-      momentumLookbackSec: cfg.fundingCarryMomentumLookbackSec,
-      horizonSec: cfg.fundingCarryHorizonSec,
-      sizeUsdt: cfg.fundingCarrySizeUsdt,
-      leverage: cfg.fundingCarryLeverage,
-      tpBps: cfg.fundingCarryTpBps,
-      slBps: cfg.fundingCarrySlBps,
-    }
-
-    // ── Manage ALL open funding_carry positions (universe, not one symbol) ──
-    const openPositions = await getOpenPositions()
-    const fcPositions = openPositions.filter((p) => p.strategy === "funding_carry")
-    for (const fcPosition of fcPositions) {
-      const fcCfgForPos = { ...cfg, symbol: fcPosition.symbol } as BotConfig
-      let mark: number
-      try {
-        mark = (await exchange.fetchTicker(fcPosition.symbol)).lastPrice
-      } catch { continue }
-
-      const ageSec = (Date.now() - fcPosition.openedAt.getTime()) / 1000
-      if (ageSec >= cfg.fundingCarryHorizonSec) {
-        await closePosition(fcPosition, mark, "signal", fcCfgForPos)
-        await log("trade", `FundingCarry closed ${fcPosition.symbol} (horizon ${cfg.fundingCarryHorizonSec}s reached)`)
-        continue
-      }
-
-      const dir = fcPosition.side === "long" ? 1 : -1
-      const tp = fcPosition.takeProfit
-      const sl = fcPosition.stopLoss
-      if (tp != null && dir * (mark - tp) >= 0) {
-        await closePosition(fcPosition, mark, "tp", fcCfgForPos)
-        await log("trade", `FundingCarry TP hit ${fcPosition.symbol} @ ${mark.toFixed(6)}`)
-      } else if (sl != null && dir * (mark - sl) <= 0) {
-        await closePosition(fcPosition, mark, "sl", fcCfgForPos)
-        await log("trade", `FundingCarry SL hit ${fcPosition.symbol} @ ${mark.toFixed(6)}`)
-      }
-    }
-
-    // ── Universe scan: rank all USDT perps by |funding|, probe the top
-    // extremes only (history calls cost rate limit; tickers are one call) ──
-    const heldSymbols = new Set(fcPositions.map((p) => p.symbol))
-    let tickers: { symbol: string; fundingRate: number }[] = []
-    try {
-      const all = exchange.fetchAllTickers ? await exchange.fetchAllTickers() : []
-      tickers = all
-        .filter((t) => t.symbol.endsWith("_USDT") && Math.abs(t.fundingRate ?? 0) >= cfg.fundingCarryThreshold)
-        .sort((a, b) => Math.abs(b.fundingRate ?? 0) - Math.abs(a.fundingRate ?? 0))
-        .slice(0, 3)
-    } catch {
-      // Fall back to the selected market when the bulk scan fails.
-      try {
-        const rate = await getFundingRate(cfg.symbol)
-        if (Math.abs(rate) >= cfg.fundingCarryThreshold) tickers = [{ symbol: cfg.symbol, fundingRate: rate }]
-      } catch { return }
-    }
-
-    // ── One new position per tick max, max 3 concurrent: the 1-min tick
-    // with a top-3 scan churned 211 trades/15h live. Cap the book. ──
-    if (fcPositions.length >= 3) return
-    for (const t of tickers) {
-      if (heldSymbols.has(t.symbol)) continue
-      // ── Adaptive symbol filter (permanent, property-based): only trade
-      // coins whose own recent record is healthy AT SCAN TIME. Skips symbols
-      // on a 2-loss streak or -$5 over their last 10 funding trades (24h
-      // window — a benched symbol must become tradeable again once its
-      // losses age out, otherwise it could never break the streak).
-      // This auto-blacklists persistent losers (ONG/HEMI/ACE on Sep 8) and
-      // re-admits them when their regime flips — no name list to maintain.
-      try {
-        const dayAgo = new Date(Date.now() - 24 * 3600 * 1000)
-        const recent = await db
-          .select({ pnl: trades.pnl })
-          .from(trades)
-          .where(and(eq(trades.strategy, "funding_carry"), eq(trades.symbol, t.symbol), gte(trades.closedAt, dayAgo)))
-          .orderBy(desc(trades.closedAt))
-          .limit(10)
-        let streak = 0
-        for (const r of recent) {
-          if ((r.pnl ?? 0) <= 0) streak++
-          else break
-        }
-        const net10 = recent.reduce((s, r) => s + (r.pnl ?? 0), 0)
-        if (streak >= 2 || net10 < -5) {
-          await log("info", `FundingCarry skipping ${t.symbol}: losing streak (streak=${streak}, last10=${net10.toFixed(2)})`)
-          continue
-        }
-      } catch { /* filter best-effort: DB error must not block trading */ }
-      let history: number[]
-      try {
-        history = await getFundingHistory(t.symbol, historyLimit)
-      } catch { continue }
-      const mean = trailingMeanFunding(history)
-      if (mean == null) continue
-      const signal = detectFundingCarry(t.fundingRate, mean, fcCfg)
-      if (!signal) continue
-
-      let price: number
-      try {
-        price = (await exchange.fetchTicker(t.symbol)).lastPrice
-      } catch { continue }
-      const stops = computeFundingStops(price, signal.direction, fcCfg)
-
-      const candles = await exchange.fetchKlines(t.symbol, cfg.timeframe, 200).catch(() => null)
-      if (!candles || candles.length < 60) {
-        await log("warn", `FundingCarry: insufficient candles for ${t.symbol}`)
-        continue
-      }
-      const snap = computeSnapshot(candles, cfg)
-      snap.price = price
-
-      const features: FeatureVector = {
-        ...snap.features,
-        sideLong: signal.direction === "long" ? 1 : -1,
-      }
-
-      const fcMarketCfg = {
-        ...cfg,
-        symbol: t.symbol,
-        leverage: cfg.fundingCarryLeverage,
-        positionSizeUsdt: cfg.fundingCarrySizeUsdt,
-      } as BotConfig
-
-      const used = await openPosition(fcMarketCfg, signal.direction, snap, 0.5, features, "funding_carry", {
-        stopLoss: stops.stopLoss,
-        takeProfit: stops.takeProfit,
-      })
-      if (used > 0) {
-        await log("trade", `FundingCarry opened ${signal.direction} ${t.symbol}: ${signal.reason}`)
-      }
-      return
-    }
-  } catch (err) {
-    await log("error", `FundingCarry error: ${err instanceof Error ? err.message : String(err)}`)
-  }
 }
 
 // Ticker cache to avoid rate limits
@@ -998,7 +794,6 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     const tickerCache = new Map()
     const exchange = getExchangeClient(cfg.exchange as Exchange)
 
-
     // ── Multi-pair grid execution ──
     const gridCfgs = await getGridConfigs()
 
@@ -1056,7 +851,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         marks.set(symbol, snap.price)
 
         const marketPosition = openPositions.find((p) => p.symbol === symbol && p.timeframe === timeframe)
-        if (marketPosition && marketPosition.strategy !== "trend_rider" && marketPosition.strategy !== "funding_carry") {
+        if (marketPosition) {
           const opposite =
             (marketPosition.strategy === "trend" || marketPosition.strategy === "scalp") &&
             isOppositeSignal(snap, marketPosition.side as "long" | "short")
@@ -1335,276 +1130,6 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
       await evaluatePortfolioRisk(cfgAfter, totalUnrealized)
     } catch { /* best-effort */ }
 
-    // Sniper scan: rule-based liquidity-sweep / sigma-exhaustion signal.
-    // Best-effort — must never throw and break the live trading loop.
-    try {
-      const fresh = await runSniperCycle()
-      if (cfg.sniperLive && fresh.length > 0) {
-        // Option B: enter only the top N candidates by confidence, not every
-        // signal. The margin cap inside openPosition still applies on top.
-        const floor = cfg.sniperConfidenceFloor ?? 0.58
-        const rejectedFloor = fresh.filter((c) => c.confidence < floor)
-        const rejectedDir = fresh.filter((c) => !((c.direction === "long" && cfg.allowLong !== false) || (c.direction === "short" && cfg.allowShort !== false)))
-        if (rejectedFloor.length) console.log(`[Sniper Auto] rejected by floor (<${floor}):`, rejectedFloor.map(c => `${c.symbol}(${c.confidence.toFixed(2)})`).join(', '))
-        if (rejectedDir.length) console.log(`[Sniper Auto] rejected by direction cfg:`, rejectedDir.map(c => `${c.symbol}:${c.direction}`).join(', '))
-        console.log(`[Sniper Auto] fresh=${fresh.length}, floor=${floor}, candidates:`, fresh.map(c => `${c.symbol}(${c.confidence.toFixed(2)})`).join(', '))
-        const ranked = [...fresh]
-          .filter((c) => c.confidence >= floor)
-          .filter((c) => (c.direction === "long" && cfg.allowLong !== false) || (c.direction === "short" && cfg.allowShort !== false))
-          .sort((a, b) => b.confidence - a.confidence)
-        console.log(`[Sniper Auto] after confidence filter: ${ranked.length} signals`)
-        const heldSymbols = new Set((await getOpenPositions()).map((p) => p.symbol))
-        let remainingBudget = marginBudgetRemaining()
-        console.log(`[Sniper] auto-exec: ranked=${ranked.length} budget=${remainingBudget.toFixed(2)}`)
-
-        // ── Correlation dedup ──
-        // Fetch klines for all ranked candidates up front and compute pairwise
-        // correlation, so we skip any coin that moves in lockstep with a
-        // higher-confidence pick (avoids doubling down on one market move).
-        const CORR_THRESHOLD = cfg.sniperCorrThreshold ?? 0.8
-        const klineMap = new Map<string, Candle[]>()
-        for (const c of ranked) {
-          if (heldSymbols.has(c.symbol)) continue
-          try {
-            const k = await exchange.fetchKlines(toExchangeSymbol(c.symbol), c.timeframe, 200)
-            if (k.length >= 60) klineMap.set(c.symbol, k)
-          } catch { console.log(`[Sniper] kline fetch failed for ${c.symbol}`) }
-        }
-        console.log(`[Sniper Auto] held symbols: ${Array.from(heldSymbols).join(', ') || 'none'}`)
-        const picked: string[] = []
-        for (const c of ranked) {
-          if (heldSymbols.has(c.symbol)) continue
-          const k = klineMap.get(c.symbol)
-          if (!k) { console.log(`[Sniper] no klines for ${c.symbol}, skip`); continue }
-          let bestCorr = 0
-          let bestSym = ""
-          for (const sym of picked) {
-            const pk = klineMap.get(sym)
-            if (!pk) continue
-            const corr = priceCorrelation(k, pk)
-            if (corr > bestCorr) { bestCorr = corr; bestSym = sym }
-          }
-          if (bestCorr >= CORR_THRESHOLD) {
-            await log("info", `Sniper: skipped ${c.symbol} (corr ${bestCorr.toFixed(2)} vs ${bestSym}, >= ${CORR_THRESHOLD})`)
-          } else {
-            picked.push(c.symbol)
-            await log("info", `Sniper: picked ${c.symbol} (max corr ${bestCorr.toFixed(2)}${bestSym ? ` vs ${bestSym}` : ""}, < ${CORR_THRESHOLD})`)
-          }
-        }
-        const selected = picked.slice(0, Math.max(1, cfg.sniperMaxEntries ?? 3))
-
-        for (const sym of selected) {
-          const c = ranked.find((r) => r.symbol === sym)
-          if (!c) continue
-          try {
-            heldSymbols.add(c.symbol)
-            const marketCfg: BotConfig = {
-              ...cfg,
-              symbol: c.symbol,
-              timeframe: c.timeframe,
-              leverage: cfg.sniperLeverage ?? cfg.leverage,
-              positionSizeUsdt: cfg.sniperPositionSizeUsdt ?? cfg.positionSizeUsdt,
-            } as BotConfig
-            const candles = await exchange.fetchKlines(toExchangeSymbol(c.symbol), c.timeframe, 200)
-            if (candles.length < 60) continue
-            const snap = computeSnapshot(candles, marketCfg)
-            // ── Live re-price ──
-            // c.entry is the CLOSE of the signal candle at scan time; a market order
-            // fills at the current price. Refuse if price already ran away (we'd be
-            // buying the top of the reclaim) or already fell through the stop.
-            const liveTicker = await fetchTickerWithRetry(exchange, c.symbol, tickerCache).catch(() => null)
-            const livePrice = Number(liveTicker?.lastPrice) || c.entry
-            const slip = (livePrice - c.entry) / c.entry
-            if (slip > SNIPER_GUARDS.maxEntrySlip()) {
-              await log("info", `Sniper: skipped ${c.symbol} — price ran ${(slip * 100).toFixed(2)}% above signal close`)
-              continue
-            }
-            if (livePrice <= c.stopLoss) {
-              await log("info", `Sniper: skipped ${c.symbol} — live ${livePrice} already at/below stop ${c.stopLoss}`)
-              continue
-            }
-            snap.price = livePrice
-            const features: FeatureVector = { ...snap.features, sideLong: c.direction === "long" ? 1 : -1 }
-            // ── Guards + per-symbol cross-process lock ──
-            const used = await withSniperLock(c.symbol, async () => {
-              const guard = await sniperEntryGuard(c.symbol, c.rise24h, cfg.sniperTargetRiskUsdt ?? 0)
-              if (!guard.allowed) {
-                await log("info", `Sniper: blocked ${c.symbol} (${guard.reason})`)
-                return 0
-              }
-              return openPosition(marketCfg, c.direction, snap, c.confidence, features, "sniper", {
-                stopLoss: c.stopLoss,
-                takeProfit: c.takeProfit,
-                sizeUsdtOverride: cfg.sniperPositionSizeUsdt ?? cfg.positionSizeUsdt,
-              })
-            })
-            remainingBudget -= Math.min(used, remainingBudget)
-          } catch (err) {
-            console.error("[Sniper] live entry failed:", err)
-          }
-        }
-      }
-    } catch (err) {
-      console.error("[Sniper] cycle error:", err)
-    }
-
-    // ── Trend Rider (4H detection + mainbar entry + daily regime gate) ──
-    // Only evaluates if enabled. Applies to the mainbar selection (cfg.symbol/cfg.timeframe).
-    if (cfg.trendRiderEnabled) {
-      try {
-        const symbol = cfg.symbol
-        const entryTf = cfg.timeframe
-        
-        // Fetch the three timeframes: entry (mainbar), signal (4H), regime (1D)
-        const [entryCandles, signalCandles, regimeCandles] = await Promise.all([
-          exchange.fetchKlines(toExchangeSymbol(symbol), entryTf, 200),
-          exchange.fetchKlines(toExchangeSymbol(symbol), "Hour4", 200),
-          exchange.fetchKlines(toExchangeSymbol(symbol), "Day1", 120),
-        ])
-
-        if (entryCandles.length < 60 || signalCandles.length < 30 || regimeCandles.length < 20) {
-          await log("warn", `TrendRider: insufficient data for ${symbol}`)
-        } else {
-          // Build no-lookahead slices (same pointer logic as backtest harness)
-          const entryTime = entryCandles[entryCandles.length - 1].time
-          const sigTfSec = 14400 // 4H in seconds
-          const regTfSec = 86400 // 1D in seconds
-
-          // Signal pointer: only include 4H candles fully closed before entryTime
-          let sigIdx = 0
-          while (sigIdx < signalCandles.length && signalCandles[sigIdx].time + sigTfSec <= entryTime) {
-            sigIdx++
-          }
-          const signalSlice = signalCandles.slice(0, sigIdx)
-
-          // Regime pointer: only include 1D candles fully closed before entryTime
-          let regIdx = 0
-          while (regIdx < regimeCandles.length && regimeCandles[regIdx].time + regTfSec <= entryTime) {
-            regIdx++
-          }
-          const regimeSlice = regimeCandles.slice(0, regIdx)
-
-          // Build the config object for evaluateTrendRider
-          const trCfg = {
-            swingLookback: 5,
-            structureWindow: 30,
-            emaSlowPeriod: 50,
-            adxPeriod: 14,
-            adxMinFloor: 22,
-            atrPeriod: 14,
-            atrStopBuffer: 0.5,
-            pullbackEmaPeriod: 21,
-            minStrength: 0.75,
-            invalidationGraceCandles: 3,
-            minTrendAge: cfg.trendRiderMinTrendAge,
-            pullbackTouchAtr: cfg.trendRiderPullbackAtr,
-            requireRejectionCandle: true,
-            chandelierAtrMult: cfg.trendRiderChandelierMult,
-            breakevenAtr: 1.0,
-            htfTrailUseSwing: cfg.trendRiderHtfTrailUseSwing,
-            regimeAdxMin: cfg.trendRiderRegimeAdxMin,
-            regimeEmaPeriod: 20,
-          }
-
-          // Check if we have an open Trend Rider position for this symbol
-          const trPosition = openPositions.find(
-            (p) => p.symbol === symbol && p.timeframe === entryTf && p.strategy === "trend_rider"
-          )
-
-          // Reconstruct the position state from entryFeatures if it exists
-          let positionState: any = null
-          if (trPosition && trPosition.entryFeatures) {
-            positionState = {
-              side: trPosition.side as "long" | "short",
-              entryPrice: trPosition.entryPrice,
-              entryTime: trPosition.openedAt.getTime() / 1000,
-              stopPrice: trPosition.stopLoss ?? trPosition.entryPrice,
-              atrAtEntry: trPosition.atrAtEntry ?? 0,
-              weakStreak: (trPosition.entryFeatures as any).weakStreak ?? 0,
-              peakPrice: (trPosition.entryFeatures as any).peakPrice ?? trPosition.entryPrice,
-            }
-          }
-
-          // Evaluate the signal
-          const signal = evaluateTrendRider(
-            entryCandles,
-            signalSlice.length ? signalSlice : null,
-            positionState,
-            trCfg,
-            cfg.trendRiderRegimeGate && regimeSlice.length ? regimeSlice : null
-          )
-
-          // Only log actionable signals to avoid spamming the activity log
-          if (signal.action !== "none") {
-            await log("info", `TrendRider ${symbol}: ${signal.action} ${signal.side || ""} ${signal.reason}`)
-          }
-
-          // Handle the signal
-          if (signal.action === "enter" && !trPosition && signal.side) {
-            // Open a new position with Trend Rider leverage
-            const trMarketCfg = { ...cfg, leverage: cfg.trendRiderLeverage ?? cfg.leverage } as BotConfig
-            const snap = computeSnapshot(entryCandles, trMarketCfg)
-            snap.price = entryCandles[entryCandles.length - 1].close
-
-            // Compute initial structure stop (mirrors backtest harness)
-            const stateNow = detectTrendState(signalSlice.length ? signalSlice : entryCandles, null, trCfg)
-            const entryAtr = (snap.features as any).atr ?? 0
-            const initialStop =
-              stateNow.structureStopPrice != null
-                ? signal.side === "long"
-                  ? stateNow.structureStopPrice - entryAtr * trCfg.atrStopBuffer
-                  : stateNow.structureStopPrice + entryAtr * trCfg.atrStopBuffer
-                : undefined
-
-            const features: FeatureVector = {
-              ...snap.features,
-              sideLong: signal.side === "long" ? 1 : -1,
-            }
-
-            await openPosition(trMarketCfg, signal.side, snap, 0.8, features, "trend_rider", {
-              stopLoss: initialStop,
-              sizeUsdtOverride: cfg.trendRiderPositionSizeUsdt,
-            })
-            await log("trade", `TrendRider opened ${signal.side} ${symbol} stop=${initialStop?.toFixed(6) ?? "none"}`)
-          } else if (signal.action === "exit" && trPosition) {
-            // Close the position
-            const snap = computeSnapshot(entryCandles, cfg)
-            snap.price = entryCandles[entryCandles.length - 1].close
-            // Map TrendRider exit reasons to the allowed closePosition reason types
-            const exitReasonMap: Record<string, "signal" | "manual" | "partial" | "tp" | "sl" | "trail"> = {
-              "structure_stop_hit": "sl",
-              "trend_reversed": "signal",
-              "trend_invalidated": "signal",
-              "chandelier_trailed": "trail",
-              "stop_trailed_up": "trail",
-              "in_trend": "trail",
-            }
-            const mappedReason = exitReasonMap[signal.reason] || "signal"
-            await closePosition(trPosition, snap.price, mappedReason, cfg)
-            await log("trade", `TrendRider closed ${symbol}: ${signal.reason}`)
-          } else if (signal.action === "hold" && trPosition && positionState) {
-            // Update the position state (peakPrice, stopPrice, weakStreak)
-            await db
-              .update(positions)
-              .set({
-                stopLoss: positionState.stopPrice,
-                entryFeatures: {
-                  ...(trPosition.entryFeatures as any),
-                  weakStreak: positionState.weakStreak,
-                  peakPrice: positionState.peakPrice,
-                },
-              })
-              .where(eq(positions.id, trPosition.id))
-          }
-        }
-      } catch (err) {
-        await log("error", `TrendRider error: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }
-
-    // ── Bybit Funding Trading (funding-carry) ──
-    await runFundingCarry(cfg)
-
     return { status: "ok" }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -1627,7 +1152,6 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     _tickInProgress = false
   }
 }
-
 
 // --- Real-time WebSocket Engine ---
 export async function initRealtimeEngine(symbol: string, timeframe: string) {
