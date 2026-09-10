@@ -116,8 +116,19 @@ export function calculateDynamicSize(
   // We cap at maxKelly to prevent over-leverage in highly volatile conditions
   const maxSize = equity * maxKelly;
   sizeUsdt = Math.min(sizeUsdt, maxSize);
-  
+
   return { sizeUsdt, riskAmount, dynamicRisk: true };
+}
+
+/**
+ * Convert a risk-sized NOTIONAL (as produced by calculateDynamicSize and the
+ * strategy sizings) into the MARGIN the engine's size slot expects
+ * (`quantity = sizeUsdt * leverage / price`). Skipping this conversion
+ * overstates the position — and the risk taken — by exactly `leverage`×.
+ */
+export function notionalToMarginUsdt(notionalUsdt: number, leverage: number): number {
+  if (!(notionalUsdt > 0)) return 0
+  return notionalUsdt / Math.max(1, leverage || 1)
 }
 
 export function evaluateEntry(

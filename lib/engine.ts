@@ -21,7 +21,7 @@ import { getExchangeClient, type Exchange } from "./exchange"
 import { classifyLorentzian, combineConfirmation } from "./lorentzian"
 import { computeSnapshot, type FeatureVector, type IndicatorSnapshot } from "./indicators"
 import { loadModelFor, trainOnTrade, gateEntry, MODEL_IDS } from "./ml"
-import { evaluateEntry, isOppositeSignal, detectRegime } from "./strategy"
+import { evaluateEntry, isOppositeSignal, detectRegime, notionalToMarginUsdt } from "./strategy"
 import { getActiveOrders, runGridTick, gridUnrealizedPnl, getGridConfigs, type GridConfig } from "./grid"
 import { detectFlashFade, executeFlashFade } from "./flash-fade"
 import { maybeRunGridAiAdvisorAuto } from "./ai-grid-advisor"
@@ -232,9 +232,11 @@ export async function openPosition(
     if (takeProfit == null) takeProfit = stops.takeProfit
   }
 
-  // Effective margin for this position: honor a risk-based size override when
-  // provided (trend scalper), but never below a small floor or above the
-  // configured size AND the remaining margin budget.
+  // Effective MARGIN for this position (all three inputs are margin-sized):
+  // honor a risk-based size override when provided (trend scalper / advisor —
+  // converted from notional at the call site via notionalToMarginUsdt), but
+  // never below a small floor or above the configured size AND the remaining
+  // margin budget.
   const MIN_MARGIN_USDT = 5
   const budget = marginBudgetRemaining()
   let sizeUsdt = cfg.positionSizeUsdt
@@ -962,7 +964,10 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
                   rMultiple: scalp.rMultiple,
                 })
                 await openPosition(marketCfg, decision.direction, snap, blended, scalpFeatures, "scalp", {
-                  sizeUsdtOverride: scalp.suggestedSizeUsdt ?? undefined,
+                  // suggestedSizeUsdt is NOTIONAL — convert to the margin slot.
+                  sizeUsdtOverride: scalp.suggestedSizeUsdt != null
+                    ? notionalToMarginUsdt(scalp.suggestedSizeUsdt, marketCfg.leverage)
+                    : undefined,
                   stopLoss: scalp.stopLoss ?? undefined,
                   takeProfit: scalp.takeProfit ?? undefined,
                 })
@@ -1084,7 +1089,10 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
                   adv.confidence,
                   signal.features,
                   signal.strategy,
-                  adv.sizeUsdt != null ? { sizeUsdtOverride: adv.sizeUsdt } : undefined,
+                  // adv.sizeUsdt is NOTIONAL — convert to the margin slot.
+                  adv.sizeUsdt != null
+                    ? { sizeUsdtOverride: notionalToMarginUsdt(adv.sizeUsdt, marketCfg.leverage) }
+                    : undefined,
                 )
               } else {
                 await log("info", `Advanced strategy blocked ${signal.candidateDirection}: ${adv.reason}`)

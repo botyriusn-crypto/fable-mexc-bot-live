@@ -26,6 +26,7 @@ export interface ScalpSignal {
   stopLoss: number | null
   takeProfit: number | null
   atr: number
+  /** Risk-sized NOTIONAL (pre-leverage). The engine converts it to margin. */
   suggestedSizeUsdt: number | null
   rMultiple: number
   filters: {
@@ -43,15 +44,34 @@ function envNum(name: string, def: number): number {
 }
 
 // Tunable thresholds (env-overridable) — defaults chosen for 5–15m scalps.
-const SCALP = {
+export const SCALP = {
   adxMin: () => envNum("SCALP_ADX_MIN", 18), // below → chop, stand aside
   adxMax: () => envNum("SCALP_ADX_MAX", 50), // above → trend likely exhausted / news spike
   atrPctMin: () => envNum("SCALP_ATRPCT_MIN", 0.0015), // 0.15% — need enough range to scalp
-  atrPctMax: () => envNum("SCALP_ATRPCT_MAX", 0.06), // 6% — beyond this is unsafe chaos
+  // 10%: the risk model already scales size with ATR, so volatility is priced,
+  // not banned — a 6% ceiling locked out exactly the high-momentum listings
+  // (e.g. NIULAI median 7.5%) the candidate scan elects. Tighten via env if wanted.
+  atrPctMax: () => envNum("SCALP_ATRPCT_MAX", 0.10),
   pullbackLookback: () => Math.round(envNum("SCALP_PULLBACK_LOOKBACK", 6)),
-  scoreThreshold: () => envNum("SCALP_SCORE_THRESHOLD", 0.6),
+  // 0.5: measured funnel admits ~1.5–2% of bars as setups (vs 0.3% at 0.6,
+  // where the threshold rejected ~98% of direction-set bars). Tighten via env.
+  scoreThreshold: () => envNum("SCALP_SCORE_THRESHOLD", 0.5),
   riskPct: () => envNum("SCALP_RISK_PCT", 0.01), // risk 1% of equity per scalp
   rMultiple: () => envNum("SCALP_R_MULTIPLE", 1.8), // target reward:risk
+}
+
+/**
+ * MACD histogram turning in the trade direction on this bar OR the previous
+ * one. Requiring the turn on the exact trigger bar rejected ~6 of 7
+ * otherwise-ready setups (measured funnel); a one-bar window keeps the
+ * resumption meaning while admitting normal timing jitter.
+ */
+export function macdTurnedUp(series: number[], side: 1 | -1): boolean {
+  if (series.length < 3) return false
+  const now = series[series.length - 1] ?? 0
+  const prev = series[series.length - 2] ?? now
+  const prevPrev = series[series.length - 3] ?? prev
+  return side === 1 ? now >= prev || prev >= prevPrev : now <= prev || prev <= prevPrev
 }
 
 function nullSignal(reason: string, atr: number, filters: ScalpSignal["filters"]): ScalpSignal {
@@ -113,7 +133,6 @@ export function evaluateScalpSignal(
   const recent = candles.slice(-lookback)
   const recentRsi = rsiSeries.slice(-lookback)
   const last = candles[candles.length - 1]
-  const prev = candles[candles.length - 2]
   const fastEmaNow = fastEmaSeries[fastEmaSeries.length - 1] ?? snap.emaFast
   const macdNow = macdSeries[macdSeries.length - 1] ?? snap.macdHist
   const macdPrev = macdSeries[macdSeries.length - 2] ?? macdNow
@@ -130,16 +149,18 @@ export function evaluateScalpSignal(
     pulledBack =
       recent.some((c) => c.low <= fastEmaNow * 1.001) ||
       recentRsi.some((r) => r <= 48)
-    // Resumption: latest candle is a bullish momentum bar closing back up, with
-    // MACD histogram turning up.
-    resuming = last.close > last.open && last.close > prev.close && macdNow >= macdPrev && snap.rsi < cfg.rsiOverbought
+    // Resumption: latest candle is a directional momentum bar with MACD
+    // histogram turning up on this bar or the previous one. (The old extra
+    // demand — close also beyond the previous close — rejected otherwise
+    // identical setups; direction + turn + RSI room is the resumption.)
+    resuming = last.close > last.open && macdTurnedUp(macdSeries, 1) && snap.rsi < cfg.rsiOverbought
     if (trendAligned && pulledBack && resuming) direction = "long"
   } else if (bear && cfg.allowShort && (structure.lowerHighs || structure.lowerLows)) {
     trendAligned = true
     pulledBack =
       recent.some((c) => c.high >= fastEmaNow * 0.999) ||
       recentRsi.some((r) => r >= 52)
-    resuming = last.close < last.open && last.close < prev.close && macdNow <= macdPrev && snap.rsi > cfg.rsiOversold
+    resuming = last.close < last.open && macdTurnedUp(macdSeries, -1) && snap.rsi > cfg.rsiOversold
     if (trendAligned && pulledBack && resuming) direction = "short"
   }
 

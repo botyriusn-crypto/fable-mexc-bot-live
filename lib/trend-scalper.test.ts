@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest"
 import type { Candle } from "./mexc/public"
 import { computeSnapshot } from "./indicators"
-import { evaluateScalpSignal } from "./trend-scalper"
+import { notionalToMarginUsdt } from "./strategy"
+import { evaluateScalpSignal, macdTurnedUp, SCALP } from "./trend-scalper"
 
 // Minimal config matching the fields the scalper + computeSnapshot read.
 const cfg: any = {
@@ -18,73 +19,8 @@ const cfg: any = {
   positionSizeUsdt: 50,
 }
 
-// Seeded RNG (mulberry32) so tests are deterministic.
-function rng(seed: number): () => number {
-  let a = seed
-  return () => {
-    a |= 0
-    a = (a + 0x6d2b79f5) | 0
-    let x = Math.imul(a ^ (a >>> 15), 1 | a)
-    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x
-    return ((x ^ (x >>> 14)) >>> 0) / 4294967296
-  }
-}
-
-const t = 1_700_000_000_000
-// Build a candle from open/close with realistic two-sided wicks (so ADX and ATR
-// behave like a real market rather than maxing out on perfectly clean moves).
-function mkCandle(i: number, open: number, close: number, wickFrac: number, volume: number): Candle {
-  const body = Math.max(open, close)
-  const bodyLow = Math.min(open, close)
-  const high = body * (1 + wickFrac)
-  const low = bodyLow * (1 - wickFrac)
-  return { time: t + i * 60_000, open, high, low, close, volume }
-}
-
-// A noisy uptrend (net drift up, but many red candles → moderate ADX), then a
-// clean multi-candle pullback into the fast EMA, then a strong green resumption
-// candle on higher volume.
-function uptrendPullbackResume(): Candle[] {
-  const r = rng(42)
-  const out: Candle[] = []
-  let p = 100
-  let i = 0
-  // 44 noisy rising candles: +0.4% drift with ±0.6% noise
-  for (; i < 44; i++) {
-    const open = p
-    const drift = 0.0035
-    const noise = (r() - 0.5) * 0.026
-    p = p * (1 + drift + noise)
-    out.push(mkCandle(i, open, p, 0.0015 + r() * 0.004, 1000 + Math.floor(r() * 200)))
-  }
-  // 4-candle clean pullback (~0.8% down each) on rising volume
-  for (let k = 0; k < 4; k++, i++) {
-    const open = p
-    p = p * (1 - 0.008)
-    out.push(mkCandle(i, open, p, 0.001 + r() * 0.002, 1400))
-  }
-  // strong green resumption candle on a clear volume surge
-  {
-    const open = p
-    p = p * (1 + 0.028)
-    out.push(mkCandle(i, open, p, 0.0015, 3200))
-  }
-  return out
-}
-
-// Tight, directionless chop: net-zero drift with symmetric noise → low ADX.
-function chop(): Candle[] {
-  const r = rng(7)
-  const out: Candle[] = []
-  let p = 100
-  for (let i = 0; i < 60; i++) {
-    const open = p
-    const noise = (r() - 0.5) * 0.006 // ±0.3%, no drift
-    p = p * (1 + noise)
-    out.push(mkCandle(i, open, p, 0.001 + r() * 0.002, 1000))
-  }
-  return out
-}
+// Shared deterministic builders (see lib/test-candles.ts).
+import { uptrendPullbackResume, chop } from "./test-candles"
 
 describe("evaluateScalpSignal", () => {
   it("fires a long on a clean uptrend pullback-resume setup", () => {
@@ -114,10 +50,89 @@ describe("evaluateScalpSignal", () => {
     expect(sig.direction).toBeNull()
   })
 
+  it("accepts a MACD turn on the previous bar, rejects older turns", () => {
+    // Long side: turn on this bar, turn on previous bar, no recent turn.
+    expect(macdTurnedUp([0, -2, -1], 1)).toBe(true)
+    expect(macdTurnedUp([0, 1, 0.5], 1)).toBe(true)
+    expect(macdTurnedUp([2, 1, 0], 1)).toBe(false)
+    // Short side mirrors.
+    expect(macdTurnedUp([0, 2, 1], -1)).toBe(true)
+    expect(macdTurnedUp([0, -1, -0.5], -1)).toBe(true)
+    expect(macdTurnedUp([-2, -1, 0], -1)).toBe(false)
+    // Too short to judge.
+    expect(macdTurnedUp([1, 2], 1)).toBe(false)
+  })
+
+  it("resumes on a directional bar even when it doesn't exceed the prior close", () => {
+    // Lift the previous close a touch above the trigger bar's close: the
+    // trigger bar itself is untouched (still green, MACD turning), so the
+    // only thing the old vs-prev clause could object to is gone with it.
+    const candles = uptrendPullbackResume()
+    const lastClose = candles[candles.length - 1].close
+    const prev = candles[candles.length - 2]
+    const lifted = lastClose * 1.002
+    candles[candles.length - 2] = {
+      ...prev,
+      high: Math.max(prev.high, lifted * 1.001),
+      close: lifted,
+    }
+    const snap = computeSnapshot(candles, cfg)
+    const sig = evaluateScalpSignal(snap, candles, cfg, 10000)
+    expect(sig.filters.resuming).toBe(true)
+    expect(sig.direction).toBe("long")
+  })
+
+  it("defaults the volatility ceiling to 10% (ATR risk is priced by sizing)", () => {
+    delete process.env.SCALP_ATRPCT_MAX
+    expect(SCALP.atrPctMax()).toBe(0.1)
+    expect(SCALP.atrPctMin()).toBe(0.0015)
+  })
+
+  it("defaults the confluence threshold to 0.5 (measured 1-3% setup rate)", () => {
+    delete process.env.SCALP_SCORE_THRESHOLD
+    expect(SCALP.scoreThreshold()).toBe(0.5)
+  })
+
   it("stays silent when there is insufficient data", () => {
     const candles = uptrendPullbackResume().slice(-10)
     const snap = computeSnapshot(candles, cfg)
     const sig = evaluateScalpSignal(snap, candles, cfg, 400)
     expect(sig.triggered).toBe(false)
+  })
+
+  it("converts risk notional to margin without leverage inflation", () => {
+    expect(notionalToMarginUsdt(1000, 10)).toBe(100)
+    expect(notionalToMarginUsdt(1000, 1)).toBe(1000)
+    expect(notionalToMarginUsdt(0, 10)).toBe(0)
+    expect(notionalToMarginUsdt(-50, 10)).toBe(0)
+    expect(notionalToMarginUsdt(1000, 0)).toBe(1000)
+  })
+
+  it("risks at most 1% of equity at 10x after margin conversion", () => {
+    const candles = uptrendPullbackResume()
+    const snap = computeSnapshot(candles, cfg)
+    const equity = 10000
+    const sig = evaluateScalpSignal(snap, candles, cfg, equity)
+    expect(sig.triggered).toBe(true)
+    expect(sig.suggestedSizeUsdt).not.toBeNull()
+    expect(sig.stopLoss).not.toBeNull()
+    // What the engine actually risks now that the notional is booked as margin:
+    const margin = notionalToMarginUsdt(sig.suggestedSizeUsdt!, cfg.leverage)
+    const stopDist = snap.price - sig.stopLoss!
+    const stopFrac = stopDist / snap.price
+    const actualRisk = margin * cfg.leverage * stopFrac
+    // Safety property: realized risk never exceeds the configured 1% × confidence.
+    // (The Kelly cap can only push it lower.)
+    expect(actualRisk).toBeLessThanOrEqual(equity * 0.01 * sig.confidence + 0.5)
+    // Composition check: margin booking preserves the sizing math exactly.
+    // (sizing assumes a 1.5×ATR stop; the capped notional × confidence × the
+    // actual stop fraction is what the account really risks.)
+    const uncapped = (equity * 0.01) / ((1.5 * sig.atr) / snap.price)
+    const expected = Math.min(uncapped, equity * 0.25) * sig.confidence * stopFrac
+    expect(actualRisk).toBeCloseTo(expected, 0)
+    // Pre-fix behavior booked the raw notional as margin, so the engine
+    // multiplied by leverage again — exactly leverage× the realized risk.
+    const prefixRisk = sig.suggestedSizeUsdt! * cfg.leverage * stopFrac
+    expect(prefixRisk / actualRisk).toBeCloseTo(cfg.leverage, 0)
   })
 })

@@ -101,6 +101,39 @@ describe("trend-candidate", () => {
     expect(withHype.reasons.join(" ")).toMatch(/ETF rumor/)
   })
 
+  it("rides an early-stage PUMP-style runner, with cautions attached", () => {
+    // Strong-but-tradeable hype runner: volume explosion, mild crowded-long
+    // funding, not yet a vertical blowoff. Expect: long wins AND the reasons
+    // still show the squeeze headwind and the chase penalty.
+    const s = scoreTrendCandidate({
+      symbol: "PUMP_USDT",
+      candles: buildCandles({ drift: 0.006, endVolumeMult: 4 }),
+      lastPrice: 0.006,
+      turnover24h: 200_000_000,
+      riseFallRate24h: 0.12,
+      fundingRate: 0.0003,
+    })
+    expect(s.direction).toBe("long")
+    expect(s.tradable).toBe(true)
+    const text = s.reasons.join(" ")
+    expect(text).toMatch(/crowded/)
+    expect(text).toMatch(/chase risk/)
+  })
+
+  it("refuses to auto-pick a vertical late-stage blowoff", () => {
+    // +2%/candle vertical, +60% day, fully crowded: the only honest answer is
+    // no auto-pick — FIND must leave the selector alone here.
+    const blowoff = {
+      symbol: "PUMP_USDT",
+      candles: buildCandles({ drift: 0.02, endVolumeMult: 8 }),
+      lastPrice: 0.006,
+      turnover24h: 200_000_000,
+      riseFallRate24h: 0.6,
+      fundingRate: 0.001,
+    } as const
+    expect(pickWinner(rankTrendCandidates([{ ...blowoff }]))).toBeNull()
+  })
+
   it("ranks best-first and pre-screens a universe without klines", () => {
     const ranked = rankTrendCandidates([
       {

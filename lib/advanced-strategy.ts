@@ -295,6 +295,7 @@ export function evaluateAdvancedEntry(
 
   const passed = failures.length === 0
 
+  // NOTIONAL (pre-leverage) — the engine converts it to the margin slot.
   let sizeUsdt: number | null = null
   if (passed && cfg.dynamicSizingEnabled) {
     sizeUsdt = confidenceScaledSize(equity, atr, price, confidence, cfg).sizeUsdt

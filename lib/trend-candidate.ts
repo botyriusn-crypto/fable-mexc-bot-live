@@ -193,7 +193,14 @@ function scoreSide(
 
   let score = factors.reduce((s, f) => s + f.value * f.weight, 0) * 100
   const reasons = factors
-    .filter((f) => (f.value >= 0.6 && f.weight >= 0.1) || f.name === "liquidity hunt" && f.value >= 0.5)
+    .filter(
+      (f) =>
+        (f.value >= 0.6 && f.weight >= 0.1) ||
+        // A strongly negative high-weight factor is a caution, not silence —
+        // e.g. crowded-long funding zeroing the squeeze factor on a long.
+        (f.value <= 0.2 && f.weight >= 0.1) ||
+        (f.name === "liquidity hunt" && f.value >= 0.5),
+    )
     .map((f) => `${f.name}: ${f.detail}`)
 
   // A manual research note is always worth surfacing, even though its weight is small.
