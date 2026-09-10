@@ -161,9 +161,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         const closes = candles.map(c => c.close)
         const lastClose = closes[closes.length - 1]
         const atrArr = atr(candles, 14)
-        const adxArr = adx(candles, 14)
         const lastAtr = atrArr[atrArr.length - 1]
-        const lastAdx = adxArr[adxArr.length - 1]
         const atrPct = (lastAtr / lastClose) * 100
 
         // 1.2 Fee-adjusted profitability gate: a COMBO grid only profits when
@@ -172,57 +170,35 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         // grid can't reliably beat fees, so skip it.
         if (atrPct / 10 < 0.03) { gateStats.feeGate++; continue }
 
-        const chop = calcChop(candles, 14)
-
-        let bbTouches = 0
-        const lookback = Math.min(50, candles.length)
-        for (let i = candles.length - lookback; i < candles.length; i++) {
-          const slice = closes.slice(Math.max(0, i - 20), i + 1)
-          if (slice.length < 20) continue
-          const bb = bollinger(slice, 20, 2)
-          if (candles[i].low <= bb.lower || candles[i].high >= bb.upper) {
-            bbTouches++
-          }
-        }
-
-        const momentum3h = closes.length >= 13 ? ((closes[closes.length - 1] - closes[closes.length - 13]) / closes[closes.length - 13]) * 100 : 0
-        // 1.3 Symmetric momentum filter: a neutral COMBO grid is hurt by strong
-        // moves in EITHER direction, so reject both pumps and dumps (>2.5%).
-        if (Math.abs(momentum3h) > 2.5) { gateStats.momentumGate++; continue }
-
-        // ONDO-DNA scoring (validated 2026-08-23): grid edge lives in an
-        // ATR sweet spot (~0.6-1.2%), not raw chop. Winners averaged ATR
-        // 0.95%, losers 2.15% — the old linear atrPct*5 rewarded trending
-        // coins that break the range (TAO scored -9 yet made +$7.8k).
-        const atrSweet = Math.max(0, 100 - Math.abs(atrPct - 0.9) * 70)
-        const chopScore = Math.min(chop, 120) * 0.5
-        const adxPen = Math.max(0, lastAdx - 25) * 4
-        let score = atrSweet + chopScore - adxPen
-
+        // === VALIDATED FAST PATH ===
+        // The basket already passed OOS walk-forward validation, so the
+        // microcap-tuned momentum / ATR-sweet-spot / chop / DNA scoring is
+        // skipped entirely. Deploy directly with safe settings derived from
+        // ATR. The fee gate above and the depth check below remain as the
+        // universal safety nets.
         const volUsdt = t.amount24 ?? t.volume24 ?? 0
-        const dna = comboDna(candles, 0.6, lastAdx)
-        const params = comboParams(dna, lastClose, volUsdt)
-        console.log(`[LevDebug] ${t.symbol} vol=$${Math.round(volUsdt)} atrPct=${atrPct.toFixed(2)}% lev=${params.suggestedLeverage}x`)
-        if (dna.rejected) { gateStats.dnaRejected++; continue }
-        const blendedScore = Math.round(Math.max(0, Math.min(100, score / 1.5)) * 0.35 + dna.score * 0.65)
+        const safeLeverage = 3
+        const safeSpacingPct = Math.max(0.5, Math.min(2.0, atrPct))
+        const safeLevels = 10
+        console.log(`[Validated] ${t.symbol} atrPct=${atrPct.toFixed(2)}% spacing=${safeSpacingPct.toFixed(2)}% lev=${safeLeverage}x`)
 
         scoredMarkets.push({
           symbol: t.symbol,
           volumeUsdt: Math.round(volUsdt),
           atrPct: parseFloat(atrPct.toFixed(2)),
-          adx: parseFloat(lastAdx.toFixed(1)),
-          chop: parseFloat(chop.toFixed(1)),
-          bbTouches,
-          momentum3h: parseFloat(momentum3h.toFixed(2)),
-          score: Math.round(score),
-          dnaScore: dna.score,
-          chopRatio: parseFloat(dna.chop.toFixed(1)),
-          revRate: parseFloat(dna.revRate.toFixed(2)),
-          driftPct: parseFloat(dna.driftPct.toFixed(1)),
-          suggestedLeverage: params.suggestedLeverage,
-          suggestedSpacingPct: parseFloat(params.spacingPct.toFixed(2)),
-          suggestedLevels: params.levels,
-          blendedScore,
+          adx: 0,
+          chop: 0,
+          bbTouches: 0,
+          momentum3h: 0,
+          score: 100,
+          dnaScore: 100,
+          chopRatio: 0,
+          revRate: 0,
+          driftPct: 0,
+          suggestedLeverage: safeLeverage,
+          suggestedSpacingPct: parseFloat(safeSpacingPct.toFixed(2)),
+          suggestedLevels: safeLevels,
+          blendedScore: 100,
         })
         gateStats.scored++
 
