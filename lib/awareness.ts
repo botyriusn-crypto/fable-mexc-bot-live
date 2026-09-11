@@ -65,10 +65,9 @@ export function decide(state: AwarenessState): Decision {
     return { action: "stand-aside", reason: "risk gate" }
   }
 
-  // 2. Trending regime → trend-following, not grid.
+  // 2. Trending regime → trail aligned profitable inventory instead of
+  // opening a fresh leg; a trail only ever tightens, never widens.
   if (state.regime === "trend") {
-    // (B) If the grid already holds inventory in the trend direction and it is
-    // profitable, trail that inventory instead of opening a fresh scalp leg.
     const trendDir: "long" | "short" | null =
       state.trend === "long" || state.trend === "short" ? state.trend : null
     const inventoryAligned =
@@ -81,25 +80,31 @@ export function decide(state: AwarenessState): Decision {
     if (inventoryAligned && state.gridUnrealizedPnl > oneR && trendDir) {
       return { action: "trail-inventory", direction: trendDir }
     }
-    // (A) Otherwise, if the scalper has a valid pullback-in-trend setup AND the
-    // fused ML gate allows it, ride it.
-    if (state.scalp?.triggered && state.scalp.direction && state.mlAllowed) {
-      return {
-        action: "scalp-trend",
-        direction: state.scalp.direction,
-        confidence: state.scalp.confidence,
-      }
-    }
-    return { action: "stand-aside", reason: "trend but no scalp setup" }
   }
 
-  // 3. Ranging regime → grid mean-reversion.
+  // 3. A triggered, ML-allowed scalp trades in ANY regime. The scalp signal
+  // carries its own trend evidence (EMA/VWAP alignment + structure + its own
+  // ADX band), while the coarse regime label uses a stricter ADX cutoff
+  // (25 vs the scalper's 18) — gating scalps on the label discarded ~2/3 of
+  // measured 15m triggers (Sep 2026 probe: 22 of 33 dead in range/neutral).
+  if (state.scalp?.triggered && state.scalp.direction && state.mlAllowed) {
+    return {
+      action: "scalp-trend",
+      direction: state.scalp.direction,
+      confidence: state.scalp.confidence,
+    }
+  }
+
+  // 4. Ranging regime without a scalp setup → grid mean-reversion.
   if (state.regime === "range") {
     return { action: "grid-mean-revert" }
   }
 
-  // 4. Neutral → stand aside (no flip on ambiguity).
-  return { action: "stand-aside", reason: "neutral regime" }
+  // 5. Trend without a scalp setup, or neutral → stand aside.
+  return {
+    action: "stand-aside",
+    reason: state.regime === "trend" ? "trend but no scalp setup" : "neutral regime",
+  }
 }
 
 // Assemble the shared state from all writers. This is the "organism" builder:
