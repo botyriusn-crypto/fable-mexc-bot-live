@@ -240,8 +240,13 @@ const GRID_LIQUIDATION_SAFETY_FACTOR = 0.75
 
 const POST_SL_COOLDOWN_MS = 90 * 60 * 1000 // no fresh ladder for 90m after a stop-loss on this symbol
 const PER_RUNG_SL_SPACING_MULT = 2.0     // per-rung SL sits 2 spacings from each rung's own entry
-                                          // Sized for observed 71.9% win rate: at 2:1 loss ratio,
-                                          // break-even is 67%, so this is safely +EV.
+                                          // NOTE: the old "observed 71.9% win rate => safely +EV"
+                                          // comment measured the TP-fill rate only, not the whole
+                                          // book. 3-day paper (Sep 2026): taker stops -$150 vs
+                                          // TPs ~+$50, net -$101 in a trend regime — so treat the
+                                          // 2-spacing width as a sizing choice, not a proven edge,
+                                          // and re-validate overall EV per regime before citing
+                                          // break-even math.
 
 async function markPostStopCooldown(symbol: string): Promise<void> {
   const until = new Date(Date.now() + POST_SL_COOLDOWN_MS).toISOString()
@@ -292,25 +297,65 @@ async function cancelOtherPendingOrders(active: GridOrder[], keepId: number, exc
   await db.update(gridOrders).set({ status: "cancelled" }).where(inArray(gridOrders.id, others.map(x => x.id)))
 }
 
+// Pure trade-row builder for the taker stop path. Both legs are market fills
+// here (taker entry, forced market exit), so both legs pay the taker rate —
+// unlike the maker path, which mixes maker entry + taker exit fees.
+export function buildTakerStopTradeValues(o: GridOrder, exitPrice: number, takerFeeRate: number, live: boolean) {
+  const entryPrice = o.buyPrice ?? o.price
+  const sizeUsdt = entryPrice * o.quantity
+  // Taker-path shorts are tracked as buy-to-close orders carrying the short
+  // entry in buyPrice; sells carrying buyPrice are paired long TP orders.
+  const isShort = o.side === "buy"
+  const grossPnl = isShort ? (entryPrice - exitPrice) * o.quantity : (exitPrice - entryPrice) * o.quantity
+  const fees = (entryPrice + exitPrice) * o.quantity * takerFeeRate
+  const row = {
+    symbol: o.symbol, side: isShort ? "short" : "long", entryPrice, exitPrice,
+    sizeUsdt, leverage: o.leverage, pnl: grossPnl - fees, fees,
+    exitReason: "stop-loss", strategy: "grid", live,
+  }
+  // Mirror the maker sibling shapes: short rows carry openedAt, long rows omit it.
+  return isShort ? { ...row, openedAt: o.createdAt } : row
+}
+
+async function trainGridOnClose(cfg: BotConfig, order: GridOrder, tradeId: number, netPnl: number, sizeUsdt: number): Promise<void> {
+  if (!order.entryFeatures) return
+  try {
+    const model = await loadModelFor("grid")
+    await trainOnTrade(
+      model,
+      order.entryFeatures as unknown as FeatureVector,
+      netPnl > 0,
+      sizeUsdt > 0 ? (netPnl / sizeUsdt) * 100 : 0,
+      cfg.mlLearningRate,
+      tradeId,
+      null,
+      MODEL_IDS.grid,
+    )
+  } catch (err) {
+    await log("error", `Grid ML update failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
 async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, exchange?: ExchangeClient): Promise<boolean> {
   const active = await getActiveOrders(gc.symbol, gc.timeframe)
-  
+
   // Check Long inventory
   for (const o of active.filter(x => x.side === "sell" && x.buyPrice != null && x.status === "pending")) {
     const adverse = (o.buyPrice! - price) / o.buyPrice!
     if (o.slPrice != null ? price <= o.slPrice : adverse >= effectiveGridStopPct(o.leverage)) {
       if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 4, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
-      const grossPnl = (price - o.buyPrice!) * o.quantity
-      const { takerFeeRate: rtf1 } = getFeeRates(cfg.exchange as Exchange, o.symbol)
-      const fees = (o.buyPrice! + price) * o.quantity * rtf1
-      if (cfg.mode === "paper") {
-        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - fees}` }).where(eq(botConfig.id, 1))
-      }
       const claimedLongStop = await db.update(gridOrders).set({ status: "filled" }).where(and(eq(gridOrders.id, o.id), eq(gridOrders.status, "pending"))).returning({ id: gridOrders.id })
-      if (claimedLongStop.length > 0) await markPostStopCooldown(o.symbol).catch(() => {})
       if (claimedLongStop.length === 0) return false
+      const { takerFeeRate: rtf1 } = getFeeRates(cfg.exchange as Exchange, o.symbol)
+      const row = buildTakerStopTradeValues(o, price, rtf1, cfg.mode === "live")
+      const [trade] = await db.insert(trades).values(row).returning({ id: trades.id })
+      if (cfg.mode === "paper") {
+        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${row.pnl}` }).where(eq(botConfig.id, 1))
+      }
+      if (trade) await trainGridOnClose(cfg, o, trade.id, row.pnl, row.sizeUsdt)
+      await markPostStopCooldown(o.symbol).catch(() => {})
       await cancelOtherPendingOrders(active, o.id, exchange ?? getExchangeClient(cfg.exchange as Exchange))
-      await log("trade", `Grid ${o.symbol} STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${(grossPnl - fees).toFixed(2)} USDT`)
+      await log("trade", `Grid ${o.symbol} STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${row.pnl.toFixed(2)} USDT`)
       return true
     }
   }
@@ -320,16 +365,17 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
     const adverse = (price - o.buyPrice!) / o.buyPrice!
     if (o.slPrice != null ? price >= o.slPrice : adverse >= effectiveGridStopPct(o.leverage)) {
       if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
-      const grossPnl = (o.buyPrice! - price) * o.quantity
       const { takerFeeRate: rtf2 } = getFeeRates(cfg.exchange as Exchange, o.symbol)
-      const fees = (o.buyPrice! + price) * o.quantity * rtf2
+      const row = buildTakerStopTradeValues(o, price, rtf2, cfg.mode === "live")
+      const [trade] = await db.insert(trades).values(row).returning({ id: trades.id })
       if (cfg.mode === "paper") {
-        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${grossPnl - fees}` }).where(eq(botConfig.id, 1))
+        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${row.pnl}` }).where(eq(botConfig.id, 1))
       }
       await cancelOtherPendingOrders(active, o.id, exchange ?? getExchangeClient(cfg.exchange as Exchange))
       await db.update(gridOrders).set({ status: "filled" }).where(eq(gridOrders.id, o.id))
+      if (trade) await trainGridOnClose(cfg, o, trade.id, row.pnl, row.sizeUsdt)
       await markPostStopCooldown(o.symbol).catch(() => {})
-      await log("trade", `Grid ${o.symbol} SHORT STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${(grossPnl - fees).toFixed(2)} USDT`)
+      await log("trade", `Grid ${o.symbol} SHORT STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${row.pnl.toFixed(2)} USDT`)
       return true
     }
   }
@@ -1638,7 +1684,7 @@ if (o.buyPrice != null && (gc as any).direction === "neutral") {
   const netPnl = grossPnl - fees
   await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
 await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
-await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: entry * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", openedAt: o.createdAt, live: false })
+await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: entry * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", openedAt: o.createdAt, live: cfg.mode === "live" })
 await log("trade", `Grid ${o.symbol} COMBO short closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
 await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell", price: entry, quantity: o.quantity, status: "pending" })
 continue
