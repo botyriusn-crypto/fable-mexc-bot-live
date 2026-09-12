@@ -11,7 +11,7 @@
 
 import { computeSnapshot } from "./indicators"
 import { evaluateScalpSignal } from "./trend-scalper"
-import { calculateDynamicSize, notionalToMarginUsdt } from "./strategy"
+import { calculateDynamicSize, notionalToMarginUsdt, detectRegime } from "./strategy"
 import type { Candle } from "./mexc/public"
 import type { BotConfig } from "./db/schema"
 
@@ -30,6 +30,15 @@ export interface ScalpBacktestConfig {
   warmupBars?: number
   /** Trailing window fed to the signal. */
   windowBars?: number
+  /**
+   * Restrict entries to these regimes (measured from the signal snapshot,
+   * same closed-bar contract as production decide()). Undefined = all
+   * regimes (production any-regime behavior). Measurement only — the point
+   * is to compare arms, not to tune the live gate from one backtest.
+   */
+  allowedRegimes?: ("trend" | "range" | "neutral")[]
+  adxTrendThreshold?: number
+  adxRangeThreshold?: number
   /** Strategy knobs (mirrors the live scalper test config). */
   scalp: {
     emaFast: number
@@ -84,6 +93,15 @@ function buildCfg(scalp: ScalpBacktestConfig["scalp"], leverage: number): BotCon
     leverage,
     positionSizeUsdt: 0,
   } as unknown as BotConfig
+}
+
+/** Pure regime gate for measurement arms. Undefined allow-list = all pass. */
+export function regimeAllowsEntry(
+  regime: "trend" | "range" | "neutral",
+  allowedRegimes: ("trend" | "range" | "neutral")[] | undefined,
+): boolean {
+  if (!allowedRegimes) return true
+  return allowedRegimes.includes(regime)
 }
 
 export function runScalpBacktest(
@@ -143,6 +161,14 @@ export function runScalpBacktest(
     const snap = computeSnapshot(window, cfg)
     const sig = evaluateScalpSignal(snap, window, cfg, equity)
     if (!sig.triggered || !sig.direction || sig.stopLoss == null || sig.takeProfit == null) continue
+    if (opts.allowedRegimes) {
+      const regimeCfg = {
+        ...cfg,
+        adxTrendThreshold: opts.adxTrendThreshold ?? 25,
+        adxRangeThreshold: opts.adxRangeThreshold ?? 20,
+      } as unknown as BotConfig
+      if (!regimeAllowsEntry(detectRegime(snap, regimeCfg), opts.allowedRegimes)) continue
+    }
     if (i + 1 >= candles.length) break
     // Fixed (post-P0) sizing chain, exactly as the engine books it.
     const { sizeUsdt } = calculateDynamicSize(equity, sig.atr, snap.price, opts.riskPct)

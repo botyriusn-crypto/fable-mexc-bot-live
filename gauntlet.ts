@@ -85,8 +85,13 @@ async function main() {
   console.log(`# gauntlet: ${FOLDS} folds x ${FOLD_BARS} hourly bars, embargo ${EMBARGO}, fee ${FEE_BPS}bps/side`)
   console.log(`# bar: >=${DEFAULT_BAR.minTrades} trades, net>0, majority folds positive, fold DD<=${DEFAULT_BAR.maxDrawdownPct * 100}%`)
 
-  for (const arm of ["scalp", "flash-fade"] as const) {
-    console.log(`\n## arm: ${arm}`)
+  const arms = [
+    { name: "scalp (any regime)", kind: "scalp", allowedRegimes: undefined },
+    { name: "scalp (neutral only)", kind: "scalp", allowedRegimes: ["neutral"] },
+    { name: "flash-fade", kind: "flash-fade", allowedRegimes: undefined },
+  ] as const
+  for (const arm of arms) {
+    console.log(`\n## arm: ${arm.name}`)
     for (const symbol of symbols) {
       let candles: Candle[] | undefined = cache[symbol]
       let source = "cache"
@@ -100,8 +105,8 @@ async function main() {
       let totalTrades = 0
       for (const f of folds) {
         const series = candles.slice(f.seriesStart, f.seriesEnd)
-        const report = arm === "scalp"
-          ? runScalpBacktest(symbol, series, SCALP_OPTS)
+        const report = arm.kind === "scalp"
+          ? runScalpBacktest(symbol, series, arm.allowedRegimes ? { ...SCALP_OPTS, allowedRegimes: [...arm.allowedRegimes] } : SCALP_OPTS)
           : runFlashFadeBacktest(symbol, series, {
               startEquity: EQUITY, feeBpsPerSide: FEE_BPS,
               maxHoldBars: 48, warmupBars: CONTEXT,

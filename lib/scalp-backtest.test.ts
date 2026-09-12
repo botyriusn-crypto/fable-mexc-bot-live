@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
-import { runScalpBacktest, type ScalpBacktestConfig } from "./scalp-backtest"
+import { runScalpBacktest, regimeAllowsEntry, type ScalpBacktestConfig } from "./scalp-backtest"
+import { attributeRegime } from "./walkforward"
 import { uptrendPullbackResume, chop } from "./test-candles"
 
 const CFG: ScalpBacktestConfig = {
@@ -64,5 +65,31 @@ describe("scalp-backtest", () => {
     const r = runScalpBacktest("CHOP_USDT", chop(150), CFG)
     expect(r.trades.length).toBe(0)
     expect(r.totalPnl).toBe(0)
+  })
+})
+
+describe("regimeAllowsEntry", () => {
+  it("passes everything without an allow-list, filters with one", () => {
+    expect(regimeAllowsEntry("trend", undefined)).toBe(true)
+    expect(regimeAllowsEntry("range", ["neutral"])).toBe(false)
+    expect(regimeAllowsEntry("neutral", ["neutral"])).toBe(true)
+    expect(regimeAllowsEntry("trend", [])).toBe(false)
+  })
+})
+
+describe("allowedRegimes measurement arm", () => {
+  it("restricts entries to the allowed regimes without inventing trades", () => {
+    const candles = trendWithExit()
+    const all = runScalpBacktest("T", candles, CFG)
+    expect(all.trades.length).toBeGreaterThanOrEqual(1)
+    for (const allowed of [["neutral"], ["trend"], ["range"], ["trend", "range", "neutral"]] as const) {
+      const arm = runScalpBacktest("T", candles, { ...CFG, allowedRegimes: [...allowed] })
+      // Restriction can only remove, never add.
+      expect(arm.trades.length).toBeLessThanOrEqual(all.trades.length)
+      // Every surviving trade was entered in an allowed regime (closed-bar label).
+      for (const t of arm.trades) {
+        expect(allowed).toContain(attributeRegime(candles, t.bar, 25, 20))
+      }
+    }
   })
 })
