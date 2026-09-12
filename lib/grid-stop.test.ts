@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 import { buildTakerStopTradeValues } from "./grid"
-import type { GridOrder } from "./db/schema"
+import { gridEntryRegime } from "./strategy"
+import type { GridOrder, BotConfig } from "./db/schema"
+import type { IndicatorSnapshot } from "./indicators"
 
 // Minimal order shells: the builder only reads symbol/side/buyPrice/price/
 // quantity/leverage/createdAt. Casts keep the test free of unrelated schema churn.
@@ -61,5 +63,26 @@ describe("buildTakerStopTradeValues", () => {
   it("a stop pushed far enough adverse is always a loss beyond fees", () => {
     const row = buildTakerStopTradeValues(shortOrder({ quantity: 3 }), 106, 0.0005, false)
     expect(row.pnl).toBeLessThan(-(row.fees as number))
+  })
+
+  it("carries the settled order's entry regime, NULL when pre-stamp", () => {
+    expect(buildTakerStopTradeValues(shortOrder({ entryRegime: "range" }), 103, 0.0005, false).entryRegime).toBe("range")
+    expect(buildTakerStopTradeValues(longOrder(), 97, 0.0005, false).entryRegime).toBeNull()
+  })
+})
+
+describe("gridEntryRegime", () => {
+  const cfg = { adxTrendThreshold: 25, adxRangeThreshold: 20 } as unknown as BotConfig
+  const snap = (adx: number) => ({ adx }) as unknown as IndicatorSnapshot
+
+  it("labels trend/range/neutral from closed-candle ADX", () => {
+    expect(gridEntryRegime(snap(30), cfg)).toBe("trend")
+    expect(gridEntryRegime(snap(10), cfg)).toBe("range")
+    expect(gridEntryRegime(snap(22), cfg)).toBe("neutral")
+  })
+
+  it("normalizes a misconfigured threshold pair so neutral stays reachable", () => {
+    const bad = { adxTrendThreshold: 25, adxRangeThreshold: 29 } as unknown as BotConfig
+    expect(gridEntryRegime(snap(22), bad)).toBe("neutral")
   })
 })

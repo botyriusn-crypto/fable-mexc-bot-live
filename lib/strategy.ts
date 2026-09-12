@@ -40,6 +40,17 @@ export function detectRegime(snap: IndicatorSnapshot, cfg: BotConfig): Regime {
   return "neutral"
 }
 
+/**
+ * Stable entry-regime label stamped onto grid orders at creation (and carried
+ * into trade rows at close). Thin wrapper over detectRegime that pins the
+ * closed-candle discipline: snap must come from closed candles only — the
+ * same contract as the offline replay — so stamped and reconstructed labels
+ * stay comparable. One call site for all order-creation paths.
+ */
+export function gridEntryRegime(snap: IndicatorSnapshot, cfg: BotConfig): Regime {
+  return detectRegime(snap, cfg)
+}
+
 function evaluateTrendEntry(
   snap: IndicatorSnapshot,
   candles: Candle[],

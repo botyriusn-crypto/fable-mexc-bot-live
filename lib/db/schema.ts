@@ -178,6 +178,9 @@ export const trades = pgTable("trades", {
   fees: doublePrecision("fees").notNull(),
   exitReason: text("exit_reason").notNull(), // 'tp' | 'sl' | 'trail' | 'signal' | 'manual' | 'partial'
   strategy: text("strategy").notNull().default("trend"), // 'trend' | 'range' | 'webhook'
+  // Regime at entry ('trend' | 'range' | 'neutral'), stamped from the settled
+  // order's entryRegime. NULL for pre-stamp rows — never recomputed at close.
+  entryRegime: text("entry_regime"),
   entryConfidence: doublePrecision("entry_confidence"),
   partial: boolean("partial").notNull().default(false),
   openedAt: timestamp("opened_at", { withTimezone: true }),
@@ -282,6 +285,10 @@ export const gridOrders = pgTable("grid_orders", {
   slPrice: doublePrecision("sl_price"), // range-aware grid stop (null = legacy pct stop)
   entryFeatures: jsonb("entry_features").$type<Record<string, number>>(),
   status: text("status").notNull().default("pending"), // 'pending' | 'filled' | 'cancelled'
+  // Regime at order creation ('trend' | 'range' | 'neutral'), from closed
+  // candles only — same discipline as the offline replay, so stamped and
+  // reconstructed labels stay comparable. NULL for pre-stamp rows.
+  entryRegime: text("entry_regime"),
   mexcOrderId: text("mexc_order_id"),
   exchangeStatus: text("exchange_status"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
