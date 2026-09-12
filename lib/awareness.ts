@@ -82,12 +82,21 @@ export function decide(state: AwarenessState): Decision {
     }
   }
 
-  // 3. A triggered, ML-allowed scalp trades in ANY regime. The scalp signal
-  // carries its own trend evidence (EMA/VWAP alignment + structure + its own
-  // ADX band), while the coarse regime label uses a stricter ADX cutoff
-  // (25 vs the scalper's 18) — gating scalps on the label discarded ~2/3 of
-  // measured 15m triggers (Sep 2026 probe: 22 of 33 dead in range/neutral).
-  if (state.scalp?.triggered && state.scalp.direction && state.mlAllowed) {
+  // 3. A triggered, ML-allowed scalp trades in NEUTRAL regime only.
+  // Gauntlet (Sep 2026, 5x800 hourly folds, BTC/ETH/SOL): neutral-only is
+  // monotone >= any-regime on all three symbols (BTC -117 -> -2, ETH
+  // -84 -> +8, SOL +120 -> +127) — trend/range buckets bleed (BTC trend
+  // -188/33, ETH range -94/7) while neutral holds (SOL +162/17). Live
+  // classifier outcomes agree directionally (neutral +, trend -).
+  // Hypothesis under live measurement, not settled fact: rejected
+  // trend/range scalps keep resolving outcomes in classifier_decisions,
+  // so the counterfactual stays visible.
+  if (
+    state.scalp?.triggered &&
+    state.scalp.direction &&
+    state.mlAllowed &&
+    state.regime === "neutral"
+  ) {
     return {
       action: "scalp-trend",
       direction: state.scalp.direction,
@@ -95,12 +104,21 @@ export function decide(state: AwarenessState): Decision {
     }
   }
 
-  // 4. Ranging regime without a scalp setup → grid mean-reversion.
+  // 4. Ranging regime → grid mean-reversion (a gated-out scalp falls through
+  // to the legacy range path, exactly as before the any-regime interval).
   if (state.regime === "range") {
     return { action: "grid-mean-revert" }
   }
 
-  // 5. Trend without a scalp setup, or neutral → stand aside.
+  // 5. Stand aside. The reason names the operative blocker so logs stay
+  // honest: a setup that exists but is regime-gated must not read as
+  // "no setup", and an ML veto must not read as a regime call.
+  if (state.scalp?.triggered && state.scalp.direction && !state.mlAllowed) {
+    return { action: "stand-aside", reason: "ml gate rejected scalp setup" }
+  }
+  if (state.scalp?.triggered && state.scalp.direction) {
+    return { action: "stand-aside", reason: `scalp requires neutral regime (in ${state.regime})` }
+  }
   return {
     action: "stand-aside",
     reason: state.regime === "trend" ? "trend but no scalp setup" : "neutral regime",

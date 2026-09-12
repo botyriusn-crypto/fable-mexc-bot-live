@@ -43,14 +43,19 @@ const base = (over: Partial<AwarenessState> = {}): AwarenessState => ({
 })
 
 describe("decide", () => {
-  it("trades a triggered ML-allowed scalp in RANGE regime (regime-gap fix)", () => {
+  it("defers a range-regime scalp to grid mean-reversion (neutral gate)", () => {
     const d = decide(base({ regime: "range", scalp: scalpOn() }))
-    expect(d).toEqual({ action: "scalp-trend", direction: "long", confidence: 0.6 })
+    expect(d).toEqual({ action: "grid-mean-revert" })
   })
 
   it("trades a triggered ML-allowed scalp in NEUTRAL regime", () => {
     const d = decide(base({ regime: "neutral", scalp: scalpOn({ direction: "short" }) }))
     expect(d).toEqual({ action: "scalp-trend", direction: "short", confidence: 0.6 })
+  })
+
+  it("stands aside with an honest reason for a trend-regime scalp (neutral gate)", () => {
+    const d = decide(base({ regime: "trend", scalp: scalpOn() }))
+    expect(d).toEqual({ action: "stand-aside", reason: "scalp requires neutral regime (in trend)" })
   })
 
   it("still trails profitable aligned inventory before a fresh scalp in trend", () => {
@@ -82,8 +87,10 @@ describe("decide", () => {
     expect(d).toEqual({ action: "stand-aside", reason: "risk gate" })
   })
 
-  it("an ML-rejected scalp never trades, even in trend", () => {
+  it("names the ML veto instead of a regime call when ML rejects", () => {
     const d = decide(base({ regime: "trend", mlAllowed: false, scalp: scalpOn() }))
-    expect(d).toEqual({ action: "stand-aside", reason: "trend but no scalp setup" })
+    expect(d).toEqual({ action: "stand-aside", reason: "ml gate rejected scalp setup" })
+    const e = decide(base({ regime: "neutral", mlAllowed: false, scalp: scalpOn() }))
+    expect(e).toEqual({ action: "stand-aside", reason: "ml gate rejected scalp setup" })
   })
 })
