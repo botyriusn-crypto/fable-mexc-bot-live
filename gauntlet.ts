@@ -30,11 +30,14 @@ const EMBARGO = 48
 const CONTEXT = 300
 const EQUITY = 10000
 
-async function fetchBybitKlinesPaged(symbol: string, need: number): Promise<Candle[]> {
+const TF_MIN = Number(process.env.TF ?? 60)
+const VALID_TF = new Set([1, 3, 5, 15, 30, 60, 120, 240, 360, 720])
+
+async function fetchBybitKlinesPaged(symbol: string, need: number, tfMin: number): Promise<Candle[]> {
   const out: Candle[] = []
   let end: number | undefined
   while (out.length < need) {
-    const q = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=60&limit=1000` +
+    const q = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${tfMin}&limit=1000` +
       (end ? `&end=${end}` : "")
     const res = await fetch(q)
     const json = (await res.json()) as any
@@ -78,11 +81,14 @@ const SCALP_OPTS: ScalpBacktestConfig = {
 }
 
 async function main() {
+  if (!VALID_TF.has(TF_MIN)) throw new Error(`unsupported TF=${process.env.TF} (use 1,3,5,15,30,60,120,240,360,720)`)
   const want = process.argv.slice(2)
   const symbols = (want.length ? want : ["BTCUSDT", "ETHUSDT", "SOLUSDT"]).map((s) => s.toUpperCase())
-  const cache = loadCache()
+  // The pinned cache is hourly only; any other TF always live-fetches.
+  const cache = TF_MIN === 60 ? loadCache() : {}
   const need = FOLDS * FOLD_BARS + (FOLDS - 1) * EMBARGO + CONTEXT
-  console.log(`# gauntlet: ${FOLDS} folds x ${FOLD_BARS} hourly bars, embargo ${EMBARGO}, fee ${FEE_BPS}bps/side`)
+  const spanDays = ((FOLDS * FOLD_BARS * TF_MIN) / 1440).toFixed(0)
+  console.log(`# gauntlet: ${FOLDS} folds x ${FOLD_BARS} ${TF_MIN}m bars (~${spanDays}d), embargo ${EMBARGO}, fee ${FEE_BPS}bps/side`)
   console.log(`# bar: >=${DEFAULT_BAR.minTrades} trades, net>0, majority folds positive, fold DD<=${DEFAULT_BAR.maxDrawdownPct * 100}%`)
 
   const arms = [
@@ -96,7 +102,7 @@ async function main() {
       let candles: Candle[] | undefined = cache[symbol]
       let source = "cache"
       if (!candles || candles.length < need) {
-        candles = await fetchBybitKlinesPaged(symbol, need)
+        candles = await fetchBybitKlinesPaged(symbol, need, TF_MIN)
         source = "live-fetch"
       }
       const folds = splitFolds(candles.length, FOLDS, FOLD_BARS, EMBARGO, CONTEXT)
