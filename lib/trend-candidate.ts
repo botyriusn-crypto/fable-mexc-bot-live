@@ -18,7 +18,9 @@
 //                               (funding/OI/liquidations/whale/sentiment). Neutral when absent.
 //
 // Penalties: chasing an overextended move (far from EMA20 in ATR units),
-// buying an already-exploded 24h move, illiquid coins (disqualified).
+// buying an already-exploded 24h move, illiquid coins (disqualified),
+// sub-half-cent coins (disqualified — 1000PEPE-class microstructure gets
+// stop-hunted both directions; measured -$52/2d Sep 2026).
 
 import { adx, atr, ema, marketStructure, rateOfChange, volumeSurge } from "./indicators"
 import type { Candle } from "./mexc/public"
@@ -47,6 +49,8 @@ export interface TrendCandidateInput {
   direction?: "long" | "short" | "auto"
   external?: TrendExternalSignals
   minTurnover24h?: number
+  /** Override for DEFAULT_MIN_CANDIDATE_PRICE (USDT). */
+  minPriceUsdt?: number
 }
 
 export interface TrendFactor {
@@ -75,10 +79,17 @@ export interface UniverseRow {
   turnover24h: number
   riseFallRate24h: number
   fundingRate?: number
+  /** Last price (USDT). Unknown (undefined) passes the pre-screen; the deep
+   * score still requires a price and fails closed without one. */
+  lastPrice?: number
 }
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
 const DEFAULT_MIN_TURNOVER = 500_000
+// Minimum last price for auto-select candidates. Evidence-backed line:
+// 1000PEPE @ 0.0034 bled -$52 in 2d (stopped both directions), while the
+// 0.006-class runner the suite treats as tradable stays eligible.
+const DEFAULT_MIN_CANDIDATE_PRICE = 0.005
 
 function adxFactor(adxNow: number): number {
   if (adxNow < 15) return 0
@@ -231,6 +242,10 @@ export function scoreTrendCandidate(input: TrendCandidateInput): TrendScore {
   })
   if (!Array.isArray(candles) || candles.length < 45) return fail(`only ${candles?.length ?? 0} candles — need 45+`)
   if (!(input.lastPrice > 0)) return fail("no last price")
+  const minPrice = input.minPriceUsdt ?? DEFAULT_MIN_CANDIDATE_PRICE
+  if (input.lastPrice < minPrice) {
+    return fail(`last price $${input.lastPrice} below $${minPrice} minimum — sub-cent coins get stop-hunted, excluded from auto-select`)
+  }
   const minTurnover = input.minTurnover24h ?? DEFAULT_MIN_TURNOVER
   if (input.turnover24h != null && input.turnover24h < minTurnover) {
     return fail(`24h turnover $${Math.round(input.turnover24h).toLocaleString()} below $${minTurnover.toLocaleString()} minimum — too illiquid to scalp`)
@@ -325,9 +340,12 @@ export function pickWinner(ranked: TrendScore[]): TrendScore | null {
  * Returns the topN symbols worth deep-scoring (and picking in the MAINBAR).
  * Big |24h move| × log turnover, with a bonus for funding extremes (squeeze setups).
  */
-export function screenUniverse(rows: UniverseRow[], topN = 10, minTurnover24h = DEFAULT_MIN_TURNOVER): string[] {
+export function screenUniverse(rows: UniverseRow[], topN = 10, minTurnover24h = DEFAULT_MIN_TURNOVER, minPriceUsdt = DEFAULT_MIN_CANDIDATE_PRICE): string[] {
   return rows
     .filter((r) => (r.turnover24h ?? 0) >= minTurnover24h)
+    // Pre-screen is fail-open on unknown price (deep score fails closed);
+    // known-cheap coins never occupy a shortlist slot.
+    .filter((r) => r.lastPrice == null || r.lastPrice >= minPriceUsdt)
     .map((r) => {
       const move = Math.abs(r.riseFallRate24h ?? 0) * 100
       const fuel = Math.min(3, Math.abs(r.fundingRate ?? 0) * 1000)

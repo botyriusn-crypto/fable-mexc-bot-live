@@ -33,6 +33,8 @@ function toUniverseRow(t: RawTicker): UniverseRow {
     turnover24h: turnover,
     riseFallRate24h: t.riseFallRate24h ?? t.riseFallRate ?? 0,
     fundingRate: t.fundingRate ?? 0,
+    // Feeds the sub-cent pre-screen: PEPE-class coins never reach deep scoring.
+    lastPrice: t.lastPrice,
   }
 }
 

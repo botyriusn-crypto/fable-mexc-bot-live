@@ -164,6 +164,53 @@ describe("trend-candidate", () => {
     expect(picks).toEqual(["B_USDT", "A_USDT"])
   })
 
+  it("disqualifies sub-half-cent coins (PEPE-class) from auto-select", () => {
+    const pepe = scoreTrendCandidate({
+      symbol: "1000PEPE_USDT",
+      candles: buildCandles({ drift: 0.005, endVolumeMult: 3 }),
+      lastPrice: 0.0034,
+      turnover24h: 200_000_000, // huge turnover must NOT save it
+      riseFallRate24h: 0.12,
+    })
+    expect(pepe.score).toBe(0)
+    expect(pepe.tradable).toBe(false)
+    expect(pepe.disqualified).toMatch(/below.*minimum/)
+    // A disqualified PEPE can never win auto-select, even ranked first.
+    expect(pickWinner(rankTrendCandidates([
+      {
+        symbol: "1000PEPE_USDT",
+        candles: buildCandles({ drift: 0.005, endVolumeMult: 3 }),
+        lastPrice: 0.0034,
+        turnover24h: 200_000_000,
+        riseFallRate24h: 0.12,
+      },
+    ]))).toBeNull()
+    // Override still allows opting back in explicitly.
+    const allowed = scoreTrendCandidate({
+      symbol: "1000PEPE_USDT",
+      candles: buildCandles({ drift: 0.005, endVolumeMult: 3 }),
+      lastPrice: 0.0034,
+      turnover24h: 200_000_000,
+      riseFallRate24h: 0.12,
+      minPriceUsdt: 0.001,
+    })
+    expect(allowed.disqualified).toBeUndefined()
+  })
+
+  it("pre-screens known-cheap coins out of the universe, keeps unknown-price rows", () => {
+    const picks = screenUniverse(
+      [
+        { symbol: "PEPE_USDT", turnover24h: 200_000_000, riseFallRate24h: 0.2, lastPrice: 0.0034 },
+        { symbol: "OK_USDT", turnover24h: 100_000_000, riseFallRate24h: 0.1, lastPrice: 2.5 },
+        { symbol: "MYST_USDT", turnover24h: 100_000_000, riseFallRate24h: 0.1 },
+      ],
+      5,
+    )
+    expect(picks).not.toContain("PEPE_USDT")
+    expect(picks).toContain("OK_USDT")
+    expect(picks).toContain("MYST_USDT") // unknown price: pre-screen passes, deep score fails closed
+  })
+
   it("picks the top tradable setup as the auto-select winner", () => {
     expect(pickWinner([])).toBeNull()
     const ranked = rankTrendCandidates([
