@@ -15,7 +15,17 @@ export interface FlashFadeSignal {
 }
 
 export function detectFlashFade(candles: Candle[], config?: Partial<FlashFadeConfig>): FlashFadeSignal {
-  const cfg = { enabled: true, minMovePct: 20, minVolumeMultiplier: 5, positionSizeUsdt: 300, leverage: 3, maxPositions: 2, ...config }
+  // NB: explicit `??` (not spread) — `{...defaults, ...partial}` lets an
+  // explicitly-passed `undefined` silently erase a default, disabling the
+  // threshold it was meant to keep (caught by walk-forward replay tests).
+  const cfg = {
+    enabled: config?.enabled ?? true,
+    minMovePct: config?.minMovePct ?? 20,
+    minVolumeMultiplier: config?.minVolumeMultiplier ?? 5,
+    positionSizeUsdt: config?.positionSizeUsdt ?? 300,
+    leverage: config?.leverage ?? 3,
+    maxPositions: config?.maxPositions ?? 2,
+  }
   if (candles.length < 30) return { detected: false, direction: null, entryPrice: 0, stopLoss: 0, takeProfit: 0, reason: "Need 30+ candles", movePct: 0, volumeMultiplier: 0 }
   
   const current = candles[candles.length - 1], previous = candles[candles.length - 2]
