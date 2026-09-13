@@ -24,6 +24,24 @@ export function isPriceEligible(
   return typeof lastPrice === "number" && Number.isFinite(lastPrice) && lastPrice >= minPrice
 }
 
+/**
+ * Quote-volume (USDT) for one ticker. Both exchange adapters carry BASE
+ * volume in `volume24` (BTC ~thousands, PEPE ~billions) with quote turnover
+ * in `amount24` — comparing base volumes against a USDT floor inverts the
+ * universe (keeps the cheapest 100 coins, drops BTC/ETH/SOL). Prefer the
+ * explicit quote field, else convert via last price. Same normalization the
+ * trend scan already applies (scan-trend route turnover24h).
+ */
+export function quoteVolume24h(t: {
+  volume24?: number | null
+  amount24?: number | null
+  lastPrice?: number | null
+}): number {
+  const a = Number(t.amount24 ?? 0)
+  if (a > 0) return a
+  return Number(t.volume24 ?? 0) * Number(t.lastPrice ?? 0)
+}
+
 // Known leveraged-ETF / tokenized-stock tickers on MEXC. These often can't
 // open a short (MEXC rejects with 2009 Position is nonexistent), which
 // breaks a COMBO grid's naked short leg — the STOCK/3L/3S substring filter
@@ -133,8 +151,8 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         !t.symbol.includes("STOCK") && !t.symbol.includes("3L") && !t.symbol.includes("3S") &&
         !LEVERAGED_ETF_DENYLIST.has(t.symbol)
       )
-      .filter(t => t.volume24 > MIN_VOLUME_24H)
-      .sort((a, b) => b.volume24 - a.volume24)
+      .filter(t => quoteVolume24h(t) > MIN_VOLUME_24H)
+      .sort((a, b) => quoteVolume24h(b) - quoteVolume24h(a))
       .slice(0, 100)
 
     try {
@@ -148,7 +166,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         if (pair.symbol.includes("STOCK") || pair.symbol.includes("3L") || pair.symbol.includes("3S")) continue
         if (!candidates.find((c: any) => c.symbol === pair.symbol)) {
           const ticker = allTickers.find((t: any) => t.symbol === pair.symbol)
-          if (ticker && Number((ticker as any).volume24 ?? (ticker as any).amount24 ?? 0) > MIN_VOLUME_24H) candidates.push(ticker)
+          if (ticker && quoteVolume24h(ticker as any) > MIN_VOLUME_24H) candidates.push(ticker)
         }
       }
     } catch (e) { console.error("Watchlist override error:", e) }
