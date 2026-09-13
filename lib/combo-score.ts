@@ -1,5 +1,10 @@
 import type { Candle } from "./mexc/public"
 
+// Grid ladder construction in lib/grid.ts refuses to build above this (it logs
+// an error and returns from setupGrid). Kept here so suggestLeverage can never
+// propose a pair the engine will not deploy.
+const MAX_GRID_LEVERAGE = 5
+
 export interface ComboDna {
   chop: number; revRate: number; rangePct: number; driftPct: number;
   atrPct: number; touches: number; score: number;
@@ -13,6 +18,19 @@ export interface ComboDna {
 // catches setups that are about to run away right after entry).
 export function comboDna(candles: Candle[], spacingPct = 0.6, lastAdx?: number): ComboDna {
   const n = candles.length
+
+  // `candles[n - 1].close` below throws on an empty array, and every ratio here
+  // is meaningless with a single bar (net move is 0 by definition, so `chop`
+  // divides by the synthetic floor instead of the real move). Refuse rather
+  // than score: a caller must not deploy on data it does not have.
+  if (n < 2) {
+    return {
+      chop: 0, revRate: 0, rangePct: 0, driftPct: 0, atrPct: 0, touches: 0, score: 0,
+      rejected: true,
+      rejectionReason: `Insufficient candles for DNA (${n})`,
+    }
+  }
+
   const mid = candles[n - 1].close
   const path = candles.reduce((a, k) => a + (k.high - k.low), 0)
   const net = Math.abs(candles[n - 1].close - candles[0].close)
@@ -43,19 +61,27 @@ export function comboDna(candles: Candle[], spacingPct = 0.6, lastAdx?: number):
       rejectionReason: `Pump/dump detected: ${driftPct.toFixed(1)}% drift (max 20%)`,
     }
   }
+
   // 1.4 Tighter drift gate for small accounts: reject anything that has
   // already drifted more than 8% over the lookback (was 15%). A COMBO grid
   // entering after an 8%+ move is very likely to keep going and bleed the
   // account before it can mean-revert.
-  // ONDO-DNA bypass (validated 2026-08-23): coins with perfect ATR 0.6-1.2%
-  // and ADX < 25 can handle 8-15% drift because they're in ideal grid fuel.
+  //
+  // ONDO-DNA LOOSENING (validated 2026-08-23): coins with perfect ATR 0.6-1.2%
+  // and ADX < 25 can handle 8-15% drift because they're in ideal grid fuel, so
+  // the threshold is raised to 15%.
+  //
+  // BUG FIXED: this used to read `if (absDrift > driftThreshold && !isOndoDna)`.
+  // The `&& !isOndoDna` made the gate a no-op for exactly the coins it was
+  // meant to loosen — an Ondo-DNA coin was only ever stopped by hard gate 1 at
+  // 20%, never by this gate. The threshold already encodes the loosening.
   const isOndoDna = atrPct >= 0.6 && atrPct <= 1.2 && (lastAdx ?? 99) < 25
   const driftThreshold = isOndoDna ? 15 : 8
-  if (absDrift > driftThreshold && !isOndoDna) {
+  if (absDrift > driftThreshold) {
     return {
       chop, revRate, rangePct, driftPct, atrPct, touches, score: 0,
       rejected: true,
-      rejectionReason: `High drift: ${driftPct.toFixed(1)}% (max ${driftThreshold}%)`,
+      rejectionReason: `High drift: ${driftPct.toFixed(1)}% (max ${driftThreshold}%${isOndoDna ? ", Ondo-DNA loosened" : ""})`,
     }
   }
 
@@ -129,7 +155,11 @@ function suggestLeverage(dna: ComboDna, volumeUsdt: number): number {
   if (absDrift > 8) lev = Math.min(lev, 1)
   else if (absDrift > 5) lev = Math.min(lev, 3)
 
-  return lev
+  // The tiers above predate the MAX_GRID_LEVERAGE guard in lib/grid.ts, which
+  // refuses to build any ladder above 5x (logs an error and returns). A 10x/
+  // 15x/20x suggestion was therefore a guaranteed no-build, not a bold call.
+  // Clamped so the advisor cannot propose a pair the engine will not deploy.
+  return Math.min(lev, MAX_GRID_LEVERAGE)
 }
 
 export function comboParams(dna: ComboDna, price: number, volumeUsdt: number) {

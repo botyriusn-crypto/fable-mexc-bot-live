@@ -18,11 +18,29 @@ interface VariantRow { id: number; name: string; params: VariantParams; stats: V
 
 const sigmoid = (z: number) => 1 / (1 + Math.exp(-z))
 
-// Legacy setup score (still used by the shadow evaluator's top-candidate read).
+// Setup-quality score in [0,1] — used by the shadow evaluator to choose between
+// the ML read and the setup read (its "source" field).
+//
+// Two fixes here:
+//
+//  1. The short branch used `1 - crossover`. `crossover` is -1/0/1, so that
+//     produced {0, 1, 2} — ALWAYS >= 0 — while the long branch produced
+//     {-1, 0, 1}. A short therefore collected +1.2 (weighted 1.2 -> +1.44) on a
+//     NEUTRAL bar and +2.4 on a bearish cross, i.e. shorts were systematically
+//     scored above longs for the same signal. Negating instead of offsetting
+//     gives both branches the same range.
+//
+//  2. volSurge arrives normalized to [-1/3, 1] — computeSnapshot does
+//     clamp(vol - 1, -1, 3) / 3, so ~0.33 is a 2x surge. The old
+//     `((f.volSurge ?? 0) * 100 - 1.5) * 0.4` assumed a RAW multiple and
+//     produced values in [-13.8, 39.4], which saturated the sigmoid on its own
+//     and collapsed the score to a near-constant, discarding every other term.
+//     Rescaled to sit in the same range as the other contributions.
 export function heuristicScore(f: FeatureVector, direction: string): number {
-  const trendAlign = direction === "long" ? (f.crossover ?? 0) : 1 - (f.crossover ?? 0)
+  const crossover = f.crossover ?? 0
+  const trendAlign = direction === "long" ? crossover : -crossover
   const rocSign = direction === "long" ? Math.tanh((f.roc ?? 0) * 40) : Math.tanh(-(f.roc ?? 0) * 40)
-  const vol = ((f.volSurge ?? 0) * 100 - 1.5) * 0.4
+  const vol = (f.volSurge ?? 0) * 1.2
   const adx = ((f.adx ?? 0) - 0.25) * 2
   return sigmoid(trendAlign * 1.2 + rocSign * 0.8 + vol + adx)
 }
@@ -67,7 +85,13 @@ export function thompsonLeader(variants: Array<{ name: string; stats: VariantSta
 function sampleBeta(alpha: number, beta: number): number {
   const x = sampleGamma(alpha)
   const y = sampleGamma(beta)
-  return x / (x + y)
+  const denom = x + y
+  // Both draws can be exactly 0 for very small integer shapes, which made this
+  // return NaN. NaN always loses the `>` comparison above, so a NaN draw
+  // silently removed a variant from consideration rather than flagging anything.
+  // Fall back to the prior mean.
+  if (!Number.isFinite(denom) || denom <= 0) return alpha / (alpha + beta)
+  return x / denom
 }
 
 function sampleGamma(shape: number): number {
@@ -88,15 +112,27 @@ function sampleGamma(shape: number): number {
 }
 
 // Called on every resolved sniper decision — grades all variants counterfactually.
+//
+// The stats bump is a single atomic UPDATE (jsonb arithmetic evaluated in SQL)
+// instead of read-modify-write. The old version SELECTed every variant, added
+// the outcome in JS and wrote the totals back, so two concurrent graders
+// (overlapping ticks, or two Fly machines) each counted the same outcome and one
+// write was lost — the same stale-read pattern already fixed for the grid setup
+// cooldown. We still read the row first, but only to decide whether the variant
+// ALLOWS the signal; the counters themselves are incremented server-side.
 export async function recordOutcome(sig: SniperFeatures, direction: string, conf: number, correct: boolean, ret: number): Promise<void> {
   const variants = await getVariants()
   for (const v of variants) {
     if (!variantAllowed(v.params, sig, direction, conf)) continue
-    const s: VariantStats = {
-      allowed: (v.stats.allowed ?? 0) + 1,
-      correct: (v.stats.correct ?? 0) + (correct ? 1 : 0),
-      sumReturn: (v.stats.sumReturn ?? 0) + ret,
-    }
-    await db.execute(sql`UPDATE advisor_variants SET stats = ${JSON.stringify(s)}::jsonb, updated_at = NOW() WHERE id = ${v.id}`)
+    await db.execute(sql`
+      UPDATE advisor_variants
+      SET stats = jsonb_build_object(
+            'allowed',   COALESCE((stats->>'allowed')::int, 0) + 1,
+            'correct',   COALESCE((stats->>'correct')::int, 0) + ${correct ? 1 : 0},
+            'sumReturn', COALESCE((stats->>'sumReturn')::double precision, 0) + ${ret}
+          ),
+          updated_at = NOW()
+      WHERE id = ${v.id}
+    `)
   }
 }

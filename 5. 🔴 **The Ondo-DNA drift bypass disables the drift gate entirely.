@@ -1,0 +1,2 @@
+const driftThreshold = isOndoDna ? 15 : 8
+if (absDrift > driftThreshold && !isOndoDna) { …reject… }
