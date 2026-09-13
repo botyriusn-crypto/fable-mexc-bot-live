@@ -11,16 +11,31 @@ export const maxDuration = 60
 //   - `Authorization: Bearer <CRON_SECRET>`
 //   - `x-cron-secret: <CRON_SECRET>` header
 //   - `?secret=<CRON_SECRET>` query param
-// If CRON_SECRET is unset we allow the call for backward compatibility but log a
-// loud warning — set the secret.
+//
+// If CRON_SECRET is unset we FAIL CLOSED and reject the call. The previous
+// behaviour was to allow it with a warning, which meant a missing/typo'd env
+// var silently left a live-order-placing endpoint publicly triggerable — a
+// warning is not an access control.
+//
+// Local development against an unprotected endpoint is still possible, but it
+// requires an EXPLICIT opt-in (ALLOW_UNSECURED_TICK=1) so it can never happen
+// by accident in production.
 function isAuthorized(req: Request): boolean {
   const secret = process.env.CRON_SECRET
   if (!secret) {
-    console.warn(
-      "[Tick Route] CRON_SECRET is not set — the trading tick endpoint is UNPROTECTED. " +
-        "Set CRON_SECRET in your environment to secure it.",
+    if (process.env.ALLOW_UNSECURED_TICK === "1") {
+      console.warn(
+        "[Tick Route] CRON_SECRET is not set and ALLOW_UNSECURED_TICK=1 — the trading tick " +
+          "endpoint is UNPROTECTED. This must never be set in production.",
+      )
+      return true
+    }
+    console.error(
+      "[Tick Route] CRON_SECRET is not set — refusing to run the trading tick. " +
+        "Set CRON_SECRET in your environment (and send it as a Bearer token, x-cron-secret " +
+        "header or ?secret= param). For local development only, ALLOW_UNSECURED_TICK=1.",
     )
-    return true
+    return false
   }
   const auth = req.headers.get("authorization")
   if (auth === `Bearer ${secret}`) return true

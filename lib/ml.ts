@@ -17,7 +17,6 @@ export const FEATURE_KEYS: (keyof FeatureVector)[] = [
   "volSurge",
   "sideLong",
 ]
-const MODEL_GEN = 2
 
 // Separate model rows per learner so each learns its OWN edge. Grid trading is
 // mean-reverting (buy dips, sell rips) while trend/scalp entries are momentum
@@ -124,10 +123,9 @@ export function gateEntry(
 
 // SGD update from a closed trade. label: 1 = win, 0 = loss.
 // pnlWeight scales the gradient by PnL magnitude (bigger wins/losses teach more).
-// NEW: tradeMode parameter separates grid vs trend learning (optional for backward compat).
 
-
-// Load model by ID (id=1 is grid model, id=2 is shadow/timing model)
+// Load model by ID. Ids come from MODEL_IDS above (1 = grid, 2 = trend,
+// 3 = scalp, 4 = shadow) — note the shadow model is id 4, NOT 2.
 export async function loadModelById(id: number): Promise<MlState> {
   const rows = await db.select().from(mlModel).where(eq(mlModel.id, id))
   if (rows.length === 0) {
@@ -156,6 +154,10 @@ export function shadowPredict(model: MlState, features: FeatureVector): number {
 }
 
 // Train shadow model on resolved decisions
+//
+// NOTE: unlike trainOnTrade, this deliberately applies NO pnlWeight scaling
+// (the shadow model sees a resolved direction, not a realised P&L) and NO L2
+// penalty. If you change one trainer, check whether the other needs the same.
 export async function trainShadowOnDecision(
   model: MlState,
   features: FeatureVector,
@@ -167,19 +169,19 @@ export async function trainShadowOnDecision(
   modelId: number = MODEL_IDS.shadow,
 ): Promise<MlState> {
   const label = predictedDirection === actualDirection ? 1 : 0
-  
+
   const prediction = predict(model, features)
   const error = prediction - label
-  
+
   const lr = learningRate
-  
+
   const newWeights: Record<string, number> = { ...model.weights }
   for (const key of FEATURE_KEYS) {
     const grad = error * (features[key] ?? 0)
     newWeights[key] = (newWeights[key] ?? 0) - lr * grad - lr * 0.02 * (newWeights[key] ?? 0)
   }
   const newBias = model.bias - lr * error
-  
+
   const predictedWin = prediction >= 0.5
   const correct = predictedWin === (label === 1)
   const newSampleCount = model.sampleCount + 1
@@ -188,7 +190,7 @@ export async function trainShadowOnDecision(
     model.sampleCount === 0
       ? correct ? 1 : 0
       : model.rollingAccuracy * 0.9 + (correct ? 1 : 0) * 0.1
-  
+
   await db
     .update(mlModel)
     .set({
@@ -200,7 +202,7 @@ export async function trainShadowOnDecision(
       updatedAt: sql`NOW()`,
     })
     .where(eq(mlModel.id, modelId))
-  
+
   return {
     weights: newWeights,
     bias: newBias,

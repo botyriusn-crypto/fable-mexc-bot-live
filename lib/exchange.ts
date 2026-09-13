@@ -56,12 +56,19 @@ export interface OrderStatus {
 // order-status endpoint. `confirmed` is true only when the venue reported a
 // real average fill price (> 0). When false, the caller MUST fall back to its
 // intended price and treat the fill as unverified.
+//
+// `partial` distinguishes a PARTIALLY filled order (state 2) from a fully
+// filled one (state 3). `confirmed` is true for both (a real fill price was
+// read back), so a caller that needs the FULL intended size must check
+// `partial` as well — previously a partial fill was indistinguishable from a
+// complete one.
 export interface ConfirmedFill {
   orderId: string       // venue order id ("" if it could not be extracted)
   avgPrice: number      // actual average fill price (0 if unconfirmed)
   filledVolume: number  // actual filled volume, venue-native unit (0 if unconfirmed)
   state: number         // canonical order state (see OrderStatus.state)
   confirmed: boolean    // true iff a real fill price was read back
+  partial: boolean      // true iff a fill price was read back but the order is not fully filled
 }
 
 // Result of placing a native (exchange-side) stop-loss. `orderId` is the
@@ -244,7 +251,9 @@ export async function confirmFill(opts: ConfirmOpts): Promise<ConfirmedFill> {
   const delayMs = opts.delayMs ?? 400
 
   const orderId = extractOrderId(placeRaw)
-  const result: ConfirmedFill = { orderId, avgPrice: 0, filledVolume: 0, state: -1, confirmed: false }
+  const result: ConfirmedFill = {
+    orderId, avgPrice: 0, filledVolume: 0, state: -1, confirmed: false, partial: false,
+  }
   if (!orderId) return result // cannot confirm without an id — caller falls back
 
   for (let i = 0; i < attempts; i++) {
@@ -262,6 +271,7 @@ export async function confirmFill(opts: ConfirmOpts): Promise<ConfirmedFill> {
       // Fully filled (3) — done. Partially filled (2) — keep polling briefly to
       // catch the rest, but treat what we have as confirmed.
       result.confirmed = true
+      result.partial = status.state !== 3
       if (status.state === 3) return result
     }
     // Cancelled/rejected with no fill — stop, nothing will fill.
@@ -419,7 +429,7 @@ export function getExchangeClient(exchange: Exchange): ExchangeClient {
 // fetch fails (e.g. paper mode / no API keys configured).
 const venueFeeCache: Record<string, { makerFeeRate: number; takerFeeRate: number }> = {}
 
-async function warmVenueFees() {
+async function warmVenueFees(): Promise<void> {
   try {
     venueFeeCache["bybit"] = await BybitPrivate.getFeeRates()
   } catch (err) {
@@ -431,7 +441,22 @@ async function warmVenueFees() {
     console.warn("[Fees] Gate fee-rate warmup failed:", err instanceof Error ? err.message : String(err))
   }
 }
-warmVenueFees()
+
+// Memoised warmup. The previous version was a fire-and-forget call at module
+// load with no handle, so a request that arrived before it resolved (a cold
+// serverless start) silently used DEFAULT-tier rates for that tick — which
+// mis-prices grid spacing and every booked `fees` value. getFeeRates() is
+// synchronous and cannot await, so any async caller on the order path should
+// `await ensureVenueFees()` first. (lib/grid.ts already does in setupGrid.)
+let venueFeeWarmup: Promise<void> | null = null
+export function ensureVenueFees(): Promise<void> {
+  if (!venueFeeWarmup) venueFeeWarmup = warmVenueFees()
+  return venueFeeWarmup
+}
+
+// Kick the warmup off at module load so the synchronous getFeeRates() below
+// usually has real rates by the time the first tick runs.
+ensureVenueFees()
 
 export function getFeeRates(exchange: Exchange, symbol: string): { makerFeeRate: number; takerFeeRate: number } {
   switch (exchange) {
