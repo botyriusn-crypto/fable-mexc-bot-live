@@ -91,6 +91,7 @@ interface GridState {
   atrMult?: number
   makerMode?: boolean
   direction: string
+  autoDirection?: string | null
 }
 
 const fmt = (v: number | null | undefined, d = 4) =>
@@ -293,9 +294,9 @@ const handleToggleDirection = async () => {
             onClick={handleToggleDirection}
             title="Toggle direction (long/short/auto/neutral)"
           >
-            {directionBusy ? "…" : 
-              grid.direction === "short" ? "SHORT" 
-              : grid.direction === "auto" ? "AUTO" 
+            {directionBusy ? "…" :
+              grid.direction === "short" ? "SHORT"
+              : grid.direction === "auto" ? `AUTO → ${(grid.autoDirection ?? "neutral").toUpperCase()}`
               : grid.direction === "neutral" ? "NEUTRAL" : "LONG"}
           </Badge>
         </div>

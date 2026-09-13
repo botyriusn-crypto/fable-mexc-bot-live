@@ -394,9 +394,23 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
 // The resolved side only changes which NEW rungs get placed on the next
 // rebuild — it never force-closes an existing position, so switching modes
 // carries no cliff and no forced liquidation.
-function effectiveDirection(gc: GridConfig): "long" | "short" | "neutral" {
-  if (gc.direction === "auto") return (gc as any)._autoSide || "neutral"
-  return gc.direction
+// Last resolved AUTO side per grid, keyed `${symbol}|${timeframe}`. _autoSide
+// lives on the per-tick gc object (discarded after the tick), so the state API
+// — which loads fresh DB rows — reads this cache for genuinely live state.
+const autoSideCache = new Map<string, "long" | "short" | "neutral">()
+
+export function effectiveDirection(
+  gc: Pick<GridConfig, "symbol" | "timeframe"> & {
+    direction: string
+    _autoSide?: "long" | "short" | "neutral"
+  },
+): "long" | "short" | "neutral" {
+  if (gc.direction === "auto") {
+    const live = (gc as unknown as { _autoSide?: "long" | "short" | "neutral" })._autoSide
+    if (live) return live
+    return autoSideCache.get(`${gc.symbol}|${gc.timeframe}`) ?? "neutral"
+  }
+  return gc.direction as "long" | "short" | "neutral"
 }
 
 function resolveAutoSide(gc: GridConfig, snap: IndicatorSnapshot, regime: Regime): "long" | "short" | "neutral" {
@@ -1484,6 +1498,7 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
     const prev = (gc as any)._autoSide
     const next = resolveAutoSide(gc, snap, regime)
     ;(gc as any)._autoSide = next
+    autoSideCache.set(`${gc.symbol}|${gc.timeframe}`, next)
     if (prev && prev !== next) {
       await log("info", `Grid ${gc.symbol}: auto-direction switched ${prev} → ${next} (regime ${regime})`)
     }

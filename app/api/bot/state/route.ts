@@ -8,7 +8,7 @@ import { eq, desc, inArray, sql, and } from "drizzle-orm"
 import { getExchangeClient, type Exchange } from "@/lib/exchange"
 import { ema, computeSnapshot } from "@/lib/indicators"
 import { detectRegime, type Regime } from "@/lib/strategy"
-import { getGridConfigs, gridUnrealizedPnl } from "@/lib/grid"
+import { getGridConfigs, gridUnrealizedPnl, effectiveDirection } from "@/lib/grid"
 import { getLastRotationTime } from "@/lib/portfolio-rotator"
 import { getShadowStats, runShadowCycle } from "@/lib/shadow-evaluator"
 import { getWatchdogReport } from "@/lib/watchdog"
@@ -268,7 +268,7 @@ export async function GET() {
         leverage: gc.leverage,
         makerMode: gc.makerMode,
         direction: gc.direction || "long",
-        autoDirection: gc.direction === "auto" ? (gc as any)._autoSide || "neutral" : null,
+        autoDirection: gc.direction === "auto" ? effectiveDirection(gc) : null,
       }
     }))
 
