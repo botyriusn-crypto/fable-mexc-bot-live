@@ -89,7 +89,7 @@ const DEFAULT_MIN_TURNOVER = 500_000
 // Minimum last price for auto-select candidates. Evidence-backed line:
 // 1000PEPE @ 0.0034 bled -$52 in 2d (stopped both directions), while the
 // 0.006-class runner the suite treats as tradable stays eligible.
-const DEFAULT_MIN_CANDIDATE_PRICE = 0.005
+export const DEFAULT_MIN_CANDIDATE_PRICE = 0.005
 
 function adxFactor(adxNow: number): number {
   if (adxNow < 15) return 0

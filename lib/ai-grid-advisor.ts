@@ -10,6 +10,19 @@ import { getExchangeClient, type ExchangeClient, type Exchange, type Ticker } fr
 import { getConfig } from "./engine"
 import { eq } from "drizzle-orm"
 import { VALIDATED_SYMBOLS } from "./validated-symbols"
+import { DEFAULT_MIN_CANDIDATE_PRICE } from "./trend-candidate"
+
+/**
+ * Shared sub-cent floor (same evidence as trend auto-select: 1000PEPE @
+ * 0.0034 bled -$52/2d, stopped both directions). Unknown/non-finite prices
+ * fail closed — a candidate without a readable price is not deployable.
+ */
+export function isPriceEligible(
+  lastPrice: number | null | undefined,
+  minPrice: number = DEFAULT_MIN_CANDIDATE_PRICE,
+): boolean {
+  return typeof lastPrice === "number" && Number.isFinite(lastPrice) && lastPrice >= minPrice
+}
 
 // Known leveraged-ETF / tokenized-stock tickers on MEXC. These often can't
 // open a short (MEXC rejects with 2009 Position is nonexistent), which
@@ -154,7 +167,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
 
 
     const scoredMarkets: any[] = []
-    const gateStats = { total: candidates.length, alreadyOpen: 0, paused: 0, recentLoser: 0, feeGate: 0, klineFail: 0, tooFewCandles: 0, momentumGate: 0, dnaRejected: 0, scored: 0 }
+    const gateStats = { total: candidates.length, alreadyOpen: 0, paused: 0, recentLoser: 0, feeGate: 0, klineFail: 0, tooFewCandles: 0, momentumGate: 0, dnaRejected: 0, scored: 0, unvalidated: 0, belowMinPrice: 0, scanErrors: 0 }
 
     for (const t of candidates) {
       try {
@@ -162,7 +175,7 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         // walk-forward validated basket (lib/validated-symbols.ts). This is
         // the hard gate that stops autonomous deployment of unvalidated
         // microcaps. The advisor may only ever enable a validated symbol.
-        if (!VALIDATED_SYMBOLS.has(t.symbol)) continue
+        if (!VALIDATED_SYMBOLS.has(t.symbol)) { gateStats.unvalidated++; continue }
 
         // 0.1 Already-open gate: skip any symbol that already has an enabled
         // grid. Re-suggesting a deployed pair is a bug — the advisor should
@@ -184,6 +197,9 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
 
         const closes = candles.map(c => c.close)
         const lastClose = closes[closes.length - 1]
+        // Shared sub-cent floor (same $0.005 bar as trend auto-select):
+        // PEPE-class microstructure gets stop-hunted both directions.
+        if (!isPriceEligible(lastClose)) { gateStats.belowMinPrice++; continue }
         const atrArr = atr(candles, 14)
         const lastAtr = atrArr[atrArr.length - 1]
         const atrPct = (lastAtr / lastClose) * 100
@@ -227,7 +243,14 @@ export async function runGridAiAdvisor(autoApply: boolean): Promise<GridAiResult
         gateStats.scored++
 
         await new Promise(r => setTimeout(r, 100))
-      } catch (err) { continue }
+      } catch (err) {
+        // Never silent: these invisible drops were the entire 0-candidates
+        // outage (scored:0 with every named gate at ~zero). Counter for the
+        // stats line, console for the server log with the symbol + cause.
+        gateStats.scanErrors++
+        console.log(`[AI Advisor] scan error on ${t.symbol}: ${err instanceof Error ? err.message : String(err)}`)
+        continue
+      }
     }
 
     console.log("[AI Advisor Gate Stats]", JSON.stringify(gateStats))
