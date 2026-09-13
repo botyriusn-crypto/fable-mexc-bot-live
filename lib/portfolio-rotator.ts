@@ -1,6 +1,6 @@
 import { db } from "./db"
 import { gridConfigs, gridOrders, trades, botConfig } from "./db/schema"
-import { eq, and, sql } from "drizzle-orm"
+import { eq, and, isNull, sql } from "drizzle-orm"
 import { log } from "./logger"
 import { recordGridOutcome } from "./ai-grid-advisor"
 import { VALIDATED_SYMBOLS } from "./validated-symbols"
@@ -9,6 +9,13 @@ const ROTATION_INTERVAL_MS = 4 * 60 * 60 * 1000 // 4 hours
 const MIN_AGE_HOURS = 6 // Don't kill grids younger than 6h
 const MAX_REPLACEMENTS_PER_CYCLE = 3
 const MAX_DEPLOYED_PCT = 90 // Safety cap: never deploy more than 90% of balance // Cap to prevent over-trading
+
+// URL of the AI advisor endpoint on THIS deployment. Defaults to the current
+// Fly app but is env-overridable so a rename/fork/preview deploy does not
+// silently break rotation (the fetch failing means rotation is skipped every
+// cycle, which is invisible in the UI).
+const AI_ADVISOR_URL =
+  process.env.AI_ADVISOR_URL ?? "https://fable-mexc-bot.fly.dev/api/bot/ai-advisor"
 
 let lastRotationTime = 0
 let rotationEnabled = true
@@ -80,9 +87,9 @@ export async function checkAndRotate(exchange: any): Promise<void> {
 
     // 4. Get AI Advisor recommendations
     await log("info", "🔍 Scanning for fresh AI Advisor picks...")
-    const aiRes = await fetch("https://fable-mexc-bot.fly.dev/api/bot/ai-advisor")
+    const aiRes = await fetch(AI_ADVISOR_URL)
     if (!aiRes.ok) {
-      await log("error", "AI Advisor scan failed - skipping rotation")
+      await log("error", `AI Advisor scan failed (${aiRes.status}) - skipping rotation`)
       return
     }
     const aiData = await aiRes.json()
@@ -130,11 +137,22 @@ export async function checkAndRotate(exchange: any): Promise<void> {
           .set({ enabled: false, paused: true })
           .where(eq(gridConfigs.id, deadGrid.config.id))
 
-        // Delete old ladder
+        // Delete the old LADDER, but only the UNFILLED rungs.
+        //
+        // Rows with buyPrice set represent real held inventory — a filled buy
+        // awaiting its sell, or a filled short awaiting its buy-to-close — that
+        // is still OPEN on the exchange. Deleting those rows loses the tracking
+        // record, orphaning the real position (the orphan sweep then force-
+        // closes it at market WITHOUT booking a trade, so the PnL vanishes from
+        // the books). Leave them: the grid's own risk path (checkGridStopLoss /
+        // checkAllHeldPositionsRisk) keeps closing held inventory even after the
+        // config is disabled, and the recenter paths are now gc.enabled-guarded
+        // so they will not rebuild a fresh ladder for this pair.
         await db.delete(gridOrders)
           .where(and(
             eq(gridOrders.symbol, deadGrid.config.symbol),
-            eq(gridOrders.timeframe, deadGrid.config.timeframe)
+            eq(gridOrders.timeframe, deadGrid.config.timeframe),
+            isNull(gridOrders.buyPrice),
           ))
 
         // Create new grid config

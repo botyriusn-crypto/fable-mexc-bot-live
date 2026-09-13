@@ -5,7 +5,7 @@ import type { FeatureVector, IndicatorSnapshot } from "./indicators"
 import { detectVolatilitySurge, adaptiveSpacing, type VolatilityState } from "./volatility-guard"
 import { gridEntryRegime, type Regime } from "./strategy"
 import { loadModelFor, trainOnTrade, MODEL_IDS } from "./ml"
-import { getExchangeClient, getFeeRates, type ExchangeClient, type Exchange } from "./exchange"
+import { getExchangeClient, getFeeRates, ensureVenueFees, type ExchangeClient, type Exchange } from "./exchange"
 import type { Candle } from "./mexc/public"
 import { getMexcSpecAsync } from "./mexc/precision"
 import { livePrices } from "./mexc/ws"
@@ -139,6 +139,40 @@ function dbErr(err: unknown): string {
     return detail ? `${err.message} | cause: ${detail}` : err.message
   }
   return String(err)
+}
+
+/**
+ * Atomically claim a pending grid order row (pending -> filled). Returns true
+ * only for the single caller that won the race.
+ *
+ * Every path that reacts to a fill must claim BEFORE it places a real order or
+ * books a trade. Without the claim, overlapping ticks (or the fast risk-check
+ * racing the tick loop, or two Fly instances during a deploy) each see the same
+ * pending row and each act on it — which for a closing order means the second
+ * one REOPENS the position in the opposite direction on the venue.
+ */
+async function claimPendingOrder(orderId: number, exchangeStatus?: string): Promise<boolean> {
+  const claimed = await db
+    .update(gridOrders)
+    .set({
+      status: "filled",
+      ...(exchangeStatus ? { exchangeStatus } : {}),
+      filledAt: sql`NOW()`,
+    })
+    .where(and(eq(gridOrders.id, orderId), eq(gridOrders.status, "pending")))
+    .returning({ id: gridOrders.id })
+  return claimed.length > 0
+}
+
+/**
+ * Guard a computed TP / buy-to-close target. A cheap pair with wide spacing can
+ * compute a target at or below zero, which the venue rejects (and which paper
+ * mode would happily "fill" at a nonsense price). Fall back to 1% of the entry
+ * so the position stays tracked; the stop-loss remains the real protection.
+ */
+function clampClosePrice(candidate: number, entryPrice: number): number {
+  if (Number.isFinite(candidate) && candidate > 0) return candidate
+  return entryPrice * 0.01
 }
 
 // --- Maker mode (post-only resting orders) ---
@@ -293,7 +327,6 @@ async function cancelOtherPendingOrders(active: GridOrder[], keepId: number, exc
       await log("error", `Grid stop-loss: failed cancelling ${realIds.length} real resting order(s) on exchange: ${dbErr(err)}`)
     }
   }
-  await log("info", `[CancelOp] Line ~161: Cancelling orders`).catch(() => {});
   await db.update(gridOrders).set({ status: "cancelled" }).where(inArray(gridOrders.id, others.map(x => x.id)))
 }
 
@@ -343,43 +376,72 @@ async function checkGridStopLoss(cfg: BotConfig, gc: GridConfig, price: number, 
 
   // Check Long inventory
   for (const o of active.filter(x => x.side === "sell" && x.buyPrice != null && x.status === "pending")) {
-    const adverse = (o.buyPrice! - price) / o.buyPrice!
-    if (o.slPrice != null ? price <= o.slPrice : adverse >= effectiveGridStopPct(o.leverage)) {
-      if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 4, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
-      const claimedLongStop = await db.update(gridOrders).set({ status: "filled" }).where(and(eq(gridOrders.id, o.id), eq(gridOrders.status, "pending"))).returning({ id: gridOrders.id })
-      if (claimedLongStop.length === 0) return false
-      const { takerFeeRate: rtf1 } = getFeeRates(cfg.exchange as Exchange, o.symbol)
-      const row = buildTakerStopTradeValues(o, price, rtf1, cfg.mode === "live")
-      const [trade] = await db.insert(trades).values(row).returning({ id: trades.id })
-      if (cfg.mode === "paper") {
-        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${row.pnl}` }).where(eq(botConfig.id, 1))
+    const entryPrice = o.buyPrice as number
+    const adverse = (entryPrice - price) / entryPrice
+    if (!(o.slPrice != null ? price <= o.slPrice : adverse >= effectiveGridStopPct(o.leverage))) continue
+
+    // RACE-SAFE ORDERING: claim the row BEFORE touching the exchange. Only the
+    // single caller that flips pending -> filled may place the market close, so
+    // overlapping ticks / the fast risk-check can never both fire one (a second
+    // close-long would OPEN A FRESH SHORT on the venue).
+    if (!(await claimPendingOrder(o.id))) return false
+
+    if (cfg.mode === "live" && exchange) {
+      try {
+        await exchange.placeMarketOrder({ symbol: o.symbol, side: 4, volume: o.quantity, leverage: o.leverage })
+      } catch (err) {
+        // The venue never confirmed the close, so DO NOT book an exit against a
+        // position that is still open. Revert the claim and let a later tick
+        // retry. (Previously this failure was swallowed by an empty catch and
+        // the code went on to record a phantom closure.)
+        await db.update(gridOrders).set({ status: "pending" }).where(eq(gridOrders.id, o.id))
+        await log("error", `Grid ${o.symbol} long STOP-LOSS close FAILED at market, will retry next tick: ${dbErr(err)}`)
+        return false
       }
-      if (trade) await trainGridOnClose(cfg, o, trade.id, row.pnl, row.sizeUsdt)
-      await markPostStopCooldown(o.symbol).catch(() => {})
-      await cancelOtherPendingOrders(active, o.id, exchange ?? getExchangeClient(cfg.exchange as Exchange))
-      await log("trade", `Grid ${o.symbol} STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${row.pnl.toFixed(2)} USDT`)
-      return true
     }
+    const { takerFeeRate: rtf1 } = getFeeRates(cfg.exchange as Exchange, o.symbol)
+    const row = buildTakerStopTradeValues(o, price, rtf1, cfg.mode === "live")
+    const [trade] = await db.insert(trades).values(row).returning({ id: trades.id })
+    if (cfg.mode === "paper") {
+      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${row.pnl}` }).where(eq(botConfig.id, 1))
+    }
+    if (trade) await trainGridOnClose(cfg, o, trade.id, row.pnl, row.sizeUsdt)
+    await markPostStopCooldown(o.symbol).catch(() => {})
+    await cancelOtherPendingOrders(active, o.id, exchange ?? getExchangeClient(cfg.exchange as Exchange))
+    await log("trade", `Grid ${o.symbol} STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${row.pnl.toFixed(2)} USDT`)
+    return true
   }
 
   // Check Short inventory
   for (const o of active.filter(x => x.side === "buy" && x.buyPrice != null && x.status === "pending")) {
-    const adverse = (price - o.buyPrice!) / o.buyPrice!
-    if (o.slPrice != null ? price >= o.slPrice : adverse >= effectiveGridStopPct(o.leverage)) {
-      if (cfg.mode === "live" && exchange) { try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (e) {} }
-      const { takerFeeRate: rtf2 } = getFeeRates(cfg.exchange as Exchange, o.symbol)
-      const row = buildTakerStopTradeValues(o, price, rtf2, cfg.mode === "live")
-      const [trade] = await db.insert(trades).values(row).returning({ id: trades.id })
-      if (cfg.mode === "paper") {
-        await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${row.pnl}` }).where(eq(botConfig.id, 1))
+    const entryPrice = o.buyPrice as number
+    const adverse = (price - entryPrice) / entryPrice
+    if (!(o.slPrice != null ? price >= o.slPrice : adverse >= effectiveGridStopPct(o.leverage))) continue
+
+    // Same claim-first discipline as the long path above. This branch had NO
+    // claim at all, so it could place duplicate close-short market orders.
+    if (!(await claimPendingOrder(o.id))) return false
+
+    if (cfg.mode === "live" && exchange) {
+      try {
+        await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage })
+      } catch (err) {
+        await db.update(gridOrders).set({ status: "pending" }).where(eq(gridOrders.id, o.id))
+        await log("error", `Grid ${o.symbol} short STOP-LOSS close FAILED at market, will retry next tick: ${dbErr(err)}`)
+        return false
       }
-      await cancelOtherPendingOrders(active, o.id, exchange ?? getExchangeClient(cfg.exchange as Exchange))
-      await db.update(gridOrders).set({ status: "filled" }).where(eq(gridOrders.id, o.id))
-      if (trade) await trainGridOnClose(cfg, o, trade.id, row.pnl, row.sizeUsdt)
-      await markPostStopCooldown(o.symbol).catch(() => {})
-      await log("trade", `Grid ${o.symbol} SHORT STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${row.pnl.toFixed(2)} USDT`)
-      return true
     }
+    const { takerFeeRate: rtf2 } = getFeeRates(cfg.exchange as Exchange, o.symbol)
+    const row = buildTakerStopTradeValues(o, price, rtf2, cfg.mode === "live")
+    const [trade] = await db.insert(trades).values(row).returning({ id: trades.id })
+    if (cfg.mode === "paper") {
+      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${row.pnl}` }).where(eq(botConfig.id, 1))
+    }
+    if (trade) await trainGridOnClose(cfg, o, trade.id, row.pnl, row.sizeUsdt)
+    await markPostStopCooldown(o.symbol).catch(() => {})
+    await cancelOtherPendingOrders(active, o.id, exchange ?? getExchangeClient(cfg.exchange as Exchange))
+    await log("trade", `Grid ${o.symbol} SHORT STOP-LOSS closed @ ${price.toFixed(4)} | PnL ${row.pnl.toFixed(2)} USDT`)
+    return true
   }
   return false
 }
@@ -529,6 +591,7 @@ export async function setupGrid(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   // 0% today) but an adverse exit (stop-loss/max-hold) always crosses as a
   // taker market order. Using real entry-fee basis instead of assuming taker
   // on both legs, which was needlessly widening every maker pair's grid.
+  await ensureVenueFees()
   const { makerFeeRate: realMakerFeeRate, takerFeeRate: realTakerFeeRate } = getFeeRates(cfg.exchange as Exchange, gc.symbol)
   const entryFeeRate = isMakerSymbol(gc) ? realMakerFeeRate : realTakerFeeRate
   const breakeven = center * (entryFeeRate + realTakerFeeRate)
@@ -824,8 +887,7 @@ export async function teardownGrid(cfg: BotConfig, currentPrice: number | null):
 
   const remaining = active.filter((o) => o.side === "buy").map((o) => o.id)
   if (remaining.length > 0) {
-    await log("info", `[CancelOp] Line ~341: Cancelling orders`).catch(() => {});
-  await db.update(gridOrders).set({ status: "cancelled" }).where(inArray(gridOrders.id, remaining))
+    await db.update(gridOrders).set({ status: "cancelled" }).where(inArray(gridOrders.id, remaining))
   }
 
   await db
@@ -951,14 +1013,12 @@ async function settleGridSell(
 
 // Maker settle: the resting post-only sell already executed on the exchange,
 // so we do NOT place any order here — we only record the trade and books.
-async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConfig): Promise<void> {
+// Returns true when THIS caller won the atomic claim (and therefore owns the
+// follow-on re-arm), false when another caller already settled the row.
+async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConfig): Promise<boolean> {
   // ATOMIC CLAIM: Prevent duplicate settlement
-  const claimed = await db.update(gridOrders)
-    .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
-    .where(and(eq(gridOrders.id, order.id), eq(gridOrders.status, "pending")))
-    .returning({ id: gridOrders.id })
-  
-  if (claimed.length === 0) return // Already claimed by another process
+  const claimed = await claimPendingOrder(order.id, "filled")
+  if (!claimed) return false // Already claimed by another process
 
   const buyPrice = order.buyPrice ?? order.price
   const sizeUsdt = buyPrice * order.quantity
@@ -1019,11 +1079,25 @@ async function settleMakerSell(order: GridOrder, exitPrice: number, cfg: BotConf
     "trade",
     `Grid ${order.symbol} (maker) sell filled @ ${exitPrice.toFixed(6)} (bought ${buyPrice.toFixed(6)}) | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`,
   )
+  return true
 }
 
 // Maker tick: fills are detected from REAL MEXC order status, not price
 // crossing. v1 intentionally omits auto-pause and auto-recenter — watch it.
-async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: BotConfig, reason: "stop-loss" | "max-hold"): Promise<void> {
+//
+// `entryIsMaker` distinguishes the fee basis of the ENTRY leg. The exit here is
+// always a forced market order (taker). Positions created by the non-maker
+// (virtual-fill) path have a TAKER entry, and booking them with maker entry
+// fees understated every stop/max-hold loss.
+//
+// ATOMIC: the row is claimed (pending -> filled) BEFORE the exchange is
+// touched. This function is called from BOTH the 20s checkAllHeldPositionsRisk
+// and the 60s runGridTickMaker (and its recenter path). Without the claim, both
+// callers place a market close on the same held row — and a second close-long
+// is not a no-op, it OPENS A FRESH SHORT on the venue that nothing tracks.
+async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: BotConfig, reason: "stop-loss" | "max-hold", entryIsMaker = true): Promise<void> {
+  if (!(await claimPendingOrder(order.id, "cancelled"))) return
+
   if (reason === "stop-loss") await markPostStopCooldown(order.symbol).catch(() => {})
   // PAPER MODE: no real position exists on the exchange, so skip the exchange
   // round-trip entirely and settle locally. Hitting the exchange here would
@@ -1044,6 +1118,10 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
       if (errMsg.includes("2009") || errMsg.includes("nonexistent")) {
         await log("info", `Grid ${order.symbol} (maker): ${reason} close — position already gone on exchange (2009), reconciling local state`)
       } else {
+        // Revert the claim so a later tick retries, rather than booking an exit
+        // against a position that is still open. (The claim happened before the
+        // exchange call, so failing here leaves the row re-claimable.)
+        await db.update(gridOrders).set({ status: "pending", exchangeStatus: null }).where(eq(gridOrders.id, order.id))
         await log("error", `Grid ${order.symbol} (maker): ${reason} market close FAILED, will retry next tick: ${errMsg}`)
         return
       }
@@ -1053,10 +1131,10 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
   const buyPrice = order.buyPrice ?? order.price
   const sizeUsdt = buyPrice * order.quantity
   const grossPnl = (exitPrice - buyPrice) * order.quantity
-  // Entry was a resting post-only (maker) buy fill; this exit is a forced
-  // market order (stop-loss/max-hold), which always crosses as taker.
+  // Entry leg: maker only when this row came from the maker path; the exit leg
+  // is always a forced market order (taker).
   const { makerFeeRate: mslMaker, takerFeeRate: mslTaker } = getFeeRates(cfg.exchange as Exchange, order.symbol)
-  const buyFee = buyPrice * order.quantity * mslMaker
+  const buyFee = buyPrice * order.quantity * (entryIsMaker ? mslMaker : mslTaker)
   const sellFee = exitPrice * order.quantity * mslTaker
   const fees = buyFee + sellFee
   const netPnl = grossPnl - fees
@@ -1072,7 +1150,7 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
     })
     .returning({ id: trades.id })
 
-  await db.update(gridOrders).set({ status: "filled", exchangeStatus: "cancelled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, order.id))
+  // Status already set to filled by the atomic claim at the top
   if (cfg.mode === "paper") {
     await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
   }
@@ -1102,7 +1180,10 @@ async function settleMakerStopLoss(order: GridOrder, exitPrice: number, cfg: Bot
 }
 
 // Maker SHORT stop-loss settlement: cancel resting buy-to-close, then close short at market.
-async function settleMakerShortStopLoss(order: GridOrder, exitPrice: number, cfg: BotConfig, reason: "stop-loss" | "max-hold"): Promise<void> {
+// Same atomic-claim discipline as the long side above (see that comment).
+async function settleMakerShortStopLoss(order: GridOrder, exitPrice: number, cfg: BotConfig, reason: "stop-loss" | "max-hold", entryIsMaker = true): Promise<void> {
+  if (!(await claimPendingOrder(order.id, "cancelled"))) return
+
   if (reason === "stop-loss") await markPostStopCooldown(order.symbol).catch(() => {})
 // PAPER MODE: no real position exists on the exchange, so skip the exchange
 // round-trip entirely and settle locally. Hitting the exchange here would
@@ -1123,6 +1204,7 @@ if (cfg.mode !== "paper") {
     if (errMsg.includes("2009") || errMsg.includes("nonexistent")) {
       await log("info", `Grid ${order.symbol} (maker short): ${reason} close — position already gone on exchange (2009), reconciling local state`)
     } else {
+      await db.update(gridOrders).set({ status: "pending", exchangeStatus: null }).where(eq(gridOrders.id, order.id))
       await log("error", `Grid ${order.symbol} (maker short): ${reason} market close FAILED, will retry next tick: ${errMsg}`)
       return
     }
@@ -1131,10 +1213,10 @@ if (cfg.mode !== "paper") {
 const entryPrice = order.buyPrice ?? order.price
 const sizeUsdt = entryPrice * order.quantity
 const grossPnl = (entryPrice - exitPrice) * order.quantity
-// Entry was a resting post-only (maker) sell fill (short open); this exit is
-// a forced market order (stop-loss/max-hold), which always crosses as taker.
+// Entry leg: maker only when this row came from the maker path (a resting
+// post-only sell fill); the exit leg is a forced taker market order.
 const { makerFeeRate: mssMaker, takerFeeRate: mssTaker } = getFeeRates(cfg.exchange as Exchange, order.symbol)
-const fees = (entryPrice * mssMaker + exitPrice * mssTaker) * order.quantity
+const fees = (entryPrice * (entryIsMaker ? mssMaker : mssTaker) + exitPrice * mssTaker) * order.quantity
 const netPnl = grossPnl - fees
 const [trade] = await db
 .insert(trades)
@@ -1145,7 +1227,7 @@ exitReason: reason, strategy: "grid", openedAt: order.createdAt, live: cfg.mode 
 entryRegime: order.entryRegime ?? null,
 })
 .returning({ id: trades.id })
-await db.update(gridOrders).set({ status: "filled", exchangeStatus: "cancelled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, order.id))
+// Status already set to filled by the atomic claim at the top
 if (cfg.mode === "paper") {
   await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
 }
@@ -1190,7 +1272,16 @@ export async function checkAllHeldPositionsRisk(): Promise<void> {
   // trending pair (auto-paused) cuts losers fast instead of waiting 4h.
   const gridRows = await db.select().from(gridConfigs)
   const pausedBySymbol = new Map<string, boolean>()
-  for (const g of gridRows) pausedBySymbol.set(g.symbol, g.paused)
+  // Fee basis per symbol. grid_orders rows do not record whether they were
+  // placed as resting maker orders or as market fills, so this reads it from
+  // the grid config using the SAME predicate the entry path uses
+  // (isMakerSymbol). Only affects the recorded entry fee — the stop distance
+  // is unchanged.
+  const makerBySymbol = new Map<string, boolean>()
+  for (const g of gridRows) {
+    pausedBySymbol.set(g.symbol, g.paused)
+    makerBySymbol.set(g.symbol, isMakerSymbol(g))
+  }
 
   const held = await db.select().from(gridOrders).where(
     and(eq(gridOrders.status, "pending"), isNotNull(gridOrders.buyPrice))
@@ -1201,26 +1292,27 @@ export async function checkAllHeldPositionsRisk(): Promise<void> {
     if (!currentPrice || currentPrice <= 0) continue
     const entryPrice = o.buyPrice as number
     const heldMinutes = o.createdAt ? (Date.now() - new Date(o.createdAt as any).getTime()) / 60000 : 0
+    const entryIsMaker = makerBySymbol.get(o.symbol) ?? false
 
     if (o.side === "sell") {
       // Held long: loses when price falls below entry.
       const adverseMove = (currentPrice - entryPrice) / entryPrice
       if (o.slPrice != null ? currentPrice <= o.slPrice : adverseMove <= -effectiveMakerStopPct(o.leverage)) {
-        await log("info", `Grid ${o.symbol} (maker, fast-check): stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% below entry ${entryPrice.toFixed(6)} (sl ${o.slPrice?.toFixed(6) ?? "pct"})`)
-        await settleMakerStopLoss(o, currentPrice, cfg, "stop-loss")
+        await log("info", `Grid ${o.symbol} (fast-check): stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% below entry ${entryPrice.toFixed(6)} (sl ${o.slPrice?.toFixed(6) ?? "pct"})`)
+        await settleMakerStopLoss(o, currentPrice, cfg, "stop-loss", entryIsMaker)
       } else if (heldMinutes >= (pausedBySymbol.get(o.symbol) ? TREND_MAX_HOLD_MINUTES : MAKER_MAX_HOLD_MINUTES)) {
-        await log("info", `Grid ${o.symbol} (maker, fast-check): max-hold triggered — held ${heldMinutes.toFixed(0)}m, closing at market`)
-        await settleMakerStopLoss(o, currentPrice, cfg, "max-hold")
+        await log("info", `Grid ${o.symbol} (fast-check): max-hold triggered — held ${heldMinutes.toFixed(0)}m, closing at market`)
+        await settleMakerStopLoss(o, currentPrice, cfg, "max-hold", entryIsMaker)
       }
     } else if (o.side === "buy") {
       // Held short: loses when price rises above entry.
       const adverseMove = (currentPrice - entryPrice) / entryPrice
       if (o.slPrice != null ? currentPrice >= o.slPrice : adverseMove >= effectiveMakerStopPct(o.leverage)) {
-        await log("info", `Grid ${o.symbol} (maker, fast-check): short stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% above entry ${entryPrice.toFixed(6)} (sl ${o.slPrice?.toFixed(6) ?? "pct"})`)
-        await settleMakerShortStopLoss(o, currentPrice, cfg, "stop-loss")
+        await log("info", `Grid ${o.symbol} (fast-check): short stop-loss triggered — price ${currentPrice.toFixed(6)} is ${(adverseMove * 100).toFixed(2)}% above entry ${entryPrice.toFixed(6)} (sl ${o.slPrice?.toFixed(6) ?? "pct"})`)
+        await settleMakerShortStopLoss(o, currentPrice, cfg, "stop-loss", entryIsMaker)
       } else if (heldMinutes >= (pausedBySymbol.get(o.symbol) ? TREND_MAX_HOLD_MINUTES : MAKER_MAX_HOLD_MINUTES)) {
-        await log("info", `Grid ${o.symbol} (maker, fast-check): short max-hold triggered — held ${heldMinutes.toFixed(0)}m, closing at market`)
-        await settleMakerShortStopLoss(o, currentPrice, cfg, "max-hold")
+        await log("info", `Grid ${o.symbol} (fast-check): short max-hold triggered — held ${heldMinutes.toFixed(0)}m, closing at market`)
+        await settleMakerShortStopLoss(o, currentPrice, cfg, "max-hold", entryIsMaker)
       }
     }
   }
@@ -1287,7 +1379,13 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
 
   // Auto-recenter: cancel stale resting buys and rebuild near current price
   // if the market has moved too far away for them to realistically fill.
-  if (!paused) {
+  //
+  // Guarded by gc.enabled. getGridConfigs() intentionally returns disabled
+  // pairs so their held inventory keeps being closed out, but this branch used
+  // to rebuild unconditionally — so a pair you had just switched off (or that
+  // the portfolio rotator just rotated out) would silently re-arm a fresh
+  // ladder on the next drift, defeating the disable entirely.
+  if (!paused && gc.enabled) {
     const restingBuys = active.filter((o) => o.side === "buy" && o.mexcOrderId)
     if (restingBuys.length > 0) {
       let livePrice: number | null = null
@@ -1299,7 +1397,7 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
         if (minDrift > MAKER_RECENTER_DRIFT_PCT) {
           await log("info", `Grid ${gc.symbol} (maker): price drifted ${(minDrift * 100).toFixed(1)}% from resting buys. Recentering at ${livePrice.toFixed(6)}.`)
           try {
-            const toCancel = (gc.direction as string) === "neutral" ? active : restingBuys
+            const toCancel = effectiveDirection(gc) === "neutral" ? active : restingBuys
             // SAFETY: never cancel an order that represents a real held
             // position (buyPrice set — a filled buy awaiting its sell, or
             // a filled sell awaiting its buy-to-close) without closing it
@@ -1348,14 +1446,14 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
       // re-arm a fresh naked sell at the original short entry level.
       if (o.buyPrice != null) {
         const entryPrice = o.buyPrice
+        // ATOMIC CLAIM: only the winner of this claim may book the close and
+        // re-arm, so overlapping ticks can't double-close or double-re-arm.
+        if (!(await claimPendingOrder(o.id, "filled"))) continue
         const grossPnl = (entryPrice - fillPrice) * o.quantity
         const { makerFeeRate: scRate } = getFeeRates(cfg.exchange as Exchange, o.symbol)
         const fees = (entryPrice + fillPrice) * o.quantity * scRate
         const netPnl = grossPnl - fees
         const sizeUsdt = entryPrice * o.quantity
-        await db.update(gridOrders)
-          .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
-          .where(eq(gridOrders.id, o.id))
         await db.insert(trades).values({
           symbol: o.symbol, side: "short", entryPrice, exitPrice: fillPrice,
           sizeUsdt, leverage: o.leverage, pnl: netPnl, fees,
@@ -1384,17 +1482,11 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
         }
         continue
       }
-      await db
-        .update(gridOrders)
-        .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
-        .where(eq(gridOrders.id, o.id))
-      const buyFee = fillPrice * o.quantity * getFeeRates(cfg.exchange as Exchange, o.symbol).makerFeeRate
-      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance}` /* MARGIN DEDUCTION REMOVED FOR PAPER TRADING */ }).where(eq(botConfig.id, 1))
-
+      if (!(await claimPendingOrder(o.id, "filled"))) continue
       const sellPrice = fillPrice + (snap.atr * gc.rangeAtrMult)
       try {
         const res: any = await placeRoundedMakerOrder(o.symbol, 4, sellPrice, o.quantity, o.leverage, exchange)
-              const sid = extractOrderId(res)
+        const sid = extractOrderId(res)
         await db.insert(gridOrders).values({
           symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
           spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell",
@@ -1405,7 +1497,7 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
         })
         await log("trade", `Grid ${o.symbol} (maker) buy filled @ ${fillPrice.toFixed(6)} | resting sell @ ${sellPrice.toFixed(6)}`)
       } catch (err) {
-              await log("error", `Grid ${o.symbol} (maker): sell placement failed @ ${sellPrice.toFixed(6)}: ${dbErr(err)}`)
+        await log("error", `Grid ${o.symbol} (maker): sell placement failed @ ${sellPrice.toFixed(6)}: ${dbErr(err)}`)
       }
     } else if (state === 4 || state === 5) {
       await db.update(gridOrders).set({ status: "cancelled", exchangeStatus: "cancelled" }).where(eq(gridOrders.id, o.id))
@@ -1423,10 +1515,8 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
       // COMBO SHORT OPEN: a naked sell (no buyPrice) filling means we just
       // opened a short. Place a buy-to-close TP one spacing below entry.
       if (o.buyPrice == null) {
-        await db.update(gridOrders)
-          .set({ status: "filled", exchangeStatus: "filled", filledAt: sql`NOW()` })
-          .where(eq(gridOrders.id, o.id))
-        const closePrice = fillPrice - (o.spacing ?? snap.atr * gc.rangeAtrMult)
+        if (!(await claimPendingOrder(o.id, "filled"))) continue
+        const closePrice = clampClosePrice(fillPrice - (o.spacing ?? snap.atr * gc.rangeAtrMult), fillPrice)
         try {
           const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage, exchange)
           const bid = extractOrderId(res)
@@ -1445,12 +1535,14 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
         continue
       }
       const exitPrice = fillPrice
-      await settleMakerSell(o, exitPrice, cfg)
-      // Re-arm a resting maker buy back at the original level
-      if (o.buyPrice != null && !paused) {
+      const settled = await settleMakerSell(o, exitPrice, cfg)
+      // Re-arm a resting maker buy back at the original level — only if THIS
+      // caller actually settled the fill (settleMakerSell claims atomically),
+      // otherwise a losing race would insert a duplicate resting buy.
+      if (settled && o.buyPrice != null && !paused) {
         try {
           const res: any = await placeRoundedMakerOrder(o.symbol, 1, o.buyPrice, o.quantity, o.leverage, exchange)
-              const bid = extractOrderId(res)
+          const bid = extractOrderId(res)
           await db.insert(gridOrders).values({
             symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage,
             spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "buy",
@@ -1459,7 +1551,7 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
             entryRegime: gridEntryRegime(snap, cfg),
           })
         } catch (err) {
-              await log("error", `Grid ${o.symbol} (maker): re-arm buy failed @ ${o.buyPrice.toFixed(6)}: ${dbErr(err)}`)
+          await log("error", `Grid ${o.symbol} (maker): re-arm buy failed @ ${o.buyPrice.toFixed(6)}: ${dbErr(err)}`)
         }
       }
     } else if (state === 4 || state === 5) {
@@ -1508,6 +1600,13 @@ export async function runGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicato
   if (cfg.mode === "live" && isMakerSymbol(gc)) {
     return runGridTickMaker(cfg, gc, snap, regime, exchange ?? getExchangeClient(cfg.exchange as Exchange))
   }
+
+  // Is this grid executing the two-sided COMBO model? resolveAutoSide() maps
+  // "auto" to "neutral", so testing the RAW gc.direction here made an auto grid
+  // run the COMBO ladder while every branch below treated it as one-sided —
+  // the short-close branch was skipped and its buy-to-close was re-processed as
+  // a fresh LONG entry. One helper, one answer.
+  const isCombo = effectiveDirection(gc) === "neutral"
 
   const active = await getActiveOrders(gc.symbol, gc.timeframe)
   if (await checkGridStopLoss(cfg, gc, snap.price, exchange)) return
@@ -1610,34 +1709,35 @@ lo = Math.min(price, cur.low)
   }
 
   // Auto-recenter: if price has drifted far, OR if Bollinger Bands have squeezed tighter, rebuild ladder
+  //
+  // Guarded by gc.enabled. getGridConfigs() intentionally returns disabled
+  // pairs so their held inventory keeps being managed, but this branch had no
+  // enabled check — so a pair you had just switched off (or that the portfolio
+  // rotator rotated out) would silently re-arm a ladder on the next drift,
+  // defeating the disable entirely.
   const allPrices = active.map(o => o.price)
-  if (allPrices.length > 0) {
+  if (gc.enabled && allPrices.length > 0) {
     const minOrderPrice = Math.min(...allPrices)
     const maxOrderPrice = Math.max(...allPrices)
     const priceDrift = Math.min(
       Math.abs(price - minOrderPrice) / price * 100,
       Math.abs(price - maxOrderPrice) / price * 100
     )
-    
-    // Dynamic Bollinger Adjustment: If BB width is 40% narrower than our current spacing, rebuild tighter
-    const currentBbWidth = snap.bbUpper - snap.bbLower
-    const currentSpacing = active.find(o => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
-    const needsTighten = false // Disabled: BB squeeze causes infinite cancel/rebuild loops in low vol
 
-    // If price is >15% away, OR the grid is too wide for the current volatility
     // NEUTRAL DRIFT FIX: Only recenter if price escapes the ladder entirely
-let shouldRecenter = false;
-if ((gc as any).direction === "neutral") {
-  const highestSell = active.filter(o => o.side === "sell").reduce((max, o) => Math.max(max, o.price), 0);
-  const lowestBuy = active.filter(o => o.side === "buy").reduce((min, o) => Math.min(min, o.price), Infinity);
-  shouldRecenter = price > highestSell * 1.02 || price < lowestBuy * 0.98;
-} else {
-  shouldRecenter = priceDrift > 15 || needsTighten;
-}
-if (shouldRecenter) {
+    let shouldRecenter = false;
+    if (isCombo) {
+      const highestSell = active.filter(o => o.side === "sell").reduce((max, o) => Math.max(max, o.price), 0);
+      const lowestBuy = active.filter(o => o.side === "buy").reduce((min, o) => Math.min(min, o.price), Infinity);
+      shouldRecenter = price > highestSell * 1.02 || price < lowestBuy * 0.98;
+    } else {
+      shouldRecenter = priceDrift > 15;
+    }
+    if (shouldRecenter) {
       await log("info", `Grid ${gc.symbol}: price drifted ${priceDrift.toFixed(1)}% from orders. Recentering ladder at ${price.toFixed(4)}.`)
-      // Cancel ALL pending orders — if price crashed >40%, sells are hopeless
-      const cancelAll = shouldRecenter || (gc.direction as string) === "neutral" // COMBO-FIX: neutral rebuilds wipe both sides
+      // Cancel ALL pending orders — we are inside `if (shouldRecenter)`, so the
+      // whole ladder is being rebuilt.
+      const cancelAll = true
       for (const o of active) {
         if (!(o.side === "buy" || cancelAll)) continue
         // SAFETY: an order with buyPrice set represents a real held
@@ -1651,18 +1751,17 @@ if (shouldRecenter) {
             await settleGridSell(o, price, cfg, "manual", exchange)
           } else {
             await log("info", `Grid ${o.symbol}: recenter closing held short @ ${price.toFixed(6)} (entry ${o.buyPrice.toFixed(6)}) at market before rebuild`)
-            try {
-              if (cfg.mode === "live" && exchange) {
+            if (cfg.mode === "live" && exchange) {
+              try {
                 await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage })
+              } catch (err) {
+                await log("error", `Grid ${o.symbol}: recenter short close failed: ${err instanceof Error ? err.message : String(err)}`)
               }
-            } catch (err) {
-              await log("error", `Grid ${o.symbol}: recenter short close failed: ${err instanceof Error ? err.message : String(err)}`)
             }
-            await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
+            await claimPendingOrder(o.id)
           }
         } else {
-          await log("info", `[CancelOp] Line ~891: Cancelling orders`).catch(() => {});
-  await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
+          await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
         }
       }
       // Rebuild buys at current price
@@ -1675,8 +1774,10 @@ if (shouldRecenter) {
   const sells = active.filter((o) => o.side === "sell" && hi >= o.price)
 for (const o of sells) {
 if (o.buyPrice == null) {
-await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-const closePrice = o.price - spacing
+// COMBO SHORT OPEN: a naked sell filling opens a short. Claim the row FIRST
+// so two overlapping ticks can't both create a buy-to-close tracking row.
+if (!(await claimPendingOrder(o.id))) continue
+const closePrice = clampClosePrice(o.price - spacing, o.price)
 await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, entryFeatures: { ...snap.features, sideLong: -1 }, status: "pending", entryRegime: gridEntryRegime(snap, cfg) })
 await log("trade", `Grid ${o.symbol} COMBO short sell @ ${o.price.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
 continue
@@ -1700,27 +1801,25 @@ const sold = await settleGridSell(o, o.price, cfg, "tp", exchange)
   if (!paused) {
     const buys = active.filter((o) => o.side === "buy" && lo <= o.price)
 for (const o of buys) {
-if (o.buyPrice != null && (gc as any).direction === "neutral") {
-  // COMBO: Create corresponding SELL order after buy fills
-  const sellPrice = o.price + (o.spacing ?? 0) * gc.leverage; // TP at spacing distance
-  await log("info", `Grid ${o.symbol}: COMBO buy filled, creating SELL @ ${sellPrice.toFixed(6)}`);
-  // RACE-FIX: Re-check order status before processing (prevents double-fill)
-  const fresh = await db.select({ status: gridOrders.status }).from(gridOrders).where(eq(gridOrders.id, o.id))
-  if (fresh[0]?.status !== "pending") continue
-  
-  const entry = o.buyPrice
-  const grossPnl = (entry - o.price) * o.quantity
-  const fees = (entry + o.price) * o.quantity * getFeeRates(cfg.exchange as Exchange, o.symbol).makerFeeRate
-  const netPnl = grossPnl - fees
-  await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
-await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: entry * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", openedAt: o.createdAt, live: cfg.mode === "live", entryRegime: o.entryRegime ?? null })
-await log("trade", `Grid ${o.symbol} COMBO short closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
-await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell", price: entry, quantity: o.quantity, status: "pending", entryRegime: gridEntryRegime(snap, cfg) })
-continue
-}
-// (dead/unreachable duplicate block removed -- identical condition to the
-// block above, which already `continue`s on match, so this could never run)
+  // COMBO SHORT CLOSE: a BUY with buyPrice set is a buy-to-close that just
+  // filled, so the short is now closed. Record it and re-arm a fresh naked
+  // sell at the original short entry level.
+  if (o.buyPrice != null && isCombo) {
+    const entry = o.buyPrice
+    // ATOMIC CLAIM (replaces the old read-then-write "fresh status" check,
+    // which was a non-atomic check-then-act and let two tickers both settle).
+    if (!(await claimPendingOrder(o.id))) continue
+    const grossPnl = (entry - o.price) * o.quantity
+    const fees = (entry + o.price) * o.quantity * getFeeRates(cfg.exchange as Exchange, o.symbol).makerFeeRate
+    const netPnl = grossPnl - fees
+    await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
+    await db.insert(trades).values({ symbol: o.symbol, side: "short", entryPrice: entry, exitPrice: o.price, sizeUsdt: entry * o.quantity, leverage: o.leverage, pnl: netPnl, fees, exitReason: "tp", strategy: "grid", openedAt: o.createdAt, live: cfg.mode === "live", entryRegime: o.entryRegime ?? null })
+    await log("trade", `Grid ${o.symbol} COMBO short closed @ ${o.price.toFixed(4)} | PnL ${netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)} USDT`)
+    await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "sell", price: entry, quantity: o.quantity, status: "pending", entryRegime: gridEntryRegime(snap, cfg) })
+    continue
+  }
+  // (dead/unreachable duplicate block removed -- identical condition to the
+  // block above, which already `continue`s on match, so this could never run)
 if (cfg.mode === "live") {
         try {
           if (exchange) { await log("info", `LIVE buy: ${o.symbol} price=${o.price} qty=${o.quantity} lev=${o.leverage}`); await exchange.placeMarketOrder({ symbol: o.symbol, side: 1 as any, volume: o.quantity, leverage: o.leverage }) }
@@ -1730,9 +1829,7 @@ if (cfg.mode === "live") {
         }
       }
 
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      const buyFee = o.price * o.quantity * getFeeRates(cfg.exchange as Exchange, o.symbol).takerFeeRate
-      await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance}` /* MARGIN DEDUCTION REMOVED FOR PAPER TRADING */ }).where(eq(botConfig.id, 1))
+      if (!(await claimPendingOrder(o.id))) continue
 
       // Check the DATABASE for existing sells to prevent duplicates
       const existingSells = await db.select().from(gridOrders).where(
@@ -1791,8 +1888,8 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
     if (!st) continue
     if (Number(st.state) === 3) {
       const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      const closePrice = fillPrice - (o.spacing ?? snap.atr * gc.rangeAtrMult)
+      if (!(await claimPendingOrder(o.id))) continue
+      const closePrice = clampClosePrice(fillPrice - (o.spacing ?? snap.atr * gc.rangeAtrMult), fillPrice)
       try {
         const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage, exchange)
         const bid = extractOrderId(res)
@@ -1802,8 +1899,7 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
         await log("error", `Short ${o.symbol} buy placement failed: ${dbErr(err)}`)
       }
     } else if ([4,5].includes(Number(st.state))) {
-      await log("info", `[CancelOp] Line ~1025: Cancelling orders`).catch(() => {});
-  await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
+      await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
     }
   }
   for (const o of active.filter(o => o.side === "buy" && o.mexcOrderId)) {
@@ -1812,10 +1908,10 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
     if (Number(st.state) === 3) {
       const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
       const entryPrice = o.buyPrice ?? exitPrice
+      if (!(await claimPendingOrder(o.id))) continue
       const grossPnl = (entryPrice - exitPrice) * o.quantity
       const fees = (entryPrice + exitPrice) * o.quantity * getFeeRates(cfg.exchange as Exchange, o.symbol).makerFeeRate
       const netPnl = grossPnl - fees
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
       if (cfg.mode === "paper") {
         await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
       }
@@ -1829,8 +1925,7 @@ async function handleShortGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: In
         await log("error", `Short ${o.symbol} re-arm sell failed: ${dbErr(err)}`)
       }
     } else if ([4,5].includes(Number(st.state))) {
-      await log("info", `[CancelOp] Line ~1051: Cancelling orders`).catch(() => {});
-  await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
+      await db.update(gridOrders).set({ status: "cancelled" }).where(eq(gridOrders.id, o.id))
     }
   }
   const pendingSells = (await getActiveOrders(gc.symbol, gc.timeframe)).filter(o => o.side === "sell")
@@ -1868,8 +1963,8 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
       const st: any = await client.fetchOrderStatus(o.mexcOrderId)
       if (st && Number(st.state) === 3) {
         const fillPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
-        await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-        const closePrice = fillPrice - (o.spacing ?? snap.atr * gc.rangeAtrMult)
+        if (!(await claimPendingOrder(o.id))) continue
+        const closePrice = clampClosePrice(fillPrice - (o.spacing ?? snap.atr * gc.rangeAtrMult), fillPrice)
         if (cfg.mode === "live") {
           try {
             const res: any = await placeRoundedMakerOrder(o.symbol, 2, closePrice, o.quantity, o.leverage, client)
@@ -1882,11 +1977,19 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
         await log("trade", `Short ${o.symbol} sell filled @ ${fillPrice.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
       }
     } else if (price >= o.price) {
+      if (!(await claimPendingOrder(o.id))) continue
       if (cfg.mode === "live" && exchange) {
-        try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 3, volume: o.quantity, leverage: o.leverage }) } catch (err) { await log("error", `Short open failed: ${dbErr(err)}`) }
+        try {
+          await exchange.placeMarketOrder({ symbol: o.symbol, side: 3, volume: o.quantity, leverage: o.leverage })
+        } catch (err) {
+          // Opening order never confirmed: undo the claim so a later tick retries
+          // instead of creating a tracking row for a position that does not exist.
+          await db.update(gridOrders).set({ status: "pending" }).where(eq(gridOrders.id, o.id))
+          await log("error", `Short open failed: ${dbErr(err)}`)
+          continue
+        }
       }
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
-      const closePrice = o.price - (o.spacing ?? snap.atr * gc.rangeAtrMult)
+      const closePrice = clampClosePrice(o.price - (o.spacing ?? snap.atr * gc.rangeAtrMult), o.price)
       await db.insert(gridOrders).values({ symbol: o.symbol, timeframe: o.timeframe, leverage: o.leverage, spacing: snap.atr * gc.rangeAtrMult, levelIndex: o.levelIndex, slPrice: o.slPrice, side: "buy", price: closePrice, quantity: o.quantity, buyPrice: o.price, status: "pending", entryRegime: gridEntryRegime(snap, cfg) })
       await log("trade", `Short ${o.symbol} sell @ ${o.price.toFixed(4)} | buy to close @ ${closePrice.toFixed(4)}`)
     }
@@ -1897,10 +2000,10 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
       if (st && Number(st.state) === 3) {
         const exitPrice = Number(st.dealAvgPrice) > 0 ? Number(st.dealAvgPrice) : o.price
         const entryPrice = o.buyPrice ?? exitPrice
+        if (!(await claimPendingOrder(o.id))) continue
         const grossPnl = (entryPrice - exitPrice) * o.quantity
         const fees = (entryPrice + exitPrice) * o.quantity * getFeeRates(cfg.exchange as Exchange, o.symbol).makerFeeRate
         const netPnl = grossPnl - fees
-        await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
         if (cfg.mode === "paper") {
           await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
         }
@@ -1919,15 +2022,21 @@ async function handleShortGridTick(cfg: BotConfig, gc: GridConfig, snap: Indicat
       }
     } else if (price <= o.price) {
       const entryPrice = o.buyPrice ?? o.price
+      if (!(await claimPendingOrder(o.id))) continue
       if (cfg.mode === "live" && exchange) {
-        try { await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage }) } catch (err) { await log("error", `Short close failed: ${dbErr(err)}`) }
+        try {
+          await exchange.placeMarketOrder({ symbol: o.symbol, side: 2, volume: o.quantity, leverage: o.leverage })
+        } catch (err) {
+          await db.update(gridOrders).set({ status: "pending" }).where(eq(gridOrders.id, o.id))
+          await log("error", `Short close failed: ${dbErr(err)}`)
+          continue
+        }
       }
       const grossPnl = (entryPrice - o.price) * o.quantity
       const { makerFeeRate: mixedMaker, takerFeeRate: mixedTaker } = getFeeRates(cfg.exchange as Exchange, o.symbol)
       // Mixed fill: entry leg was a maker sell, close leg is a taker buy.
       const fees = (entryPrice * mixedMaker + o.price * mixedTaker) * o.quantity
       const netPnl = grossPnl - fees
-      await db.update(gridOrders).set({ status: "filled", filledAt: sql`NOW()` }).where(eq(gridOrders.id, o.id))
       if (cfg.mode === "paper") {
         await db.update(botConfig).set({ paperBalance: sql`${botConfig.paperBalance} + ${netPnl}` }).where(eq(botConfig.id, 1))
       }
