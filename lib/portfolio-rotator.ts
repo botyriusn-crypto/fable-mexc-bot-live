@@ -1,6 +1,6 @@
 import { db } from "./db"
 import { gridConfigs, gridOrders, trades, botConfig } from "./db/schema"
-import { eq, and, isNull, sql } from "drizzle-orm"
+import { eq, and, isNull } from "drizzle-orm"
 import { log } from "./logger"
 import { recordGridOutcome } from "./ai-grid-advisor"
 import { VALIDATED_SYMBOLS } from "./validated-symbols"
@@ -16,6 +16,11 @@ const MAX_DEPLOYED_PCT = 90 // Safety cap: never deploy more than 90% of balance
 // cycle, which is invisible in the UI).
 const AI_ADVISOR_URL =
   process.env.AI_ADVISOR_URL ?? "https://fable-mexc-bot.fly.dev/api/bot/ai-advisor"
+
+// Advisor fetch must never stall the tick that calls rotation. 30s is well
+// within the 60s tick budget and gives the advisor (which scans 100 markets
+// and does a depth check) room to finish.
+const AI_ADVISOR_TIMEOUT_MS = 30_000
 
 let lastRotationTime = 0
 let rotationEnabled = true
@@ -37,7 +42,10 @@ export async function checkAndRotate(exchange: any): Promise<void> {
 
   // Master kill-switch: never rotate while grids are stopped. Rotation creates
   // new enabled grids, which would defeat a STOP.
-  const cfgRows = await db.select({ gridEnabled: botConfig.gridEnabled }).from(botConfig).where(eq(botConfig.id, 1))
+  const cfgRows = await db
+    .select({ gridEnabled: botConfig.gridEnabled, mode: botConfig.mode })
+    .from(botConfig)
+    .where(eq(botConfig.id, 1))
   if (!cfgRows[0]?.gridEnabled) return
 
   const now = Date.now()
@@ -57,8 +65,15 @@ export async function checkAndRotate(exchange: any): Promise<void> {
       return
     }
 
-    // 2. Compute age and PnL for each
-    const allTrades = await db.select().from(trades)
+    // 2. Compute age and PnL for each.
+    //
+    // PnL is filtered BY MODE. Rotating on a figure that is the sum of live +
+    // paper trades misclassifies a live winner as dead (or vice versa) — a
+    // grid can be "profitable" on the paper book and deeply down live and get
+    // rotated in, or the reverse. The mode comes from bot_config, same as the
+    // trades rows themselves.
+    const modeIsLive = cfgRows[0]?.mode === "live"
+    const allTrades = await db.select().from(trades).where(eq(trades.live, modeIsLive))
     const tradesBySymbol = allTrades.reduce((acc, t) => {
       if (!acc[t.symbol]) acc[t.symbol] = []
       acc[t.symbol].push(t)
@@ -87,7 +102,16 @@ export async function checkAndRotate(exchange: any): Promise<void> {
 
     // 4. Get AI Advisor recommendations
     await log("info", "🔍 Scanning for fresh AI Advisor picks...")
-    const aiRes = await fetch(AI_ADVISOR_URL)
+    // Bounded fetch: an unresponsive advisor must not stall the tick that
+    // called rotation.
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), AI_ADVISOR_TIMEOUT_MS)
+    let aiRes: Response
+    try {
+      aiRes = await fetch(AI_ADVISOR_URL, { signal: controller.signal })
+    } finally {
+      clearTimeout(timeout)
+    }
     if (!aiRes.ok) {
       await log("error", `AI Advisor scan failed (${aiRes.status}) - skipping rotation`)
       return
@@ -155,9 +179,18 @@ export async function checkAndRotate(exchange: any): Promise<void> {
             isNull(gridOrders.buyPrice),
           ))
 
-        // Create new grid config
-        await db.insert(gridConfigs).values({
-          symbol: candidate.symbol,
+        // ── Reuse the existing row for the candidate if one exists ──
+        //
+        // Previously this always INSERTed a new grid_configs row. Rotating a
+        // symbol out and later back in left two rows for the same symbol.
+        // Those duplicate rows then made the tick loop manage the pair twice,
+        // and made the state API's gridRealizedRows aggregation (join on
+        // symbol) fan out trades by the number of matching config rows,
+        // multiplying SUM(pnl). Rows are now reused: enable + reconfigure the
+        // existing disabled row for the candidate symbol if there is one,
+        // otherwise insert a fresh one.
+        const existingCandidate = allConfigs.find(c => c.symbol === candidate.symbol)
+        const configFields = {
           timeframe: "Min15",
           direction: "neutral",
           levels: candidate.levels || 10,
@@ -172,9 +205,17 @@ export async function checkAndRotate(exchange: any): Promise<void> {
             rotatedFrom: deadGrid.config.symbol,
             rotatedAt: now,
             aiScore: candidate.dnaScore,
-            suggestedSpacing: candidate.suggestedSpacingPct
-          }
-        })
+            suggestedSpacing: candidate.suggestedSpacingPct,
+          },
+        }
+        if (existingCandidate) {
+          await db.update(gridConfigs)
+            .set({ ...configFields, updatedAt: new Date() })
+            .where(eq(gridConfigs.id, existingCandidate.id))
+          await log("trade", `♻️ Re-enabled existing grid config for ${candidate.symbol} (id=${existingCandidate.id})`)
+        } else {
+          await db.insert(gridConfigs).values({ symbol: candidate.symbol, ...configFields })
+        }
 
         await log("trade", `✅ Created new COMBO grid: ${candidate.symbol} (DNA: ${candidate.dnaScore}, x${candidate.leverage})`)
 

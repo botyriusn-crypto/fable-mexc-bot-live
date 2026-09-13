@@ -111,7 +111,6 @@ export async function placeMarketOrder(opts: {
     await setLeverage(opts.symbol, opts.leverage, positionType)
   }
 
-  console.log('[DEBUG] Placing market order:', JSON.stringify({ symbol: opts.symbol, side: opts.side, price: opts.price, vol, leverage: opts.leverage }));
   const result = await privateRequest("POST", "/order/create", {
     symbol: opts.symbol,
     side: opts.side,
@@ -191,8 +190,10 @@ export async function getAccountAssets(): Promise<any> {
     if (result && typeof result === "object" && "data" in result) {
       return result.data
     }
-    console.log('[DEBUG] Post-Only result:', JSON.stringify(result));
-  return result || []
+    // No `data` envelope: treat the payload itself as the asset list.
+    // (This path previously logged a stray "[DEBUG] Post-Only result" line —
+    // copy-paste from the post-only order path, firing on every balance read.)
+    return result || []
   } catch (err) {
     // Fallback for Paper Mode
     return []
@@ -226,13 +227,12 @@ export async function fetchOrderStatus(orderId: string): Promise<any | null> {
   } catch (err) {
     console.log(`fetchOrderStatus(${orderId}) failed:`, String(err))
     return { state: -1, status: "unknown", isError: true }
-}
+  }
 }
 
 export async function fetchOpenOrders(symbol: string): Promise<any[]> {
   try {
     const res: any = await privateRequest("GET", `/order/list/open_orders/${symbol}`)
-    console.log(`[fetchOpenOrders] ${symbol} raw response:`, JSON.stringify(res).slice(0, 500))
     const data = res?.data
     return Array.isArray(data) ? data : []
   } catch (err) {
@@ -261,7 +261,6 @@ export async function placePostOnlyOrder(opts: {
     openType: 1,
   })
 }
-
 
 export async function cancelOrders(orderIds: string[]): Promise<any> {
   const apiKey = process.env.MEXC_API_KEY

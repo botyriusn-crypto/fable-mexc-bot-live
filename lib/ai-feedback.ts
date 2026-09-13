@@ -1,8 +1,14 @@
 import { db } from "./db"
 import { botLogs } from "./db/schema"
-import { eq, lt, sql } from "drizzle-orm"
-// livePrices imported from globalThis - exchange-aware
-const livePrices: Record<string, number> = (globalThis as any).__livePrices ?? {}
+import { eq, sql } from "drizzle-orm"
+// livePrices is owned by the venue WebSocket manager and stored on globalThis
+// so every module that reads it sees the same object. The previous version
+// did `(globalThis as any).__livePrices ?? {}` without assigning the fallback
+// back to the global — so if this module loaded BEFORE the WebSocket manager,
+// it captured its own empty object and never saw a single price, and
+// evaluateAiPicks() then silently evaluated nothing, forever, with no error.
+// Import the exported alias so module load order no longer matters.
+import { livePrices } from "./mexc/ws"
 
 export async function evaluateAiPicks() {
   try {
@@ -15,12 +21,12 @@ export async function evaluateAiPicks() {
     for (const pick of pendingPicks) {
       const details = pick.details as any
       const currentPrice = livePrices[details.symbol]
-      
+
       if (currentPrice) {
         const entryPrice = details.entryPrice
         const pnlPct = ((currentPrice - entryPrice) / entryPrice) * 100
         const result = pnlPct >= 0 ? "WIN" : "LOSS"
-        
+
         // Log the outcome
         await db.insert(botLogs).values({
           level: "info",
@@ -28,7 +34,7 @@ export async function evaluateAiPicks() {
           details: { symbol: details.symbol, entryPrice, currentPrice, pnlPct, result }
         })
       }
-      
+
       // Mark the original pick as evaluated
       await db.update(botLogs).set({
         details: sql`jsonb_set(${botLogs.details}, '{evaluated}', 'true')`

@@ -1,0 +1,17 @@
+# From the repo root
+cd /path/to/fable-mexc-bot-live
+
+# 1. Delete the stray files (they're artifacts, not source)
+git rm -- '=' '1.5' 'snap.emaSlow'   # untrack (will fail on the ones already gitignored — ignore)
+rm -f -- '=' '1.5' 'snap.emaSlow'    # then delete from disk
+
+# 2. Typecheck + build locally before committing
+npm ci --omit=dev=false
+npx tsc --noEmit
+npm run build
+
+# 3. Commit + deploy
+git add -A
+git commit -m "fix(risk+rotation): live-mode equity from venue, mode-filtered rotation, dedup grid_configs rows, remove debug logs"
+git push origin main
+fly deploy

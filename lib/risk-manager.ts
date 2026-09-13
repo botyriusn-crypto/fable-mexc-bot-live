@@ -116,7 +116,7 @@ export async function evaluatePortfolioRisk(cfg: BotConfig, liveUnrealized?: num
     // Compute from live positions + live mark prices (matching dashboard logic)
     const openPositions = await db.select().from(positions).where(eq(positions.status, "open"))
     const symbols = [...new Set(openPositions.map(p => p.symbol))]
-    
+
     // Fetch mark prices for all open position symbols
     const marks = new Map<string, number>()
     for (const symbol of symbols) {
@@ -125,7 +125,7 @@ export async function evaluatePortfolioRisk(cfg: BotConfig, liveUnrealized?: num
         if (ticker?.lastPrice != null) marks.set(symbol, Number(ticker.lastPrice))
       } catch { /* best-effort */ }
     }
-    
+
     // Sum unrealized across all open positions
     unrealized = openPositions.reduce((sum, pos) => {
       const mark = marks.get(pos.symbol)
@@ -134,8 +134,54 @@ export async function evaluatePortfolioRisk(cfg: BotConfig, liveUnrealized?: num
     }, 0)
   }
 
+  // ── Equity baseline ──
+  //
+  // PAPER: cfg.paperBalance tracks settled paper cash only, so paper equity is
+  // `paperBalance + unrealized`. Correct.
+  //
+  // LIVE: `paperBalance` is a SEPARATE paper book. Adding it to live unrealized
+  // produced a number that was neither paper equity nor live equity — and every
+  // limit below (daily loss, drawdown kill switch, margin cap, and
+  // marginBudgetRemaining) was then computed against that fiction. This is
+  // exactly the failure mode where the risk layer reads "healthy" while the
+  // live account is being drained. In live mode, read the venue.
+  let equityBaseline: number
+  let venueEquity: number | null = null
+  if (cfg.mode === "live") {
+    try {
+      const assets = await getExchangeClient(cfg.exchange as Exchange).getAccountAssets()
+      const usdt = assets.find((a) => a.currency === "USDT") ?? null
+      if (usdt) {
+        // AccountAsset.equity already includes unrealized PnL on most venues;
+        // availableBalance is free/free-margin. Prefer equity and don't
+        // double-add unrealized on top of it.
+        const eq = Number(usdt.equity ?? 0)
+        if (Number.isFinite(eq) && eq > 0) {
+          venueEquity = eq
+          equityBaseline = eq
+        } else {
+          equityBaseline = Number(usdt.availableBalance ?? 0) + (unrealized ?? 0)
+        }
+      } else {
+        // No USDT asset in the account payload — treat as unknown and fall
+        // back to a paper figure so the layer FAILS LOUD (see below) instead
+        // of silently reading 0 and never halting.
+        equityBaseline = Number(cfg.paperBalance ?? 0) + (unrealized ?? 0)
+      }
+    } catch (err) {
+      // Live equity fetch failed. Use the paper baseline ONLY so downstream
+      // math has a number, and refuse new risk (the caller sees a non-finite
+      // or stale equity, and the halt reasons below will say so).
+      equityBaseline = Number(cfg.paperBalance ?? 0) + (unrealized ?? 0)
+    }
+  } else {
+    equityBaseline = Number(cfg.paperBalance ?? 0) + (unrealized ?? 0)
+  }
+
   const balance = Number(cfg.paperBalance ?? 0)
-  const equity = balance + unrealized
+  const equity = venueEquity != null ? venueEquity : (balance + (unrealized ?? 0))
+  // When we successfully read venue equity, that number already includes the
+  // unrealized PnL, so do not add it again.
 
   // ── Day-start equity baseline (last snapshot before UTC midnight) ──
   const [prevSnap] = await db
@@ -189,6 +235,13 @@ export async function evaluatePortfolioRisk(cfg: BotConfig, liveUnrealized?: num
   // ── Decide halts ──
   const reasons: string[] = []
   let killSwitch = false
+
+  if (!Number.isFinite(equity) || equity <= 0) {
+    // An unreadable equity makes every limit below meaningless — the honest
+    // read is "I do not know the account size, so I do not take new risk".
+    killSwitch = true
+    reasons.push("KILL SWITCH: equity unreadable (is the venue reachable and is USDT present?)")
+  }
 
   if (drawdownPct >= RISK_LIMITS.maxDrawdownPct()) {
     killSwitch = true
