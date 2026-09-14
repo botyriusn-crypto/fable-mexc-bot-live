@@ -17,6 +17,8 @@ import {
 } from "./db/schema"
 import { and, desc, eq, gte, isNull, sql } from "drizzle-orm"
 import { type Candle, type TakerFlow, fetchDeals, computeTakerFlow } from "./mexc/public"
+import { fetchBybitDeals } from "./bybit/public"
+import { fetchGateDeals } from "./gateio/public"
 import { getExchangeClient, type Exchange } from "./exchange"
 import { classifyLorentzian, combineConfirmation } from "./lorentzian"
 import { computeSnapshot, type FeatureVector, type IndicatorSnapshot } from "./indicators"
@@ -905,9 +907,17 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
             // default path performs zero extra I/O). Fail-open: a deals
             // fetch failure falls back to the legacy OHLC-only score.
             let scalpFlow: TakerFlow | undefined
-            if (Number(process.env.SCALP_FLOW_WEIGHT ?? 0) > 0 && cfg.exchange !== "bybit") {
+            if (Number(process.env.SCALP_FLOW_WEIGHT ?? 0) > 0) {
               try {
-                scalpFlow = computeTakerFlow(await fetchDeals(toExchangeSymbol(symbol)))
+                // Per-venue taker trades; each adapter accepts the canonical
+                // symbol and converts internally. Fail-open to legacy score.
+                const deals =
+                  cfg.exchange === "bybit"
+                    ? await fetchBybitDeals(symbol)
+                    : cfg.exchange === "gate" || cfg.exchange === "gateio"
+                      ? await fetchGateDeals(symbol)
+                      : await fetchDeals(toExchangeSymbol(symbol))
+                scalpFlow = computeTakerFlow(deals)
               } catch (err) {
                 await log("warn", `${symbol}: deals fetch failed, scalp flow confirm skipped: ${err}`)
               }

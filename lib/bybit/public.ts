@@ -1,5 +1,7 @@
 // Bybit Futures public market data client (no API keys required)
 
+import type { Deal } from "../mexc/public"
+
 const BASE_URL = "https://api.bybit.com/v5"
 
 function toBybitSymbol(symbol: string): string {
@@ -15,6 +17,44 @@ export interface Ticker {
 }
 
 const HEADERS = { "Referer": "https://www.bybit.com" }
+
+/**
+ * Map Bybit v5 recent-trade rows to Deal[] (shape shared with MEXC flow).
+ * `side` is the TAKER side ("Buy"/"Sell" per Bybit docs). Rows with an
+ * unrecognized side or non-positive price/size are dropped. Pure.
+ */
+export function mapBybitDeals(list: any[]): Deal[] {
+  if (!Array.isArray(list)) return []
+  const out: Deal[] = []
+  for (const t of list) {
+    const price = Number(t?.price)
+    const volume = Number(t?.size)
+    if (!(price > 0) || !(volume > 0)) continue
+    const side = t?.side === "Buy" ? 1 : t?.side === "Sell" ? 2 : 0
+    if (side === 0) continue
+    out.push({ price, volume, side: side as 1 | 2, time: Number(t?.time) || 0 })
+  }
+  return out
+}
+
+const __dealsCache = new Map<string, { t: number; d: Deal[] }>()
+
+/** Recent taker trades for taker-flow confirmation (5s cache, like MEXC). */
+export async function fetchBybitDeals(symbol: string, limit = 100): Promise<Deal[]> {
+  const now = Date.now()
+  const c = __dealsCache.get(symbol)
+  if (c && now - c.t < 5000) return c.d
+  const url = `${BASE_URL}/market/recent-trade?category=linear&symbol=${toBybitSymbol(symbol)}&limit=${limit}`
+  const res = await fetch(url, { cache: "no-store", headers: HEADERS })
+  if (!res.ok) throw new Error(`Bybit deals fetch failed: ${res.status}`)
+  const json = (await res.json()) as any
+  if (json.retCode !== 0 || !Array.isArray(json.result?.list)) {
+    throw new Error(`Bybit deals error (${json.retCode}): ${json.retMsg ?? "unknown"}`)
+  }
+  const d = mapBybitDeals(json.result.list)
+  __dealsCache.set(symbol, { t: Date.now(), d })
+  return d
+}
 
 export async function fetchKlines(symbol: string, interval: string, limit = 200): Promise<Candle[]> {
   const bybitInterval = convertInterval(interval)

@@ -1,5 +1,7 @@
 // Gate.io Futures public market data client (no API keys required)
 
+import type { Deal } from "../mexc/public"
+
 const BASE_URL = "https://api.gateio.ws/api/v4"
 
 export interface Candle {
@@ -46,6 +48,49 @@ export async function fetchKlines(
     close: Number(close),
     volume: Number(volume),
   }))
+}
+
+/**
+ * Map Gate.io futures trade rows to Deal[] (shape shared with MEXC flow).
+ * Futures `size` is SIGNED (+buy/−sell); imbalance ratios are unaffected by
+ * the contracts multiplier since it cancels out. Internal (insurance/ADL)
+ * fills are excluded — they never touched the book. Pure.
+ */
+export function mapGateDeals(rows: any[]): Deal[] {
+  if (!Array.isArray(rows)) return []
+  const out: Deal[] = []
+  for (const r of rows) {
+    if (r?.is_internal) continue
+    const price = Number(r?.price)
+    const size = Number(r?.size)
+    if (!(price > 0) || !Number.isFinite(size) || size === 0) continue
+    out.push({
+      price,
+      volume: Math.abs(size),
+      side: size > 0 ? 1 : 2,
+      time: Number(r?.create_time_ms ?? (Number(r?.create_time) || 0) * 1000) || 0,
+    })
+  }
+  return out
+}
+
+const __dealsCache = new Map<string, { t: number; d: Deal[] }>()
+
+/** Recent futures trades for taker-flow confirmation (5s cache, like MEXC). */
+export async function fetchGateDeals(symbol: string, limit = 100): Promise<Deal[]> {
+  const now = Date.now()
+  const c = __dealsCache.get(symbol)
+  if (c && now - c.t < 5000) return c.d
+  const res = await fetch(
+    `${BASE_URL}/futures/usdt/trades?contract=${symbol}&limit=${limit}`,
+    { cache: "no-store" },
+  )
+  if (!res.ok) throw new Error(`Gate.io deals fetch failed: ${res.status} ${res.statusText}`)
+  const data = (await res.json()) as any
+  if (!Array.isArray(data)) throw new Error("Gate.io deals response invalid")
+  const d = mapGateDeals(data)
+  __dealsCache.set(symbol, { t: Date.now(), d })
+  return d
 }
 
 export interface BulkTicker {
