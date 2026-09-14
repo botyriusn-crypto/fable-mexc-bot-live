@@ -1,5 +1,10 @@
 import WebSocket from "ws"
-import { log } from "../grid"
+// NOTE: this file used to import `log` from "../grid", creating a cycle
+// (grid -> mexc/ws -> grid). It resolved by luck because `log` is only called
+// from inside event handlers, but any future top-level use would have been
+// `undefined` at init. lib/logger has no imports back into grid, so the cycle
+// is gone.
+import { log } from "../logger"
 
 export const livePrices: Record<string, number> = ((globalThis as any).__livePrices || ((globalThis as any).__livePrices = {}))
 export const livePriceTimestamps: Record<string, number> = ((globalThis as any).__livePriceTimestamps || ((globalThis as any).__livePriceTimestamps = {}))
@@ -15,6 +20,9 @@ export interface KlineUpdate {
   isClosed: boolean
 }
 
+const RECONNECT_DELAY_MS = 3000
+const HEARTBEAT_MS = 15000
+
 export class MexcWebSocketManager {
   private ws: WebSocket | null = null
   private url: string
@@ -22,7 +30,6 @@ export class MexcWebSocketManager {
   private interval: string
   private onKline: (kline: KlineUpdate) => void
   private isReconnecting = false
-  private reconnectDelay = 3000
   private heartbeatInterval: NodeJS.Timeout | null = null
   private lastKlineTime: number | null = null
 
@@ -31,34 +38,34 @@ export class MexcWebSocketManager {
     this.symbol = symbol.toLowerCase()
     this.interval = interval.charAt(0).toUpperCase() + interval.slice(1)
     this.onKline = onKline
-    console.log(`[WS] Manager created for ${this.symbol}`);
   }
 
   public connect() {
-    console.log(`[WS] connect() called for ${this.symbol}`);
     this.ws = new WebSocket(this.url)
 
     this.ws.on("open", () => {
-      this.reconnectDelay = 3000
-      console.log(`[WS] Connected. Subscribing to ${this.symbol.toUpperCase()} ${this.interval} klines...`)
+      // Reset the candle clock on (re)connect. Leaving the previous run's
+      // lastKlineTime in place meant the first frame after a reconnect looked
+      // like a brand-new candle and fired a spurious onKline() tick.
+      this.lastKlineTime = null
+
       const subMsg = {
         method: "sub.kline",
         param: { symbol: this.symbol.toUpperCase(), interval: this.interval }
       }
       this.ws?.send(JSON.stringify(subMsg))
-      console.log(`[WS] Subscription sent: ${JSON.stringify(subMsg)}`);
+      log("info", `[WS] Connected: ${this.symbol.toUpperCase()} ${this.interval} klines`).catch(() => {})
 
       if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
       this.heartbeatInterval = setInterval(() => {
         if (this.ws?.readyState === WebSocket.OPEN) {
           this.ws.send(JSON.stringify({ method: "ping" }))
         }
-      }, 15000)
+      }, HEARTBEAT_MS)
     })
 
     this.ws.on("message", (data: WebSocket.RawData) => {
       const msg = data.toString()
-      console.log(`[WS] Raw msg: ${msg.substring(0, 200)}`);
 
       // Text keep-alive
       if (msg === "ping") { this.ws?.send("pong"); return }
@@ -66,7 +73,6 @@ export class MexcWebSocketManager {
 
       try {
         const parsed = JSON.parse(msg)
-        console.log(`[WS] Parsed: ${JSON.stringify(parsed).substring(0, 200)}`);
 
         // JSON keep-alive
         if (parsed.method === "ping" || parsed.channel === "ping") {
@@ -81,14 +87,9 @@ export class MexcWebSocketManager {
           const k = parsed.data;
           const sym = (k.symbol || this.symbol).toUpperCase();
           const currentTime = k.t;
-          
-          console.log(`[WS] 📊 Kline for ${sym}: t=${currentTime}, o=${k.o}, c=${k.c}, h=${k.h}, l=${k.l}`);
-          
+
           // NEW CANDLE DETECTION: if timestamp changed, the previous candle is closed
           if (this.lastKlineTime !== null && currentTime > this.lastKlineTime) {
-            console.log(`[WS] 🔥 NEW CANDLE for ${sym}! Previous: ${this.lastKlineTime}, Current: ${currentTime}`);
-            
-            // Trigger callback for the closed candle
             const kline: KlineUpdate = {
               symbol: sym,
               open: parseFloat(k.o || 0),
@@ -99,18 +100,17 @@ export class MexcWebSocketManager {
               startTime: this.lastKlineTime,
               isClosed: true
             };
-            console.log(`[WS] ✅ TRIGGERING callback for ${sym} at ${new Date().toISOString()}`);
             this.onKline(kline);
           }
-          
+
           // Update last time
           if (k.t) this.lastKlineTime = k.t;
-          
+
           // Update live price
           const closePrice = parseFloat(k.c || 0);
           if (!isNaN(closePrice)) livePrices[sym] = closePrice;
           livePriceTimestamps[sym] = Date.now();
-          
+
           // REMOVED: Instant tick on every price update was causing rate limits
           // Only trigger on closed candles (handled above)
         }
@@ -120,19 +120,17 @@ export class MexcWebSocketManager {
     })
 
     this.ws.on("error", (err: Error) => {
-      console.error(`[WS] Error event: ${err.message}`)
-      log("error", `[WS] Error: ${err.message}`)
+      log("error", `[WS] Error: ${err.message}`).catch(() => {})
     })
 
     this.ws.on("close", (code: number, reason: Buffer) => {
-      console.log(`[WS] CLOSED: code=${code} reason=${reason?.toString() || "none"}`)
       if (code !== 1005 && code !== 1006) {
-        log("info", `[WS] CLOSED: code=${code} reason=${reason?.toString() || "none"}`)
+        log("info", `[WS] CLOSED: code=${code} reason=${reason?.toString() || "none"}`).catch(() => {})
       }
       if (this.heartbeatInterval) clearInterval(this.heartbeatInterval)
       if (!this.isReconnecting) {
         this.isReconnecting = true
-        setTimeout(() => { this.isReconnecting = false; this.connect() }, 3000)
+        setTimeout(() => { this.isReconnecting = false; this.connect() }, RECONNECT_DELAY_MS)
       }
     })
   }

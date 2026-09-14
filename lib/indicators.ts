@@ -239,19 +239,28 @@ export function computeSnapshot(
   }
 }
 
-// Composite momentum score in [0, 1] — used for hype detection.
-// direction: 1 for long positions, -1 for short.
+// VWAP over the supplied candles.
+//
+// When the window carries no volume at all (MEXC `vol` missing/zero on some
+// contracts, and any venue whose candle mapper does not populate it), the
+// previous version returned 0. That was worse than useless: every
+// `price > vwap` / `price < vwap` confluence check in evaluateTrendEntry then
+// passed unconditionally, silently disabling the VWAP filter. Fall back to the
+// unweighted mean typical price instead, which is a real level.
 export function vwap(candles: Candle[]): number {
   if (candles.length === 0) return 0
   let cumulativeTPV = 0
   let cumulativeVolume = 0
+  let typicalSum = 0
   for (const c of candles) {
     const typicalPrice = (c.high + c.low + c.close) / 3
     const volume = c.volume || 0
     cumulativeTPV += typicalPrice * volume
     cumulativeVolume += volume
+    typicalSum += typicalPrice
   }
-  return cumulativeVolume > 0 ? cumulativeTPV / cumulativeVolume : 0
+  if (cumulativeVolume > 0) return cumulativeTPV / cumulativeVolume
+  return typicalSum / candles.length
 }
 
 export function marketStructure(candles: Candle[], lookback: number = 20): { higherHighs: boolean, higherLows: boolean, lowerHighs: boolean, lowerLows: boolean } {
