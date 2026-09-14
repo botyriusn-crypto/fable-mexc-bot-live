@@ -39,7 +39,7 @@ export function ScalpValidationCard({ state }: { state: BotState }) {
           Scalp validation
         </span>
         <span className="text-[10px] text-muted-foreground">
-          {taken}/{total} taken{v.since ? ` · since ${new Date(v.since).toLocaleDateString()}` : ""}
+          {taken}/{total} taken{v.since ? ` · since ${String(v.since).slice(0, 10)}` : ""}
         </span>
       </div>
 
