@@ -8,31 +8,29 @@ export const marketScales: Record<string, { price: number, amount: number }> = {
 export interface Ticker { symbol: string; lastPrice: number; fairPrice: number; fundingRate: number; riseFallRate: number; volume24: number }
 
 const __klineCache = new Map<string, { t: number; d: any }>()
+
+// NOTE: the two console.logs that used to fire on EVERY kline fetch (the full
+// request URL, then the response shape) are gone. This runs for every grid
+// symbol on every tick on a long-lived Fly machine, so it was a per-second log
+// flood that buried the error paths it was meant to help with. Failures still
+// log loudly — that is where the signal is.
 async function __fetchKlinesRaw(symbol: string, interval: string, limit = 200): Promise<Candle[]>  {
   const end = Math.floor(Date.now() / 1000)
   const seconds = intervalToSeconds(interval)
   const start = end - seconds * limit
   const url = `${BASE_URL}/kline/${symbol}?interval=${interval}&start=${start}&end=${end}`
-  console.log(`[MEXC] Fetching klines: ${url}`)
-  
-  try {
-    const res = await fetch(url, { cache: "no-store" })
-    if (!res) throw new Error("Null response from MEXC kline")
-    if (!res.ok) throw new Error(`MEXC kline fetch failed: ${res.status}`)
-    
-    const json = await res.json()
-    console.log(`[MEXC] Kline response: success=${json.success}, hasData=${!!json.data}, dataLength=${json.data?.time?.length || 0}`)
-    
-    if (!json.success || !json.data) {
-      console.error(`[MEXC] Kline error response:`, JSON.stringify(json).substring(0, 200))
-      throw new Error("MEXC kline response unsuccessful")
-    }
-    const { time, open, high, low, close, vol } = json.data
-    return time.map((_: number, i: number) => ({ time: time[i], open: open[i], high: high[i], low: low[i], close: close[i], volume: vol[i] }))
-  } catch (err) {
-    console.error(`[MEXC] Error fetching klines for ${symbol}:`, err)
-    throw err
+
+  const res = await fetch(url, { cache: "no-store" })
+  if (!res) throw new Error("Null response from MEXC kline")
+  if (!res.ok) throw new Error(`MEXC kline fetch failed: ${res.status}`)
+
+  const json = await res.json()
+  if (!json.success || !json.data) {
+    console.error(`[MEXC] Kline error for ${symbol}:`, JSON.stringify(json).substring(0, 200))
+    throw new Error("MEXC kline response unsuccessful")
   }
+  const { time, open, high, low, close, vol } = json.data
+  return time.map((_: number, i: number) => ({ time: time[i], open: open[i], high: high[i], low: low[i], close: close[i], volume: vol[i] }))
 }
 export async function fetchKlines(symbol: string, interval: string, limit = 200) {
 const key = String(symbol + "|" + interval + "|" + limit)
@@ -66,7 +64,7 @@ async function __fetchTickerRaw(symbol: string): Promise<Ticker>  {
         continue
       }
       if (!res.ok) throw new Error(`MEXC ticker fetch failed: ${res.status}`)
-      
+
       const json = await res.json()
       if (!json.success || !json.data) {
         // MEXC sometimes returns 200 OK but with an error object if rate limited
@@ -76,7 +74,7 @@ async function __fetchTickerRaw(symbol: string): Promise<Ticker>  {
         }
         throw new Error("MEXC ticker response unsuccessful")
       }
-      
+
       const d = json.data
       return { symbol: d.symbol, lastPrice: d.lastPrice, fairPrice: d.fairPrice, fundingRate: d.fundingRate, riseFallRate: d.riseFallRate, volume24: d.volume24 }
     } catch (err) {
@@ -143,12 +141,12 @@ export async function fetchMarkets() {
   if (!res.ok) throw new Error(`MEXC markets fetch failed: ${res.status}`)
   const json = await res.json()
   if (!json.success) throw new Error("MEXC markets response unsuccessful")
-  
+
   const markets = json.data.filter((m: any) => m.state == null || m.state === 0).map((m: any) => {
     // Populate global cache for precision scaling
-    marketScales[m.symbol] = { 
-      price: m.priceScale ?? 4, 
-      amount: m.amountScale ?? 0 
+    marketScales[m.symbol] = {
+      price: m.priceScale ?? 4,
+      amount: m.amountScale ?? 0
     }
     return {
       symbol: m.symbol, displayName: m.displayName ?? m.symbol.replace("_", "/"),
@@ -159,9 +157,20 @@ export async function fetchMarkets() {
   return markets
 }
 
+// Seconds per candle for a MEXC interval string.
+//
+// The fallback used to be a silent 300, so an unmapped timeframe computed its
+// candle window from the wrong interval — a 4h request would be sized as if it
+// were 5m, fetching a sliver of the history the caller asked for. It now says
+// so. (The mapping itself covers every interval the exchange client emits.)
 export function intervalToSeconds(interval: string): number {
   const m: Record<string, number> = { Min1: 60, Min5: 300, Min15: 900, Min30: 1800, Min60: 3600, Hour4: 14400, Hour8: 28800, Day1: 86400 }
-  return m[interval] ?? 300
+  const s = m[interval]
+  if (s == null) {
+    console.warn(`[MEXC] Unknown interval "${interval}" — falling back to a 300s candle window`)
+    return 300
+  }
+  return s
 }
 
 // Added for grid.ts and indicators.ts
