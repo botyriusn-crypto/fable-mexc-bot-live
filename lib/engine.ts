@@ -16,7 +16,7 @@ import {
   type Position,
 } from "./db/schema"
 import { and, desc, eq, gte, isNull, sql } from "drizzle-orm"
-import { type Candle, fetchDeals, computeTakerFlow } from "./mexc/public"
+import { type Candle, type TakerFlow, fetchDeals, computeTakerFlow } from "./mexc/public"
 import { getExchangeClient, type Exchange } from "./exchange"
 import { classifyLorentzian, combineConfirmation } from "./lorentzian"
 import { computeSnapshot, type FeatureVector, type IndicatorSnapshot } from "./indicators"
@@ -36,7 +36,7 @@ import {
   marginBudgetRemaining,
   getRiskState,
 } from "./risk-manager"
-import { evaluateScalpSignal } from "./trend-scalper"
+import { evaluateScalpSignal, scalpMarketEligible } from "./trend-scalper"
 import { buildAwareness, decide, setLastAwareness } from "./awareness"
 
 // Net grid inventory for a symbol/timeframe. Open inventory = pending orders
@@ -785,6 +785,10 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     const marketKeys = new Set<string>([`${cfg.symbol}|${cfg.timeframe}`])
     for (const pos of openPositions) marketKeys.add(`${pos.symbol}|${pos.timeframe}`)
     for (const order of activeGrid) marketKeys.add(`${order.symbol}|${order.timeframe}`)
+    // Concurrent scalp positions across markets (tick-start snapshot; the
+    // loop below increments it as this tick opens more). Bounds the
+    // multi-market scalp expansion (SCALP_MULTI_MARKET / SCALP_MAX_OPEN).
+    let openScalpCount = openPositions.filter((p: any) => p.strategy === "scalp").length
 
     // ── Portfolio risk assessment (before any new capital is deployed) ──
     // Uses realized PnL + last-known unrealized; refreshed at tick end. When
@@ -888,13 +892,27 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         }
 
         if (isSelected) await resolveClassifierOutcomes(symbol, timeframe, candles)
-        if (isSelected && !marketPosition) {
-          // ── Trend-scalper path (priority) ──
-          // Higher-quality pullback-in-trend entries with risk-based sizing and
-          // ATR R-multiple targets. Still gated by ML + Lorentzian + risk layer.
+        // ── Trend-scalper path (priority) ──
+        // Higher-quality pullback-in-trend entries with risk-based sizing and
+        // ATR R-multiple targets. Still gated by ML + Lorentzian + risk layer.
+        // Default: selected market only, one position at a time (as before).
+        // SCALP_MULTI_MARKET=1 extends evaluation to every position-free
+        // ticked market, bounded by SCALP_MAX_OPEN concurrent scalps.
+        if (scalpMarketEligible({ isSelected, hasOpenPosition: marketPosition != null, openScalpCount })) {
           let scalpHandled = false
           if (process.env.SCALPER_ENABLED !== "0") {
-            const scalp = evaluateScalpSignal(snap, candles, marketCfg, cfg.paperBalance ?? 10000)
+            // Taker-flow confirmation (SCALP_FLOW_WEIGHT>0 only, so the
+            // default path performs zero extra I/O). Fail-open: a deals
+            // fetch failure falls back to the legacy OHLC-only score.
+            let scalpFlow: TakerFlow | undefined
+            if (Number(process.env.SCALP_FLOW_WEIGHT ?? 0) > 0 && cfg.exchange !== "bybit") {
+              try {
+                scalpFlow = computeTakerFlow(await fetchDeals(toExchangeSymbol(symbol)))
+              } catch (err) {
+                await log("warn", `${symbol}: deals fetch failed, scalp flow confirm skipped: ${err}`)
+              }
+            }
+            const scalp = evaluateScalpSignal(snap, candles, marketCfg, cfg.paperBalance ?? 10000, scalpFlow)
             if (scalp.triggered && scalp.direction) {
               const scalpFeatures: FeatureVector = {
                 ...snap.features,
@@ -971,6 +989,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
                   stopLoss: scalp.stopLoss ?? undefined,
                   takeProfit: scalp.takeProfit ?? undefined,
                 })
+                openScalpCount++
                 scalpHandled = true
               } else if (decision.action === "trail-inventory") {
                 // Single ATR trailing stop on the aligned inventory. A trail only

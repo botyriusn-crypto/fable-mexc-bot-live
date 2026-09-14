@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest"
 import type { Candle } from "./mexc/public"
 import { computeSnapshot } from "./indicators"
 import { notionalToMarginUsdt } from "./strategy"
-import { evaluateScalpSignal, macdTurnedUp, SCALP } from "./trend-scalper"
+import { evaluateScalpSignal, macdTurnedUp, gradeFlowAgreement, scalpMarketEligible, SCALP } from "./trend-scalper"
 
 // Minimal config matching the fields the scalper + computeSnapshot read.
 const cfg: any = {
@@ -134,5 +134,82 @@ describe("evaluateScalpSignal", () => {
     // multiplied by leverage again — exactly leverage× the realized risk.
     const prefixRisk = sig.suggestedSizeUsdt! * cfg.leverage * stopFrac
     expect(prefixRisk / actualRisk).toBeCloseTo(cfg.leverage, 0)
+  })
+})
+
+describe("taker-flow confirmation", () => {
+  const agreeLong = { takerBuyVolume: 90, takerSellVolume: 10, cvd: 80 }
+  const opposeLong = { takerBuyVolume: 10, takerSellVolume: 90, cvd: -80 }
+  const empty = { takerBuyVolume: 0, takerSellVolume: 0, cvd: 0 }
+
+  it("grades directional agreement on [0,1] with 0.5 neutral", () => {
+    expect(gradeFlowAgreement("long", agreeLong)).toBeCloseTo(0.9, 6)
+    expect(gradeFlowAgreement("long", opposeLong)).toBeCloseTo(0.1, 6)
+    expect(gradeFlowAgreement("short", agreeLong)).toBeCloseTo(0.1, 6)
+    expect(gradeFlowAgreement("short", opposeLong)).toBeCloseTo(0.9, 6)
+    expect(gradeFlowAgreement("long", empty)).toBe(0.5)
+  })
+
+  it("weight 0 (default): passing flow changes nothing", () => {
+    delete process.env.SCALP_FLOW_WEIGHT
+    const candles = uptrendPullbackResume()
+    const snap = computeSnapshot(candles, cfg)
+    const plain = evaluateScalpSignal(snap, candles, cfg, 400)
+    const withFlow = evaluateScalpSignal(snap, candles, cfg, 400, agreeLong)
+    expect(withFlow.confidence).toBe(plain.confidence)
+    expect(withFlow.triggered).toBe(plain.triggered)
+  })
+
+  it("weight > 0: agreeing flow raises, opposing flow lowers confidence", () => {
+    process.env.SCALP_FLOW_WEIGHT = "0.3"
+    try {
+      const candles = uptrendPullbackResume()
+      const snap = computeSnapshot(candles, cfg)
+      const base = evaluateScalpSignal(snap, candles, cfg, 400)
+      const agreed = evaluateScalpSignal(snap, candles, cfg, 400, agreeLong)
+      const opposed = evaluateScalpSignal(snap, candles, cfg, 400, opposeLong)
+      expect(base.triggered).toBe(true)
+      expect(agreed.confidence).toBeGreaterThan(base.confidence)
+      expect(opposed.confidence).toBeLessThan(base.confidence)
+      // Missing flow with weight on falls back to the legacy score.
+      const noFlow = evaluateScalpSignal(snap, candles, cfg, 400, undefined)
+      expect(noFlow.confidence).toBe(base.confidence)
+    } finally {
+      delete process.env.SCALP_FLOW_WEIGHT
+    }
+  })
+})
+
+describe("scalpMarketEligible", () => {
+  it("default (multi off): selected market only, never into an open position", () => {
+    delete process.env.SCALP_MULTI_MARKET
+    expect(scalpMarketEligible({ isSelected: true, hasOpenPosition: false, openScalpCount: 0 })).toBe(true)
+    expect(scalpMarketEligible({ isSelected: false, hasOpenPosition: false, openScalpCount: 0 })).toBe(false)
+    expect(scalpMarketEligible({ isSelected: true, hasOpenPosition: true, openScalpCount: 0 })).toBe(false)
+    expect(scalpMarketEligible({ isSelected: false, hasOpenPosition: true, openScalpCount: 0 })).toBe(false)
+  })
+
+  it("multi on: any position-free market while under the cap", () => {
+    const opts = { multiMarket: true, maxOpen: 2 }
+    expect(scalpMarketEligible({ isSelected: true, hasOpenPosition: false, openScalpCount: 0 }, opts)).toBe(true)
+    expect(scalpMarketEligible({ isSelected: false, hasOpenPosition: false, openScalpCount: 0 }, opts)).toBe(true)
+    expect(scalpMarketEligible({ isSelected: false, hasOpenPosition: false, openScalpCount: 1 }, opts)).toBe(true)
+    // Cap binds every market, selected included.
+    expect(scalpMarketEligible({ isSelected: true, hasOpenPosition: false, openScalpCount: 2 }, opts)).toBe(false)
+    expect(scalpMarketEligible({ isSelected: false, hasOpenPosition: false, openScalpCount: 2 }, opts)).toBe(false)
+    // Per-market one-position rule always holds.
+    expect(scalpMarketEligible({ isSelected: false, hasOpenPosition: true, openScalpCount: 0 }, opts)).toBe(false)
+  })
+
+  it("reads multi/cap from env when opts omitted", () => {
+    process.env.SCALP_MULTI_MARKET = "1"
+    process.env.SCALP_MAX_OPEN = "1"
+    try {
+      expect(scalpMarketEligible({ isSelected: false, hasOpenPosition: false, openScalpCount: 0 })).toBe(true)
+      expect(scalpMarketEligible({ isSelected: false, hasOpenPosition: false, openScalpCount: 1 })).toBe(false)
+    } finally {
+      delete process.env.SCALP_MULTI_MARKET
+      delete process.env.SCALP_MAX_OPEN
+    }
   })
 })

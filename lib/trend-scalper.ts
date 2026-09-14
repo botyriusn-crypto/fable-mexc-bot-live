@@ -12,7 +12,7 @@
 // It NEVER places orders itself — the engine remains the only execution path,
 // so the portfolio risk layer and ML/Lorentzian gates still apply.
 
-import type { Candle } from "./mexc/public"
+import type { Candle, TakerFlow } from "./mexc/public"
 import type { IndicatorSnapshot } from "./indicators"
 import type { BotConfig } from "./db/schema"
 import { ema, rsi, macdHistogram, vwap, marketStructure } from "./indicators"
@@ -58,6 +58,60 @@ export const SCALP = {
   scoreThreshold: () => envNum("SCALP_SCORE_THRESHOLD", 0.5),
   riskPct: () => envNum("SCALP_RISK_PCT", 0.01), // risk 1% of equity per scalp
   rMultiple: () => envNum("SCALP_R_MULTIPLE", 1.8), // target reward:risk
+  // Taker-flow confirmation weight (0 = off, behavior identical to before).
+  // When > 0, the OHLC confluence is blended with directional agreement of
+  // recent taker flow (MEXC deals: the only public flow signal). Scored, not
+  // a hard filter, so the entry funnel is re-weighted, never narrowed.
+  flowWeight: () => envNum("SCALP_FLOW_WEIGHT", 0),
+  // Multi-market evaluation (0 = off, selected-market-only as before).
+  // When 1, the scalp path runs on every ticked market without a position,
+  // bounded by maxOpen concurrent scalp positions. Per-trade risk is
+  // unchanged (1% equity); downstream ML + Lorentzian + risk gates still apply.
+  multiMarket: () => (process.env.SCALP_MULTI_MARKET === "1" ? 1 : 0),
+  maxOpen: () => Math.max(1, Math.round(envNum("SCALP_MAX_OPEN", 3))),
+}
+
+export interface ScalpMarketState {
+  /** This market is the selected MAINBAR market. */
+  isSelected: boolean
+  /** Any open position already exists on this market. */
+  hasOpenPosition: boolean
+  /** Concurrently open scalp-strategy positions across all markets. */
+  openScalpCount: number
+}
+
+/**
+ * Whether the scalp path may run for a market this tick. Pure.
+ * Default (multi-market off): selected market only, as before. Opt-in:
+ * any position-free market while under the concurrent-scalp cap. The
+ * per-market one-position rule always holds.
+ */
+export function scalpMarketEligible(
+  state: ScalpMarketState,
+  opts?: { multiMarket?: boolean; maxOpen?: number },
+): boolean {
+  if (state.hasOpenPosition) return false
+  const multi = opts?.multiMarket ?? SCALP.multiMarket() === 1
+  if (!multi) return state.isSelected
+  const cap = opts?.maxOpen ?? SCALP.maxOpen()
+  return state.openScalpCount < cap
+}
+
+/**
+ * Grade directional agreement between the setup direction and recent taker
+ * flow in [0,1]. 0.5 = balanced/empty flow (no opinion), 1 = flow fully
+ * agrees (buyers lifting offers into a long resumption bar, or sellers
+ * hitting bids into a short one), 0 = flow fully opposes. Pure.
+ */
+export function gradeFlowAgreement(
+  direction: "long" | "short",
+  flow: TakerFlow,
+): number {
+  const total = flow.takerBuyVolume + flow.takerSellVolume
+  if (!(total > 0)) return 0.5
+  const imbalance = (flow.takerBuyVolume - flow.takerSellVolume) / total
+  const signed = direction === "long" ? imbalance : -imbalance
+  return Math.max(0, Math.min(1, 0.5 + signed / 2))
 }
 
 /**
@@ -99,6 +153,7 @@ export function evaluateScalpSignal(
   candles: Candle[],
   cfg: BotConfig,
   equity: number,
+  takerFlow?: TakerFlow,
 ): ScalpSignal {
   const baseFilters = { adxOk: false, volatilityOk: false, trendAligned: false, pulledBack: false, resuming: false }
   const price = snap.price
@@ -201,13 +256,26 @@ export function evaluateScalpSignal(
   // Trend strength credit within the ADX band.
   const adxComponent = clamp01((snap.adx - SCALP.adxMin()) / Math.max(1, SCALP.adxMax() - SCALP.adxMin()))
 
-  const confidence =
+  const ohlcConfidence =
     resumeStrength * 0.22 +
     volComponent * 0.18 +
     rsiRoom * 0.2 +
     macdSlope * 0.15 +
     structScore * 0.15 +
     adxComponent * 0.1
+
+  // Taker-flow confirmation: blend directional flow agreement into the score
+  // instead of gating on it, so weak-flow setups score lower (and size down
+  // via confidence scaling) rather than disappearing from the funnel.
+  // Weight 0 (default) or missing flow => byte-identical legacy score.
+  const flowW = Math.max(0, Math.min(1, SCALP.flowWeight()))
+  let confidence = ohlcConfidence
+  let flowNote = ""
+  if (flowW > 0 && takerFlow && direction) {
+    const flowAgree = gradeFlowAgreement(direction, takerFlow)
+    confidence = ohlcConfidence * (1 - flowW) + flowAgree * flowW
+    flowNote = ` flow ${(flowAgree * 100).toFixed(0)}%`
+  }
 
   if (confidence < SCALP.scoreThreshold()) {
     return nullSignal(
@@ -235,7 +303,7 @@ export function evaluateScalpSignal(
     direction,
     triggered: true,
     confidence,
-    reason: `${direction.toUpperCase()} scalp: trend+pullback+resume, confluence ${(confidence * 100).toFixed(0)}% (resume ${(resumeStrength * 100).toFixed(0)}%, RSI room ${(rsiRoom * 100).toFixed(0)}%)`,
+    reason: `${direction.toUpperCase()} scalp: trend+pullback+resume, confluence ${(confidence * 100).toFixed(0)}% (resume ${(resumeStrength * 100).toFixed(0)}%, RSI room ${(rsiRoom * 100).toFixed(0)}%${flowNote})`,
     stopLoss,
     takeProfit,
     atr: atrVal,
