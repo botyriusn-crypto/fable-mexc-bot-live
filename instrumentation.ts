@@ -6,8 +6,12 @@ export async function register() {
     const { eq } = await import("drizzle-orm")
 
     const isRunning = async () => {
-      const rows = await db.select().from(botConfig).where(eq(botConfig.id, 1))
-      return rows[0]?.status === "running"
+      try {
+        const rows = await db.select().from(botConfig).where(eq(botConfig.id, 1))
+        return rows[0]?.status === "running"
+      } catch {
+        return false
+      }
     }
 
     try {

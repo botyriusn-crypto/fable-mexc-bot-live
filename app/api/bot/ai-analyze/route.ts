@@ -15,6 +15,11 @@ export async function POST() {
     const result = await analyzeTradesForMarket(config.symbol, config.timeframe)
     return NextResponse.json(result)
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Analysis failed" }, { status: 500 })
+    const message = err instanceof Error ? err.message : "Analysis failed"
+    // Insufficient trade history is a normal, expected state — not a server error.
+    if (message.startsWith("Need at least")) {
+      return NextResponse.json({ error: message, insufficientData: true }, { status: 200 })
+    }
+    return NextResponse.json({ error: message }, { status: 500 })
   }
 }

@@ -101,7 +101,7 @@ function money(v: unknown): string {
 function fmtTime(iso: string | null): string {
   if (!iso) return "—"
   const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString()
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString("en-US", { timeZone: "America/New_York" })
 }
 
 // A field the guardrails would actually write to bot_config, as opposed to one
