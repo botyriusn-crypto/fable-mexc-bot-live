@@ -125,6 +125,31 @@ export function decide(state: AwarenessState): Decision {
   }
 }
 
+export type BlockingGate = "taken" | "ml" | "regime" | "risk" | "unclassified"
+
+/**
+ * Operative blocker for a scalp classifier_decisions row, derived from the
+ * same inputs decide() reads — never by scraping the free-text reason
+ * (substring counting once inflated a phantom "kernel" bar from a
+ * descriptive Lorentzian log note). Priority mirrors decide(): a taken
+ * trade is taken even when other gates would also bite; risk outranks ML;
+ * ML outranks regime. "unclassified" is unreachable given decide()'s
+ * branches (a triggered+ML-allowed scalp in neutral always trades) and
+ * exists so a future branch shows up as data instead of a lie.
+ */
+export function resolveBlockingGate(args: {
+  taken: boolean
+  riskBlocked: boolean
+  mlAllowed: boolean
+  regime: Regime
+}): BlockingGate {
+  if (args.taken) return "taken"
+  if (args.riskBlocked) return "risk"
+  if (!args.mlAllowed) return "ml"
+  if (args.regime !== "neutral") return "regime"
+  return "unclassified"
+}
+
 // Assemble the shared state from all writers. This is the "organism" builder:
 // it pulls each layer's slice into one object so decide() can see the whole.
 // The scalper and ML gate are computed by their owners (engine.ts) and passed

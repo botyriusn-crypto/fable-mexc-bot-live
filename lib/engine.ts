@@ -39,7 +39,7 @@ import {
   getRiskState,
 } from "./risk-manager"
 import { evaluateScalpSignal, scalpMarketEligible } from "./trend-scalper"
-import { buildAwareness, decide, setLastAwareness } from "./awareness"
+import { buildAwareness, decide, setLastAwareness, resolveBlockingGate } from "./awareness"
 
 // Net grid inventory for a symbol/timeframe. Open inventory = pending orders
 // that carry a paired entry (buyPrice): a pending sell with buyPrice is an open
@@ -965,13 +965,24 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
               const decision = decide(awareness)
               setLastAwareness(awareness, decision)
 
+              // Structured operative blocker for the UI rejection histogram —
+              // derived from decide()'s inputs, never scraped from reason.
+              // Same risk math decide() sees (killSwitch / marginRemaining).
+              const scalpRegime = detectRegime(snap, marketCfg)
+              const scalpGate = resolveBlockingGate({
+                taken: decision.action === "scalp-trend",
+                riskBlocked: (rs?.killSwitch ?? false) || (rs?.marginBudgetRemaining ?? 0) <= 0,
+                mlAllowed,
+                regime: scalpRegime,
+              })
               await db.insert(classifierDecisions).values({
                 symbol,
                 timeframe,
                 candleTime: candles[candles.length - 1].time,
                 candidateDirection: scalp.direction,
                 strategy: "scalp",
-                regime: detectRegime(snap, marketCfg),
+                blockingGate: scalpGate,
+                regime: scalpRegime,
                 entryPrice: snap.price,
                 confirmationMode: marketCfg.confirmationMode,
                 logisticAllowed: mlAllowed,

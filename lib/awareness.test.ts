@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { decide, type AwarenessState } from "./awareness"
+import { decide, resolveBlockingGate, type AwarenessState } from "./awareness"
 import type { ScalpSignal } from "./trend-scalper"
 
 const scalpOn = (over: Partial<ScalpSignal> = {}): ScalpSignal =>
@@ -92,5 +92,20 @@ describe("decide", () => {
     expect(d).toEqual({ action: "stand-aside", reason: "ml gate rejected scalp setup" })
     const e = decide(base({ regime: "neutral", mlAllowed: false, scalp: scalpOn() }))
     expect(e).toEqual({ action: "stand-aside", reason: "ml gate rejected scalp setup" })
+  })
+})
+
+describe("resolveBlockingGate", () => {
+  it("names taken over every other gate", () => {
+    expect(resolveBlockingGate({ taken: true, riskBlocked: true, mlAllowed: false, regime: "trend" })).toBe("taken")
+  })
+  it("prioritizes risk over ML over regime, mirroring decide()", () => {
+    expect(resolveBlockingGate({ taken: false, riskBlocked: true, mlAllowed: false, regime: "trend" })).toBe("risk")
+    expect(resolveBlockingGate({ taken: false, riskBlocked: false, mlAllowed: false, regime: "neutral" })).toBe("ml")
+    expect(resolveBlockingGate({ taken: false, riskBlocked: false, mlAllowed: true, regime: "trend" })).toBe("regime")
+    expect(resolveBlockingGate({ taken: false, riskBlocked: false, mlAllowed: true, regime: "range" })).toBe("regime")
+  })
+  it("marks the unreachable all-clear as unclassified instead of lying", () => {
+    expect(resolveBlockingGate({ taken: false, riskBlocked: false, mlAllowed: true, regime: "neutral" })).toBe("unclassified")
   })
 })

@@ -12,6 +12,7 @@ import { TradesTable } from "./trades-table"
 import { ActivityLog } from "./activity-log"
 import { SettingsPanel } from "./settings-panel"
 import { AwarenessPanel } from "./awareness-panel"
+import { ScalpValidationCard } from "./scalp-validation-card"
 import { MultiGridCard } from "./multi-grid-card"
 import { OpenPositionsCard } from "./open-positions-card"
 import { PerformanceAnalyzer } from "./performance-analyzer"
@@ -261,6 +262,10 @@ export function DashboardV2() {
 
             <CollapsibleSection title="Awareness" defaultOpen={true}>
               <AwarenessPanel state={state} />
+            </CollapsibleSection>
+
+            <CollapsibleSection title="Scalp validation" defaultOpen={false}>
+              <ScalpValidationCard state={state} />
             </CollapsibleSection>
 
             <CollapsibleSection title="Strategy Settings" defaultOpen={false}>

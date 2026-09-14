@@ -4,7 +4,7 @@ import {
   botConfig, gridConfigs, positions, trades, equitySnapshots,
   botLogs, mlModel, gridOrders, classifierDecisions,
 } from "@/lib/db/schema"
-import { eq, desc, inArray, sql, and } from "drizzle-orm"
+import { eq, desc, inArray, sql, and, isNotNull } from "drizzle-orm"
 import { getExchangeClient, type Exchange } from "@/lib/exchange"
 import { ema, computeSnapshot } from "@/lib/indicators"
 import { detectRegime, type Regime } from "@/lib/strategy"
@@ -292,6 +292,43 @@ export async function GET() {
       latest: marketDecisions[0] ?? null,
     }
 
+    // Scalp validation on structured gates only (blocking_gate, never the
+    // free-text reason — substring counting once inflated a phantom "kernel"
+    // bar). Rows with blocking_gate NULL predate the column (flow-on /
+    // multi-market old regime) and are excluded: the gate histogram and the
+    // regime confirmation only ever describe the validated config. Regime
+    // net sums 4-bar outcome returns (percent), not trade PnL.
+    const [scalpGateRows, scalpRegimeRows, scalpSinceRows] = await Promise.all([
+      db.select({
+        gate: classifierDecisions.blockingGate,
+        n: sql<number>`count(*)`,
+      })
+        .from(classifierDecisions)
+        .where(and(eq(classifierDecisions.strategy, "scalp"), isNotNull(classifierDecisions.blockingGate)))
+        .groupBy(classifierDecisions.blockingGate),
+      db.select({
+        regime: classifierDecisions.regime,
+        n: sql<number>`count(*)`,
+        net: sql<number>`coalesce(sum(${classifierDecisions.outcomeReturn}), 0)`,
+      })
+        .from(classifierDecisions)
+        .where(and(
+          eq(classifierDecisions.strategy, "scalp"),
+          isNotNull(classifierDecisions.resolvedAt),
+          // Same seam as the gate histogram: only the validated config.
+          isNotNull(classifierDecisions.blockingGate),
+        ))
+        .groupBy(classifierDecisions.regime),
+      db.select({ since: sql<string | null>`min(${classifierDecisions.createdAt})` })
+        .from(classifierDecisions)
+        .where(and(eq(classifierDecisions.strategy, "scalp"), isNotNull(classifierDecisions.blockingGate))),
+    ])
+    const scalpValidation = {
+      byGate: scalpGateRows.map((r) => ({ gate: r.gate, n: Number(r.n) })),
+      byRegime: scalpRegimeRows.map((r) => ({ regime: r.regime, n: Number(r.n), net: Number(r.net) })),
+      since: scalpSinceRows[0]?.since ?? null,
+    }
+
     // Portfolio risk snapshot: prefer the cached state from the last tick;
     // if the bot hasn't ticked yet, compute a fresh one so the UI isn't blank.
     let risk = getRiskState()
@@ -311,7 +348,7 @@ export async function GET() {
       markPrice, unrealizedPnl: totalGridUnrealized + positionsUnrealized,
       equity: cfg.paperBalance + totalGridUnrealized + positionsUnrealized,
       trades: recentTrades, winRate, liveStats, modeStats, todayStats, swingStats, swingPositions: swingPositions, equityCurve: equity.filter((e: any) => e.live === (cfg.mode === "live")).reverse(), logs,
-      model: modelRows[0] ?? null, classifierAnalytics, ticker, chart, liveAccount, regime, adxValue,
+      model: modelRows[0] ?? null, classifierAnalytics, scalpValidation, ticker, chart, liveAccount, regime, adxValue,
       scalpRiskPct: Number(process.env.SCALP_RISK_PCT ?? 0.01),
       grid: { orders: selectedGridOrders, allOrders: activeGridOrders, holdingCount: gridHolding.length, unrealizedPnl: gridUnrealized, realizedPnl: gridRealized },
       gridConfigs: gridConfigsState,

@@ -119,6 +119,11 @@ export interface BotState {
     openPositionCount: number
     updatedAt: number
   } | null
+  scalpValidation?: {
+    byGate: { gate: string | null; n: number }[]
+    byRegime: { regime: string | null; n: number; net: number }[]
+    since: string | null
+  } | null
   awareness?: {
     state: {
       symbol: string

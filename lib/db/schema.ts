@@ -247,6 +247,13 @@ export const classifierDecisions = pgTable("classifier_decisions", {
   lorentzianFilters: jsonb("lorentzian_filters"),
   finalAllowed: boolean("final_allowed").notNull(),
   reason: text("reason").notNull(),
+  // Structured operative blocker, written at decision time so the UI never
+  // has to scrape the free-text reason (substring counting once inflated a
+  // phantom "kernel" bar from a descriptive log note). Values for scalp
+  // rows: taken | ml | regime | risk. NULL for pre-column rows (which also
+  // marks the flow-on/multi-market data seam: exclude NULLs from new
+  // aggregates) and for non-scalp strategies with different gate semantics.
+  blockingGate: text("blocking_gate"),
   outcomeDirection: text("outcome_direction"),
   outcomeReturn: doublePrecision("outcome_return"),
   returnUnit: text("return_unit"),
