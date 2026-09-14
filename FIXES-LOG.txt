@@ -1,0 +1,548 @@
+================================================================================
+FABLE-MEXC-BOT-LIVE — FIX LOG
+Audit + remediation summary, chronological by commit
+================================================================================
+
+Every item below is a fix that was DELIVERED as a full-file listing during the
+review. Use the "Verify" grep after each file to confirm it actually landed —
+several earlier commits were message-only and the code never reached disk.
+
+
+================================================================================
+COMMIT ff3e19b — fix: prevent duplicate grid fills via atomic order claims
+================================================================================
+
+FILE: lib/grid.ts
+--------------------------------------------------------------------------------
+- Added claimPendingOrder(): atomic pending -> filled UPDATE with .returning(),
+  so only ONE caller wins a fill race.
+- checkGridStopLoss: BOTH long and short branches now claim BEFORE placing the
+  market close. Previously the short branch had no claim at all, and the long
+  branch placed the exchange order first — so overlapping ticks / the 20s risk
+  check could both fire a close (a second close-long OPENS A FRESH SHORT).
+- Removed the empty catch{} that swallowed a failed exchange close and went on
+  to book a phantom closure. On failure the claim is REVERTED so a later tick
+  retries.
+- Added clampClosePrice(): guards computed TP / buy-to-close targets against
+  <= 0 (a cheap coin with wide spacing produced a non-positive target).
+- Naked-sell (COMBO short open) fill now claims the row atomically before
+  inserting the paired buy-to-close tracking row.
+- COMBO short close replaced the read-then-write "fresh status" check (a
+  non-atomic check-then-act) with claimPendingOrder.
+- isCombo now uses effectiveDirection(gc) instead of the raw gc.direction, so
+  direction: "auto" grids take the COMBO branches (they were being treated as
+  one-sided — the short-close was skipped and re-processed as a fresh LONG).
+- checkAllHeldPositionsRisk: entry fee basis is now per-symbol (maker vs taker)
+  read from isMakerSymbol(gc), instead of booking maker fees on taker entries.
+- Removed the [CancelOp] Line ~NNN debug log spam and the misleading sellPrice
+  log in the COMBO branch.
+
+VERIFY: grep -n "claimPendingOrder" lib/grid.ts   -> multiple hits
+
+
+================================================================================
+COMMIT 39f1699 — fix: fail-closed tick auth, correct unrealized PnL,
+                  export venue fees
+================================================================================
+
+FILE: app/api/bot/tick/route.ts
+--------------------------------------------------------------------------------
+BUG: This endpoint EXECUTES LIVE TRADES, but isAuthorized() returned TRUE
+     whenever CRON_SECRET was unset — a missing env var left a live-order-
+     placing endpoint publicly triggerable.
+FIX: Fail CLOSED. CRON_SECRET required (Bearer header, x-cron-secret header, or
+     ?secret= param). Local dev requires explicit ALLOW_UNSECURED_TICK=1.
+     Added a POST handler too (some schedulers prefer POST).
+
+VERIFY: grep -n "ALLOW_UNSECURED_TICK" app/api/bot/tick/route.ts
+
+
+FILE: app/api/bot/rescue-equity/route.ts
+--------------------------------------------------------------------------------
+BUG 1: Selected status='filled' rows — those are ALREADY-settled trades, so
+       already inside trades.pnl => double counting.
+BUG 2: Used o.price (the order's TARGET price) instead of o.buyPrice (the
+       actual entry).
+BUG 3: Long/short inverted. A pending SELL with buyPrice is a held LONG; a
+       pending BUY with buyPrice is a held SHORT.
+BUG 4: Hardcoded INITIAL_EQUITY = 10104.00 constant.
+FIX: Select pending + isNotNull(buyPrice); use buyPrice as entry; correct signs;
+     baseline from RESCUE_INITIAL_EQUITY env var.
+
+VERIFY: grep -n "RESCUE_INITIAL_EQUITY" app/api/bot/rescue-equity/route.ts
+
+
+FILE: lib/exchange.ts
+--------------------------------------------------------------------------------
+BUG 1: warmVenueFees() was fire-and-forget at module load with no handle, so a
+       request arriving before it resolved (cold serverless start) silently used
+       DEFAULT-tier fee rates for that tick — mis-pricing grid spacing and every
+       booked fees value.
+BUG 2: confirmFill() reported partial fills (state 2) as confirmed: true,
+       indistinguishable from a complete fill.
+FIX: Exported ensureVenueFees() as a memoised promise; grid.ts already awaited
+     it in setupGrid. Added ConfirmedFill.partial.
+
+VERIFY: grep -n "ensureVenueFees" lib/exchange.ts   (must be EXPORTED)
+
+
+FILE: lib/ml.ts
+--------------------------------------------------------------------------------
+BUG: loadModelById doc said "id=2 is shadow/timing" but MODEL_IDS.shadow is 4
+     and 2 is trend — anyone following the doc loads the wrong model row.
+FIX: Corrected doc; removed dead const MODEL_GEN; clarified why
+     trainShadowOnDecision omits pnlWeight / L2 terms.
+
+VERIFY: grep -n "MODEL_GEN" lib/ml.ts   (should be empty)
+
+
+================================================================================
+COMMIT ac6d13b — fix: correct advisor scoring, Ondo-DNA drift gate,
+                  and grid sizing bugs
+================================================================================
+
+FILE: lib/advisor.ts
+--------------------------------------------------------------------------------
+BUG 1: heuristicScore short branch used `1 - crossover`. crossover is -1|0|1, so
+       that produced {0,1,2} — ALWAYS >= 0 — while long produced {-1,0,1}.
+       Shorts were systematically scored above longs for the same signal.
+BUG 2: volSurge arrives normalized to [-1/3, 1] but the code assumed a RAW
+       multiple: ((f.volSurge)*100 - 1.5)*0.4 => range [-13.8, 39.4], saturating
+       the sigmoid and collapsing the score to a near-constant.
+BUG 3: recordOutcome was a non-atomic read-modify-write (lost updates under
+       concurrent graders, incl. multi-instance Fly).
+BUG 4: sampleBeta could return NaN for tiny integer shapes.
+FIX: Negate the short branch; rescale volSurge; single atomic jsonb UPDATE for
+     stats; NaN -> prior-mean fallback.
+
+VERIFY: grep -n "jsonb_build_object" lib/advisor.ts
+
+
+FILE: lib/combo-score.ts
+--------------------------------------------------------------------------------
+BUG 1: `if (absDrift > driftThreshold && !isOndoDna)` — the !isOndoDna made the
+       drift gate a NO-OP for exactly the coins it was meant to loosen (they
+       were only stopped by hard gate 1 at 20%, never at 15%).
+BUG 2: comboDna had no guard for empty/short candle arrays (candles[n-1].close
+       throws on n=0; every ratio is meaningless at n=1).
+BUG 3: suggestLeverage could return up to 20x, but grid.ts refuses to build any
+       ladder above MAX_GRID_LEVERAGE = 5 — a guaranteed no-build.
+FIX: Remove the !isOndoDna guard; add n < 2 early return; clamp leverage to 5.
+
+VERIFY: grep -n "MAX_GRID_LEVERAGE" lib/combo-score.ts
+
+
+FILE: lib/grid-sizing.ts
+--------------------------------------------------------------------------------
+BUG 1: Paper-mode snapshot query had NO mode filter, so a live snapshot written
+       more recently than the last paper one sized PAPER grids against live
+       equity (and vice versa).
+BUG 2: The exposure clamp could push budgetPct BELOW the minimum that funds even
+       one order (e.g. $3 balance at 5x: floor 10%, cap 6.5% -> 6.5%), recreating
+       "budget too small despite free balance".
+BUG 3: MAX_GROSS_EXPOSURE_PCT was hardcoded, duplicating the env-overridable
+       EXPOSURE_LIMITS limit.
+FIX: Filter snapshot on eq(equitySnapshots.live, false); re-apply the notional
+     floor after the clamp; read the cap from EXPOSURE_LIMITS.
+
+VERIFY: grep -n "live, false" lib/grid-sizing.ts
+
+
+================================================================================
+COMMIT 461c69a — fix: venue equity in live mode, mode-filter rotation,
+                  drop debug logs
+================================================================================
+
+FILE: lib/risk-manager.ts
+--------------------------------------------------------------------------------
+BUG: equity = cfg.paperBalance + unrealized, EVEN IN LIVE MODE. Every limit
+     below (daily loss, 7-day drawdown kill switch, margin cap, and
+     marginBudgetRemaining) was computed against a number that was neither paper
+     nor live equity — the risk layer could read "healthy" while the live
+     account drained.
+BUG 2: Unreadable equity produced 0, so the halts silently never fired.
+FIX: In live mode read venue equity via getAccountAssets() (which already
+     includes unrealized); fail LOUD (kill switch) when equity is unreadable.
+
+VERIFY: grep -n "venueEquity" lib/risk-manager.ts
+
+
+FILE: lib/portfolio-rotator.ts
+--------------------------------------------------------------------------------
+BUG 1: "dead grid" PnL summed live + paper trades.
+BUG 2: The rotated-out config row was never reused or deleted, so rotating a
+       symbol out and later back in left TWO config rows for it — the tick loop
+       then managed the pair twice, and the state API's join fanned out SUM(pnl).
+BUG 3: fetch(AI_ADVISOR_URL) had no timeout — a hung advisor stalls the tick.
+FIX: Filter trades on live === modeIsLive; reuse existing config row for the
+     candidate when one exists; 30s AbortController on the fetch.
+
+VERIFY: grep -n "AbortController" lib/portfolio-rotator.ts
+
+
+FILE: lib/ai-feedback.ts
+--------------------------------------------------------------------------------
+BUG: `const livePrices = (globalThis as any).__livePrices ?? {}` READ the global
+     but never assigned the fallback back to it. If this module loaded before the
+     WS manager it captured its OWN empty object and never saw a price —
+     evaluateAiPicks() then silently evaluated nothing, forever, with no error.
+FIX: import { livePrices } from "./mexc/ws".
+
+VERIFY: grep -n 'from "./mexc/ws"' lib/ai-feedback.ts
+
+
+FILE: lib/mexc/private.ts
+--------------------------------------------------------------------------------
+BUG: Two leftover debug logs — one in placeMarketOrder (logged every live order
+     with symbol/side/price/vol) and one in getAccountAssets mislabelled
+     "[DEBUG] Post-Only result" (logged the account object on every balance read).
+FIX: Removed both. getOpenPositions keeps its loud error (real exposure must not
+     look like "no open positions").
+
+VERIFY: grep -n "DEBUG" lib/mexc/private.ts   (should be empty)
+
+
+================================================================================
+(commit 241f8b6 claimed these but the code never landed — RE-VERIFY ALL)
+================================================================================
+
+FILE: lib/gateio/public.ts
+--------------------------------------------------------------------------------
+BUG 1 (HIGH): Gate v4 futures candlesticks are [timestamp, volume, close, high,
+       low, open] — the adapter destructured them in BYBIT order
+       [time, open, high, low, close, volume]. So volume->open, close->high,
+       high->low, low->close, open->volume: every Gate indicator was computed
+       from scrambled OHLC.
+BUG 2: Gate returns unix SECONDS; the adapter did Number(time)/1000, producing a
+       1970 timestamp.
+FIX: Corrected the field order; made the timestamp unit self-detecting
+     (> 1e12 => ms); added a runtime sanity check (close must lie inside
+     [low, high]) that THROWS rather than trade on a bad assumption; convertInterval
+     now warns instead of silently falling back to 5m.
+
+VERIFY: grep -n "Number(time) / 1000" lib/gateio/public.ts   -> must be GONE
+        curl -s 'https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=BTC_USDT&interval=15m&limit=1'
+        (close must sit between low and high)
+
+
+FILE: lib/gateio/private.ts
+--------------------------------------------------------------------------------
+BUG (HIGH): placeMarketOrder computed a `sideMap` of "long_open"/"short_close"/
+       ... which Gate's REST API does not accept, then NEVER USED IT — it always
+       forwarded a POSITIVE `size`. Result: side 3 (open short) OPENED A LONG;
+       side 4 (close long) sent a buy-with-reduce-only, which the venue rejects,
+       so stop/max-hold closes of held longs never executed.
+FIX: Sign `size` from the side (-contracts for sides 3 and 4); drop the dead map.
+     placePostOnlyOrder was already correct (it got the sign right).
+
+VERIFY: grep -nE "isSell|long_open" lib/gateio/private.ts
+        -> isSell present, "long_open" GONE
+
+
+FILE: lib/bybit/private.ts
+--------------------------------------------------------------------------------
+BUG (HIGH): sideMap was {1:Buy, 2:Sell, 3:Sell, 4:Buy}. On a one-way position you
+       BUY to close a short and SELL to close a long, so sides 2 and 4 were
+       INVERTED: every reduce-only close was sent in the direction that would
+       INCREASE the position, Bybit rejected it, and the position never closed.
+FIX: New BYBIT_SIDE = {1:Buy, 2:Buy, 3:Sell, 4:Sell}, used by BOTH
+     placeMarketOrder and placePostOnlyOrder.
+
+VERIFY: grep -n "BYBIT_SIDE" lib/bybit/private.ts
+
+
+FILE: lib/mexc/ws.ts
+--------------------------------------------------------------------------------
+BUG 1: import { log } from "../grid" created a circular import
+       (grid -> mexc/ws -> grid).
+BUG 2: Every raw frame, parsed frame and kline was console.log'd — expensive at
+       15+ pairs on a long-lived Fly machine.
+BUG 3: lastKlineTime was not reset on reconnect, so the first frame after a
+       reconnect looked like a new candle and fired a spurious onKline() tick.
+BUG 4: reconnectDelay was assigned but never read (reconnect hardcoded 3000).
+FIX: Import log from "../logger"; drop the per-frame logs; reset lastKlineTime
+     in the "open" handler; replace the field with a RECONNECT_DELAY_MS constant.
+
+VERIFY: grep -n 'from "../grid"' lib/mexc/ws.ts   -> must be GONE
+
+
+FILE: lib/indicators.ts
+--------------------------------------------------------------------------------
+BUG: vwap() returned 0 when the window carried no volume. That was worse than
+     useless: every `price > vwap` / `price < vwap` confluence check in
+     evaluateTrendEntry then passed unconditionally — the VWAP filter was
+     silently disabled.
+FIX: Fall back to the unweighted mean typical price instead of 0. Also documented
+     the adx() all-zero short-window behaviour (kept the caller's >= 50 candle
+     guard).
+
+VERIFY: grep -n "typicalSum" lib/indicators.ts
+
+
+FILE: lib/volatility-guard.ts
+--------------------------------------------------------------------------------
+BUG: A "flash move" branch compared consecutive entries of `history` AS IF THEY
+     WERE PRICES (Math.abs(v - recentCandles[i]) / recentCandles[i] * 100), but
+     `history` holds atrPct values — so a routine 10% relative shift in ATR%
+     tripped a ">10% candle" flag. The genuine spike case is already covered by
+     the ATR-vs-median surge check.
+FIX: Removed the branch; documented that adaptiveSpacing() is currently NOT
+     called by grid.ts (the feature is inert).
+
+VERIFY: grep -n "Flash move detected" lib/volatility-guard.ts   -> must be GONE
+
+
+FILE: lib/watchdog.ts
+--------------------------------------------------------------------------------
+BUG 1 (the $330 bug): `SELECT last_value FROM pg_get_serial_sequence(table, col)`
+       is invalid SQL — pg_get_serial_sequence returns a sequence NAME (text), not
+       a table. It always threw, and the surrounding catch{} swallowed it, so the
+       sequence healer NEVER RAN.
+BUG 2: Phantom-PnL check summed BOTH modes against a paper baseline.
+BUG 3: STARTING_BALANCE was hardcoded.
+FIX: Resolve the sequence name first, then read it via dynamic SQL; mode-aware
+     SUM(pnl); env-overridable STARTING_BALANCE; surface a genuine per-table
+     failure as an issue instead of hiding it.
+
+VERIFY: grep -n "pg_get_serial_sequence" lib/watchdog.ts   -> TWO hits
+
+
+================================================================================
+COMMIT 30e5b9e — fix(mexc): drop per-call kline logs, warn on unmapped interval
+================================================================================
+
+FILE: lib/mexc/public.ts
+--------------------------------------------------------------------------------
+BUG: Two console.logs fired on EVERY kline fetch (the full request URL, then the
+     response shape). That runs for every grid symbol on every tick on a
+     long-lived Fly machine — a per-second log flood that buried the error paths.
+BUG 2: intervalToSeconds silently fell back to 300s for an unmapped timeframe, so
+     a 4h request was sized as if it were 5m.
+FIX: Removed both logs (kept the failure-path console.error); intervalToSeconds
+     now warns on an unmapped interval. Left marketScales in place (it duplicates
+     the spec cache in lib/mexc/precision.ts, but is exported — a cross-file
+     change that needs a decision, not a blind edit).
+
+VERIFY: grep -n "intervalToSeconds" lib/mexc/public.ts
+
+
+================================================================================
+LATER FIXES (blocking items, delivered in follow-up batches)
+================================================================================
+
+FILE: lib/grid.ts (final batch)
+--------------------------------------------------------------------------------
+BUG 1 (HIGH): cancelOtherPendingOrders marked EVERY other pending row
+       `cancelled` after a stop-loss — including rows with buyPrice set, i.e.
+       OTHER HELD RUNGS. Their positions stayed open on the venue with no
+       tracking record, so the orphan sweep later force-closed them at market
+       WITHOUT booking a trade (silent PnL loss).
+FIX: Split into naked (buyPrice == null -> cancel on venue + DB) and held
+     (buyPrice != null -> LEAVE TRACKED; logged; each has its own per-rung SL).
+
+BUG 2 (HIGH): setupGrid's cleanup was gated on `cfg.mode === "live" && exchange`,
+       but every maker call site passes exchange as undefined
+       (setupGrid(cfg, gc, snap, vol, undefined, true)). So live maker rebuilds
+       took the PAPER branch: rows cancelled in the DB while the REAL resting
+       orders stayed live on the venue — orphans on every rebuild.
+FIX: Gate on cfg.mode === "live" only, resolving a client when not supplied;
+     cancel only naked rows (held rows are open inventory, not rebuild fodder).
+
+BUG 3: The COMBO short-close wrote paperBalance with NO paper-mode guard (every
+       sibling path wraps it in if (cfg.mode === "paper")). In live mode a
+       realized short-close PnL was credited to the PAPER book — which the risk
+       layer then reads as its equity baseline.
+FIX: Wrapped in if (cfg.mode === "paper").
+
+BUG 4: syncExchangeState marked a venue-FILLED resting order as `filled` in the
+       DB without ever setting buyPrice, booking the entry, or arming the paired
+       follow-up. The row dropped out of getActiveOrders (pending-only) and out
+       of checkAllHeldPositionsRisk (buyPrice-not-null) — a real filled position
+       silently lost, then force-closed by the orphan sweep.
+FIX: Fills are DEFERRED to the poller (which claims atomically and settles).
+     Cancellations are still mirrored (safe — no position exists). Filled rows
+     now log at ERROR level and are left pending.
+
+VERIFY: grep -n "HELD-ROW SAFETY" lib/grid.ts
+        grep -n "FILL DEFERRED" lib/grid.ts
+
+
+FILE: lib/engine.ts
+--------------------------------------------------------------------------------
+BUG 1 (HIGH): The flash-fade loop hardcoded
+       { enabled: true, minMovePct: 20, minVolumeMultiplier: 5,
+         positionSizeUsdt: 300, leverage: 3, maxPositions: 2 }
+     with an unconditional enabled: true — bypassing the FlashFadeConfig type
+     entirely, so NOTHING could turn it off — and sizing a $300 x 3x = $900
+     NOTIONAL position on EVERY enabled grid symbol on any >20%/5x-volume move.
+     On a sub-$500 account that is larger than the whole grid budget. Paper mode
+     fabricated PnL; live mode was a live-money hazard on every pair.
+FIX: Single module-level FLASH_FADE config read from env, DEFAULT OFF
+     (FLASH_FADE_ENABLED=1 to enable), all params env-tunable
+     (FLASH_FADE_SIZE_USDT, _LEVERAGE, _MIN_MOVE_PCT, _MIN_VOL_MULT,
+     _MAX_POSITIONS). When disabled we also skip the per-symbol 50-candle fetch.
+
+BUG 2: reconcilePositions() ran BEFORE the `status !== "running"` check, so while
+       the bot was STOPPED the 60s tick kept marking DB positions closed whenever
+       the venue did not report them — and that path books NO trade row and NO
+       PnL, so the realized result silently vanished from the books and from ML
+       training, every 60s, for as long as the bot stayed stopped.
+FIX: Moved AFTER the status gate (so the normal close / soft-stop / native-stop
+     paths have had their chance). Log is now error level and explicitly says no
+     PnL was recorded, including entry and size.
+
+BUG 3: initRealtimeEngine ran ONCE at process start, only for grids enabled at
+       that moment. A grid enabled LATER (AI advisor, rotation, manual toggle)
+       never got a price poller, so livePrices[symbol] stayed undefined and
+       checkAllHeldPositionsRisk (the 20s stop, and the ONLY periodic stop for
+       short inventory) silently skipped every one of its held rungs.
+FIX: Extracted an idempotent ensurePricePolling(symbol) and call it for every
+     grid symbol at the top of the grid loop. Also fixed the poller capturing
+     cfg.exchange once at construction — it now refreshes the venue every 60s.
+
+BUG 4: The paper kill-switch divisor could be 0/missing, making the drawdown
+       ratio NaN/Infinity so the switch never fired.
+FIX: Guard _ksStart > 0.
+
+DEAD CODE: removed the unused MexcWebSocketManager import (never constructed —
+     the REST poller is the real feed).
+
+VERIFY: grep -n "FLASH_FADE_ENABLED" lib/engine.ts
+        grep -n "ensurePricePolling" lib/engine.ts
+
+
+FILE: lib/portfolio-sizing.ts
+--------------------------------------------------------------------------------
+BUG: minBudgetPctForNotional was (MIN_NOTIONAL * sidesPerLevel * 100) /
+     availableBalance — `levels` dropped from the numerator and `leverage` from
+     the denominator. Its own comment derived the correct formula, so the code
+     was off by levels / leverage, OVER-RESTRICTING the floor on every pair and
+     recreating the exact "budget too small despite free balance" symptom the
+     floor exists to prevent.
+FIX: (MIN_NOTIONAL * levels * sidesPerLevel * 100) / (availableBalance * leverage)
+     with a leverageFor() guard against a zero/negative leverage.
+
+VERIFY: grep -n "leverageFor" lib/portfolio-sizing.ts
+
+
+FILE: app/api/bot/state/route.ts
+--------------------------------------------------------------------------------
+BUG 1: gridRealizedRows inner-joined gridConfigs on symbol and filtered
+       closedAt >= COALESCE(lastSetupAt, createdAt). But lastSetupAt is
+       overwritten by tryClaimSetupCooldown() on EVERY ladder setup, so
+       "realized" only counted trades since the most recent rebuild — i.e.
+       effectively always zero. And joining on symbol (not the unique key)
+       fanned out every trade row once per matching config row, multiplying
+       SUM(pnl) for any symbol with >1 config row.
+BUG 2: Top-level winRate was computed from `recentTrades` — the global 500-row
+       list spanning BOTH paper and live — so it disagreed with
+       modeStats/liveStats/todayStats in the same response.
+BUG 3: Dead locals (unrealizedPnl, filteredOpenPosRows) and unused imports
+       (getGridConfigs, gridUnrealizedPnl, and).
+FIX: Plain all-time per (symbol, live) group-by with NO join; winRate =
+     modeStats.winRate; removed the dead code.
+
+VERIFY: grep -n "lastSetupAt" app/api/bot/state/route.ts   -> must be GONE
+        grep -n "const winRate = modeStats" app/api/bot/state/route.ts
+
+
+================================================================================
+FLAGGED BUT DELIBERATELY NOT FIXED (need a decision, or unsafe to change blind)
+================================================================================
+
+lib/db/index.ts
+  The pool.query wrapper retries on ETIMEDOUT/ENETUNREACH/ECONNRESET/EAI_AGAIN.
+  For a WRITE, an ECONNRESET after the server committed but before the response
+  arrived will re-execute the statement. Atomic claims + unique indexes cover the
+  important cases. Fixing safely needs statement classification — its own risk.
+
+lib/exits.ts
+  `updates.stopLoss = position.entryPrice` set in both step 2 and step 2b
+  (harmless — same value). The partial branch returns action:"partial" without
+  re-checking remaining qty. Needs the caller context to confirm.
+
+lib/ai-grid-advisor.ts
+  - The "VALIDATED FAST PATH" assigns score/dnaScore/blendedScore = 100 to EVERY
+    validated symbol, so the sort is a no-op and the slice(0,8) shortlist is
+    arbitrary; the depth check then inspects only the first 3 in that order.
+  - The whole DNA path (comboDna, comboParams, calcChop, and the ema/adx/
+    bollinger imports) is dead code behind that fast path.
+  - viablePicks divides by 2 ("two-sided") while COMBO_SIDES = 1 a few lines
+    above — the two guards disagree.
+  - LEGACY fallback path (fetch MEXC tickers inline) is MEXC-only.
+
+COMBO_MARGIN_MULTIPLIER mismatch
+  lib/grid-sizing.ts = 1.5, lib/portfolio-sizing.ts = 2 — two sizers chasing the
+  same margin envelope disagree by ~33%. Left as-is (a sizing decision); only the
+  comment was corrected.
+
+Hygiene leftovers in lib/grid.ts (safe to remove, not bugs)
+  - TAKER_FEE / MAKER_FEE constants unused (real fees come from getFeeRates)
+  - adaptiveSpacing imported, never called
+  - startAtPrice parameter of setupGrid never read
+  - [Balance] debug info logs on every live setup
+
+Hygiene leftovers in lib/mexc/ws.ts
+  - MexcWebSocketManager class is never constructed (the REST poller is the feed)
+    — kept for reference
+
+Stray shell-redirect artifacts in the repo root (NOT source — delete)
+  =, 1.5, snap.emaSlow
+  These were created by commands like `git add = 1.5 snap.emaSlow` where the
+  `git add` was eaten and the shell made empty files instead.
+
+
+================================================================================
+HOW TO VERIFY EVERYTHING LANDED
+================================================================================
+
+Run these from the repo root — each should show the FIX, not the old code:
+
+  grep -n "ALLOW_UNSECURED_TICK"           app/api/bot/tick/route.ts
+  grep -n "RESCUE_INITIAL_EQUITY"          app/api/bot/rescue-equity/route.ts
+  grep -n "export function ensureVenueFees" lib/exchange.ts
+  grep -n "jsonb_build_object"             lib/advisor.ts
+  grep -n "MAX_GRID_LEVERAGE"              lib/combo-score.ts
+  grep -n "live, false"                    lib/grid-sizing.ts
+  grep -n "venueEquity"                    lib/risk-manager.ts
+  grep -n "AbortController"                lib/portfolio-rotator.ts
+  grep -n "BYBIT_SIDE"                     lib/bybit/private.ts
+  grep -n "isSell"                         lib/gateio/private.ts
+  grep -n "typicalSum"                     lib/indicators.ts
+  grep -n "pg_get_serial_sequence"         lib/watchdog.ts          (2 hits)
+  grep -n "FLASH_FADE_ENABLED"             lib/engine.ts
+  grep -n "ensurePricePolling"             lib/engine.ts
+  grep -n "leverageFor"                    lib/portfolio-sizing.ts
+  grep -n "const winRate = modeStats"      app/api/bot/state/route.ts
+  grep -n "HELD-ROW SAFETY"                lib/grid.ts
+  grep -n "FILL DEFERRED"                  lib/grid.ts
+
+Anything that prints NOTHING above means the fix did NOT land — a previous
+commit was message-only (this happened with commit 241f8b6).
+
+
+================================================================================
+BUILD / DEPLOY (I cannot run these — no terminal here)
+================================================================================
+
+  cd ~/Downloads/Fable_Mexc_online_trading_botyrius_backup
+  git rm --cached -- '=' '1.5' 'snap.emaSlow' 2>/dev/null || true
+  rm -f -- '=' '1.5' 'snap.emaSlow'
+  npx tsc --noEmit
+  npm run build
+  git add -A
+  git commit -m "fix: grid HELD-ROW/FILL DEFERRED, engine flash-fade+stopped-gate+pollers, venue candle+side, sizing floor, state winRate"
+  git push origin main
+  fly deploy
+
+If tsc or the build errors, the error text names the file and line — fix that,
+re-run, then deploy. Live-mode caveats to confirm before going live:
+  1. Gate candle field order — verify with the curl in the gateio/public.ts block.
+  2. Risk-manager in live mode now reads venue `equity`; confirm that field is
+     USDT-denominated on the venue you run.
+  3. flash-fade defaults OFF — set FLASH_FADE_ENABLED=1 and size it down only if
+     you actually want it running.
+
+================================================================================
+END OF LOG
+================================================================================
