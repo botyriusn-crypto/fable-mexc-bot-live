@@ -1,15 +1,19 @@
 "use client"
 
 import { Badge } from "@/components/ui/badge"
+import { useEffect, useState } from "react"
 import type { BotState } from "@/lib/use-bot-state"
 
 const fmt = (v: number | null | undefined, digits = 2) =>
-  v == null ? "—" : v.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })
+  v == null ? "—" : v.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })
 
 const fmtSigned = (v: number | null | undefined, digits = 2) =>
   v == null ? "—" : `${v >= 0 ? "+" : ""}${fmt(v, digits)}`
 
 export function AwarenessPanel({ state }: { state: BotState }) {
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => setMounted(true), [])
+
   const a = state.awareness
   if (!a) {
     return (
@@ -57,7 +61,7 @@ export function AwarenessPanel({ state }: { state: BotState }) {
       {/* Header */}
       <div className="flex items-center justify-between">
         <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Awareness</span>
-        <span className="text-[10px] text-muted-foreground">{ago}s ago</span>
+        <span className="text-[10px] text-muted-foreground">{mounted ? `${ago}s ago` : ""}</span>
       </div>
 
       {/* Regime + trend */}

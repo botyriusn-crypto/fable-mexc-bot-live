@@ -20,7 +20,7 @@ import { MarketBar } from "./market-bar"
 import { ChevronUp, X, ExternalLink, ChevronDown, ChevronRight } from "lucide-react"
 
 const fmt = (v: number | null | undefined, digits = 2) =>
-  v == null ? "—" : v.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })
+  v == null ? "—" : v.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })
 
 // ======================== TERMINAL PANEL ========================
 function TerminalPanel({ state, isOpen, onToggle }: { state: any; isOpen: boolean; onToggle: () => void }) {

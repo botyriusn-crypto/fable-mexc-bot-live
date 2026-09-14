@@ -303,10 +303,10 @@ const handleToggleDirection = async () => {
         <div className="flex flex-wrap items-center justify-end gap-2">
           {editing ? (
             <>
-              <input type="number" value={levels} onChange={e => setLevels(Number(e.target.value))} className="w-12 rounded border bg-background px-1 py-0.5 font-mono text-xs" min={1} max={20} title="Levels" />
-              <input type="number" value={atrMult} onChange={e => setAtrMult(Number(e.target.value))} className="w-14 rounded border bg-background px-1 py-0.5 font-mono text-xs" min={0.1} max={5} step={0.1} title="ATR Multiplier" />
-              <input type="number" value={budget} onChange={e => setBudget(Number(e.target.value))} className="w-12 rounded border bg-background px-1 py-0.5 font-mono text-xs" min={1} max={100} title="Budget %" />
-              <input type="number" value={lev} onChange={e => setLev(Number(e.target.value))} className="w-10 rounded border bg-background px-1 py-0.5 font-mono text-xs" min={1} max={10} title="Leverage" />
+              <input type="number" value={levels ?? ""} onChange={e => setLevels(Number(e.target.value))} className="w-12 rounded border bg-background px-1 py-0.5 font-mono text-xs" min={1} max={20} title="Levels" />
+              <input type="number" value={atrMult ?? ""} onChange={e => setAtrMult(Number(e.target.value))} className="w-14 rounded border bg-background px-1 py-0.5 font-mono text-xs" min={0.1} max={5} step={0.1} title="ATR Multiplier" />
+              <input type="number" value={budget ?? ""} onChange={e => setBudget(Number(e.target.value))} className="w-12 rounded border bg-background px-1 py-0.5 font-mono text-xs" min={1} max={100} title="Budget %" />
+              <input type="number" value={lev ?? ""} onChange={e => setLev(Number(e.target.value))} className="w-10 rounded border bg-background px-1 py-0.5 font-mono text-xs" min={1} max={100} title="Leverage" />
               <Button
                 size="sm"
                 variant="ghost"
@@ -580,7 +580,7 @@ const [newTf, setNewTf] = useState<string>((typeof localStorage !== "undefined" 
           <span className="text-xs text-muted-foreground">{grids.length} pairs · {totalOrders} orders active</span>
         {state.lastRotationTime && state.lastRotationTime > 0 && (
           <span className="text-xs text-muted-foreground">
-            · Last rotation: {new Date(state.lastRotationTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+            · Last rotation: {new Date(state.lastRotationTime).toLocaleTimeString("en-US", {timeZone: 'UTC', hour: '2-digit', minute:'2-digit'})}
           </span>
         )}
         </div>

@@ -14,8 +14,11 @@ import {
 import type { BotState } from "@/lib/use-bot-state"
 
 function formatTime(t: number) {
+  // UTC getters: server TZ is UTC but browsers are not — local getters render
+  // different labels for the same candle (hydration #418). Axis labels are
+  // display-only; stability across runtimes beats local-time cosmetics.
   const d = new Date(t * 1000)
-  return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`
+  return `${d.getUTCHours().toString().padStart(2, "0")}:${d.getUTCMinutes().toString().padStart(2, "0")}`
 }
 
 export function PriceChart({ state }: { state: BotState }) {
@@ -42,7 +45,7 @@ export function PriceChart({ state }: { state: BotState }) {
                 tick={{ fontSize: 10 }}
                 stroke="var(--color-muted-foreground)"
                 width={70}
-                tickFormatter={(v: number) => v.toLocaleString()}
+                tickFormatter={(v: number) => v.toLocaleString("en-US")}
               />
               <Tooltip
                 contentStyle={{
@@ -67,7 +70,7 @@ export function PriceChart({ state }: { state: BotState }) {
 export function EquityChart({ state }: { state: BotState }) {
   const data = state.equityCurve.map((e) => ({
     equity: e.equity,
-    label: new Date(e.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    label: new Date(e.createdAt).toLocaleTimeString("en-US", { timeZone: "UTC", hour: "2-digit", minute: "2-digit" }),
   }))
 
   return (
@@ -95,7 +98,7 @@ export function EquityChart({ state }: { state: BotState }) {
                 tick={{ fontSize: 10 }}
                 stroke="var(--color-muted-foreground)"
                 width={70}
-                tickFormatter={(v: number) => v.toLocaleString()}
+                tickFormatter={(v: number) => v.toLocaleString("en-US")}
               />
               <Tooltip
                 contentStyle={{

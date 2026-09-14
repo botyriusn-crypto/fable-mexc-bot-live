@@ -8,10 +8,10 @@ import { botAction, type BotState } from "@/lib/use-bot-state"
 import { useSWRConfig } from "swr"
 
 const fmt = (value: number | null | undefined, digits = 2) =>
-  value == null ? "—" : value.toLocaleString(undefined, { maximumFractionDigits: digits })
+  value == null ? "—" : value.toLocaleString("en-US", { maximumFractionDigits: digits })
 
 const fmtPrice = (value: number | null | undefined) =>
-  value == null ? "—" : value.toLocaleString(undefined, { maximumSignificantDigits: 6 })
+  value == null ? "—" : value.toLocaleString("en-US", { maximumSignificantDigits: 6 })
 
 export function PositionCard({ state }: { state: BotState }) {
   const { mutate } = useSWRConfig()

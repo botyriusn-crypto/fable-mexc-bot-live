@@ -74,7 +74,7 @@ export function TradesTable({ state }: { state: BotState }) {
                     </Badge>
                   </TableCell>
                   <TableCell className="text-right font-mono text-xs text-muted-foreground">
-                    {t.closedAt ? new Date(t.closedAt as unknown as string).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
+                    {t.closedAt ? new Date(t.closedAt as unknown as string).toLocaleString("en-US", { timeZone: "UTC", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
                   </TableCell>
                 </TableRow>
               ))}

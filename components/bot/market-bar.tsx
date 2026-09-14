@@ -53,7 +53,7 @@ export function MarketBar({ state }: { state: BotState }) {
   const [symbol, setSymbol] = useState(state.config.symbol)
   const [timeframe, setTimeframe] = useState(state.config.timeframe)
   const [leverage, setLeverage] = useState(String(state.config.leverage))
-  const [positionSizeUsdt, setPositionSizeUsdt] = useState(String(state.config.positionSizeUsdt))
+  const [positionSizeUsdt, setPositionSizeUsdt] = useState(String(state.config.positionSizeUsdt ?? ""))
   const [saving, setSaving] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [feedback, setFeedback] = useState<string | null>(null)
@@ -62,7 +62,7 @@ export function MarketBar({ state }: { state: BotState }) {
     setSymbol(state.config.symbol)
     setTimeframe(state.config.timeframe)
     setLeverage(String(state.config.leverage))
-    setPositionSizeUsdt(String(state.config.positionSizeUsdt))
+    setPositionSizeUsdt(String(state.config.positionSizeUsdt ?? ""))
   }, [state.config.symbol, state.config.timeframe, state.config.leverage, state.config.positionSizeUsdt])
 
   const selectedMarket = useMemo(
@@ -228,7 +228,7 @@ export function MarketBar({ state }: { state: BotState }) {
             </div>
             <div className="flex flex-wrap items-baseline gap-2">
               <span className="font-mono text-xl font-semibold">
-                {state.markPrice?.toLocaleString(undefined, { maximumFractionDigits: 6 }) ?? "—"}
+                {state.markPrice?.toLocaleString("en-US", { maximumFractionDigits: 6 }) ?? "—"}
               </span>
               <span className="text-xs text-muted-foreground">
                 {state.ticker ? `${state.ticker.riseFallRate >= 0 ? "+" : ""}${(state.ticker.riseFallRate * 100).toFixed(2)}%` : ""}
