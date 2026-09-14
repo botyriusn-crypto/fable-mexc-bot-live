@@ -59,3 +59,4 @@ sniper_*.csv
 
 # ── Misc ──
 .DS_Store
+.aider*
