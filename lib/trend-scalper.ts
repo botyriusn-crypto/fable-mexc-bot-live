@@ -43,32 +43,95 @@ function envNum(name: string, def: number): number {
   return Number.isFinite(v) ? v : def
 }
 
-// Tunable thresholds (env-overridable) — defaults chosen for 5–15m scalps.
+// ── DB-backed lever snapshot ─────────────────────────────────────────────────
+//
+// These thresholds used to be process.env-only (SCALP_*). That made them
+// unwritable by the AI advisor: applyRecommendations could write a
+// bot_config.scalp* column all day and the scalper would never read it, so the
+// write was a silent no-op. refreshScalpLevers(cfg) snapshots the live config
+// row once per evaluation, and every getter below prefers that snapshot over
+// the env var.
+//
+// SCALP_DB_BACKED tells lib/ai-advisor.ts these levers are now part of the
+// auto-applicable set, and lib/ai-levers.ts targets them at "botConfig".
+export const SCALP_DB_BACKED = true
+
+interface ScalpLevers {
+  adxMin: number
+  adxMax: number
+  atrPctMin: number
+  atrPctMax: number
+  pullbackLookback: number
+  scoreThreshold: number
+  riskPct: number
+  rMultiple: number
+  flowWeight: number
+  maxOpen: number
+}
+
+let _dbLevers: ScalpLevers | null = null
+
+/**
+ * Snapshot the scalper levers from the live bot_config row. Cheap and pure —
+ * called at the top of evaluateScalpSignal so every read in one evaluation
+ * sees one consistent set. A non-finite or missing column falls back to the
+ * env var (and then to the historical default), so a partially-migrated row
+ * cannot produce NaN thresholds that reject every bar.
+ */
+export function refreshScalpLevers(cfg: BotConfig): void {
+  const num = (v: unknown, fallback: number): number => {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : fallback
+  }
+  _dbLevers = {
+    adxMin: num(cfg.scalpAdxMin, envNum("SCALP_ADX_MIN", 18)),
+    adxMax: num(cfg.scalpAdxMax, envNum("SCALP_ADX_MAX", 50)),
+    atrPctMin: num(cfg.scalpAtrPctMin, envNum("SCALP_ATRPCT_MIN", 0.0015)),
+    atrPctMax: num(cfg.scalpAtrPctMax, envNum("SCALP_ATRPCT_MAX", 0.10)),
+    pullbackLookback: num(cfg.scalpPullbackLookback, envNum("SCALP_PULLBACK_LOOKBACK", 6)),
+    scoreThreshold: num(cfg.scalpScoreThreshold, envNum("SCALP_SCORE_THRESHOLD", 0.5)),
+    riskPct: num(cfg.scalpRiskPct, envNum("SCALP_RISK_PCT", 0.01)),
+    rMultiple: num(cfg.scalpRMultiple, envNum("SCALP_R_MULTIPLE", 1.8)),
+    flowWeight: num(cfg.scalpFlowWeight, envNum("SCALP_FLOW_WEIGHT", 0)),
+    maxOpen: num(cfg.scalpMaxOpen, envNum("SCALP_MAX_OPEN", 3)),
+  }
+}
+
+/** Test seam: drop the snapshot so the getters fall back to env. */
+export function clearScalpLevers(): void {
+  _dbLevers = null
+}
+
+// Tunable thresholds (DB column first, env override as fallback). Numerical
+// defaults are unchanged from the historical env values — `??` (not `||`) is
+// deliberate so a legitimate 0 (flowWeight) is respected.
 export const SCALP = {
-  adxMin: () => envNum("SCALP_ADX_MIN", 18), // below → chop, stand aside
-  adxMax: () => envNum("SCALP_ADX_MAX", 50), // above → trend likely exhausted / news spike
-  atrPctMin: () => envNum("SCALP_ATRPCT_MIN", 0.0015), // 0.15% — need enough range to scalp
+  adxMin: () => _dbLevers?.adxMin ?? envNum("SCALP_ADX_MIN", 18), // below → chop, stand aside
+  adxMax: () => _dbLevers?.adxMax ?? envNum("SCALP_ADX_MAX", 50), // above → trend likely exhausted / news spike
+  atrPctMin: () => _dbLevers?.atrPctMin ?? envNum("SCALP_ATRPCT_MIN", 0.0015), // 0.15% — need enough range to scalp
   // 10%: the risk model already scales size with ATR, so volatility is priced,
   // not banned — a 6% ceiling locked out exactly the high-momentum listings
-  // (e.g. NIULAI median 7.5%) the candidate scan elects. Tighten via env if wanted.
-  atrPctMax: () => envNum("SCALP_ATRPCT_MAX", 0.10),
-  pullbackLookback: () => Math.round(envNum("SCALP_PULLBACK_LOOKBACK", 6)),
+  // (e.g. NIULAI median 7.5%) the candidate scan elects. Tighten via config.
+  atrPctMax: () => _dbLevers?.atrPctMax ?? envNum("SCALP_ATRPCT_MAX", 0.10),
+  pullbackLookback: () => Math.round(_dbLevers?.pullbackLookback ?? envNum("SCALP_PULLBACK_LOOKBACK", 6)),
   // 0.5: measured funnel admits ~1.5–2% of bars as setups (vs 0.3% at 0.6,
-  // where the threshold rejected ~98% of direction-set bars). Tighten via env.
-  scoreThreshold: () => envNum("SCALP_SCORE_THRESHOLD", 0.5),
-  riskPct: () => envNum("SCALP_RISK_PCT", 0.01), // risk 1% of equity per scalp
-  rMultiple: () => envNum("SCALP_R_MULTIPLE", 1.8), // target reward:risk
+  // where the threshold rejected ~98% of direction-set bars). Tighten via config.
+  scoreThreshold: () => _dbLevers?.scoreThreshold ?? envNum("SCALP_SCORE_THRESHOLD", 0.5),
+  riskPct: () => _dbLevers?.riskPct ?? envNum("SCALP_RISK_PCT", 0.01), // risk 1% of equity per scalp
+  rMultiple: () => _dbLevers?.rMultiple ?? envNum("SCALP_R_MULTIPLE", 1.8), // target reward:risk
   // Taker-flow confirmation weight (0 = off, behavior identical to before).
   // When > 0, the OHLC confluence is blended with directional agreement of
   // recent taker flow (MEXC deals: the only public flow signal). Scored, not
   // a hard filter, so the entry funnel is re-weighted, never narrowed.
-  flowWeight: () => envNum("SCALP_FLOW_WEIGHT", 0),
+  flowWeight: () => _dbLevers?.flowWeight ?? envNum("SCALP_FLOW_WEIGHT", 0),
   // Multi-market evaluation (0 = off, selected-market-only as before).
   // When 1, the scalp path runs on every ticked market without a position,
   // bounded by maxOpen concurrent scalp positions. Per-trade risk is
   // unchanged (1% equity); downstream ML + Lorentzian + risk gates still apply.
+  // Deliberately NOT in the lever registry: a language model should not flip
+  // whole features on and off, so this stays a human/env decision.
   multiMarket: () => (process.env.SCALP_MULTI_MARKET === "1" ? 1 : 0),
-  maxOpen: () => Math.max(1, Math.round(envNum("SCALP_MAX_OPEN", 3))),
+  maxOpen: () => Math.max(1, Math.round(_dbLevers?.maxOpen ?? envNum("SCALP_MAX_OPEN", 3))),
 }
 
 export interface ScalpMarketState {
@@ -147,6 +210,9 @@ function nullSignal(reason: string, atr: number, filters: ScalpSignal["filters"]
  * Evaluate a trend-scalp opportunity for the current market snapshot.
  * Returns a triggered signal only when trend + pullback + resumption + momentum
  * confluence clears the score threshold.
+ *
+ * Snapshots the live lever values first (refreshScalpLevers), so a clamp the
+ * AI advisor applied to bot_config takes effect on this evaluation.
  */
 export function evaluateScalpSignal(
   snap: IndicatorSnapshot,
@@ -155,6 +221,8 @@ export function evaluateScalpSignal(
   equity: number,
   takerFlow?: TakerFlow,
 ): ScalpSignal {
+  refreshScalpLevers(cfg)
+
   const baseFilters = { adxOk: false, volatilityOk: false, trendAligned: false, pulledBack: false, resuming: false }
   const price = snap.price
   const atrVal = snap.atr

@@ -23,19 +23,22 @@ export const MAX_LEVERAGE = 10
 // `target` says WHERE the value must be written for it to take effect:
 //
 //   "botConfig" — a real column on bot_config. applyRecommendations can write
-//                 it directly, so it is auto-applicable.
-//   "env"       — the value is currently read from process.env at call time
-//                 (every SCALP.* threshold in lib/trend-scalper.ts, and every
-//                 RISK_LIMITS value in lib/risk-manager.ts). Writing it to
-//                 bot_config would be a silent no-op: the scalper never reads
-//                 that table. These are therefore PROPOSE-ONLY — the advisor
-//                 records them for review, and applying one requires the
-//                 schema + read-path change described in the handover notes.
+//                 it directly, so it is auto-applicable. IMPORTANT: the
+//                 registry key must be the exact column property name (drizzle
+//                 .set() takes camelCase keys), which is why the scalper levers
+//                 below are `scalpAdxMin` rather than `adxMin`.
+//   "env"       — the value is read from process.env at call time (the
+//                 RISK_LIMITS in lib/risk-manager.ts). Writing it to
+//                 bot_config would be a silent no-op: risk-manager never reads
+//                 that table. These are PROPOSE-ONLY — the advisor records them
+//                 for review, and applying one requires the same schema +
+//                 read-path change the scalper levers just went through.
 //
-// Booleans (partialTakeEnabled, SCALP_MULTI_MARKET) are deliberately NOT in
-// this registry. A language model should not be flipping whole features on and
-// off; those stay human decisions. Non-numeric suggestions are reported in
-// `skipped` with a reason rather than silently dropped.
+// Booleans (partialTakeEnabled, SCALP_MULTI_MARKET, SCALP_ENABLED) are
+// deliberately NOT in this registry. A language model should not be flipping
+// whole features on and off; those stay human decisions. Non-numeric
+// suggestions are reported in `skipped` with a reason rather than silently
+// dropped.
 export interface LeverSpec {
   limit: FieldLimit
   target: LeverTarget
@@ -44,35 +47,35 @@ export interface LeverSpec {
 
 export const LEVER_REGISTRY: Record<string, LeverSpec> = {
   // ── bot_config columns (auto-applicable) ──
-  mlConfidenceThreshold: { target: "botConfig", limit: { min: 0.5,  max: 0.95, maxStep: 0.1,  maxRelStep: 0.2 } },
-  mlLearningRate:        { target: "botConfig", limit: { min: 0.01, max: 0.2,  maxStep: 0.02, maxRelStep: 0.5 } },
-  slAtrMult:             { target: "botConfig", limit: { min: 0.5,  max: 4.0,  maxStep: 0.5,  maxRelStep: 0.5 } },
-  tpAtrMult:             { target: "botConfig", limit: { min: 1.0,  max: 8.0,  maxStep: 1.0,  maxRelStep: 0.5 } },
-  trailAtrMult:          { target: "botConfig", limit: { min: 0.5,  max: 3.0,  maxStep: 0.3,  maxRelStep: 0.4 } },
-  momentumThreshold:     { target: "botConfig", limit: { min: 0.2,  max: 1.5,  maxStep: 0.3,  maxRelStep: 0.5 } },
-  emaFast:               { target: "botConfig", limit: { min: 3,    max: 50,   maxStep: 5,    maxRelStep: 0.5 } },
-  emaSlow:               { target: "botConfig", limit: { min: 10,   max: 200,  maxStep: 20,   maxRelStep: 0.5 } },
-  rsiPeriod:             { target: "botConfig", limit: { min: 5,    max: 30,   maxStep: 5,    maxRelStep: 0.5 } },
-  positionSizeUsdt:      { target: "botConfig", limit: { min: 5,    max: 100,  maxStep: 25,   maxRelStep: 0.5 } },
-  partialAtrMult:        { target: "botConfig", limit: { min: 0.5,  max: 3.0,  maxStep: 0.5,  maxRelStep: 0.5 } },
-  partialFraction:       { target: "botConfig", limit: { min: 0.25, max: 0.75, maxStep: 0.1,  maxRelStep: 0.4 } },
+  mlConfidenceThreshold:  { target: "botConfig", limit: { min: 0.5,  max: 0.95, maxStep: 0.1,  maxRelStep: 0.2 } },
+  mlLearningRate:         { target: "botConfig", limit: { min: 0.01, max: 0.2,  maxStep: 0.02, maxRelStep: 0.5 } },
+  slAtrMult:              { target: "botConfig", limit: { min: 0.5,  max: 4.0,  maxStep: 0.5,  maxRelStep: 0.5 } },
+  tpAtrMult:              { target: "botConfig", limit: { min: 1.0,  max: 8.0,  maxStep: 1.0,  maxRelStep: 0.5 } },
+  trailAtrMult:           { target: "botConfig", limit: { min: 0.5,  max: 3.0,  maxStep: 0.3,  maxRelStep: 0.4 } },
+  momentumThreshold:      { target: "botConfig", limit: { min: 0.2,  max: 1.5,  maxStep: 0.3,  maxRelStep: 0.5 } },
+  emaFast:                { target: "botConfig", limit: { min: 3,    max: 50,   maxStep: 5,    maxRelStep: 0.5 } },
+  emaSlow:                { target: "botConfig", limit: { min: 10,   max: 200,  maxStep: 20,   maxRelStep: 0.5 } },
+  rsiPeriod:              { target: "botConfig", limit: { min: 5,    max: 30,   maxStep: 5,    maxRelStep: 0.5 } },
+  positionSizeUsdt:       { target: "botConfig", limit: { min: 5,    max: 100,  maxStep: 25,   maxRelStep: 0.5 } },
+  partialAtrMult:         { target: "botConfig", limit: { min: 0.5,  max: 3.0,  maxStep: 0.5,  maxRelStep: 0.5 } },
+  partialFraction:        { target: "botConfig", limit: { min: 0.25, max: 0.75, maxStep: 0.1,  maxRelStep: 0.4 } },
 
-  // ── SCALP_* runtime thresholds (PROPOSE-ONLY until they move to the DB) ──
+  // ── Scalper thresholds (bot_config.scalp_*, auto-applicable) ──
   // Bounds are deliberately tighter than the schema-style ranges: these are
   // entry gates on a live strategy, so a large single step is far more
   // dangerous than a large step on a stop multiple.
-  adxMin:            { target: "env", envVar: "SCALP_ADX_MIN",            limit: { min: 10,     max: 35,   maxStep: 4,     maxRelStep: 0.3 } },
-  adxMax:            { target: "env", envVar: "SCALP_ADX_MAX",            limit: { min: 30,     max: 70,   maxStep: 6,     maxRelStep: 0.3 } },
-  atrPctMin:         { target: "env", envVar: "SCALP_ATRPCT_MIN",         limit: { min: 0.0005, max: 0.01, maxStep: 0.001, maxRelStep: 0.5 } },
-  atrPctMax:         { target: "env", envVar: "SCALP_ATRPCT_MAX",         limit: { min: 0.03,   max: 0.20, maxStep: 0.02,  maxRelStep: 0.5 } },
-  pullbackLookback:  { target: "env", envVar: "SCALP_PULLBACK_LOOKBACK",  limit: { min: 3,      max: 12,   maxStep: 2,     maxRelStep: 0.5 } },
-  scoreThreshold:    { target: "env", envVar: "SCALP_SCORE_THRESHOLD",    limit: { min: 0.35,   max: 0.80, maxStep: 0.05,  maxRelStep: 0.15 } },
-  riskPct:           { target: "env", envVar: "SCALP_RISK_PCT",           limit: { min: 0.002,  max: 0.02, maxStep: 0.002, maxRelStep: 0.25 } },
-  rMultiple:         { target: "env", envVar: "SCALP_R_MULTIPLE",         limit: { min: 1.0,    max: 4.0,  maxStep: 0.25,  maxRelStep: 0.3 } },
-  flowWeight:        { target: "env", envVar: "SCALP_FLOW_WEIGHT",        limit: { min: 0,      max: 1,    maxStep: 0.2,   maxRelStep: 0.5 } },
-  maxOpen:           { target: "env", envVar: "SCALP_MAX_OPEN",           limit: { min: 1,      max: 6,    maxStep: 1,     maxRelStep: 0.5 } },
+  scalpAdxMin:            { target: "botConfig", limit: { min: 10,     max: 35,   maxStep: 4,     maxRelStep: 0.3 } },
+  scalpAdxMax:            { target: "botConfig", limit: { min: 30,     max: 70,   maxStep: 6,     maxRelStep: 0.3 } },
+  scalpAtrPctMin:         { target: "botConfig", limit: { min: 0.0005, max: 0.01, maxStep: 0.001, maxRelStep: 0.5 } },
+  scalpAtrPctMax:         { target: "botConfig", limit: { min: 0.03,   max: 0.20, maxStep: 0.02,  maxRelStep: 0.5 } },
+  scalpPullbackLookback:  { target: "botConfig", limit: { min: 3,      max: 12,   maxStep: 2,     maxRelStep: 0.5 } },
+  scalpScoreThreshold:    { target: "botConfig", limit: { min: 0.35,   max: 0.80, maxStep: 0.05,  maxRelStep: 0.15 } },
+  scalpRiskPct:           { target: "botConfig", limit: { min: 0.002,  max: 0.02, maxStep: 0.002, maxRelStep: 0.25 } },
+  scalpRMultiple:         { target: "botConfig", limit: { min: 1.0,    max: 4.0,  maxStep: 0.25,  maxRelStep: 0.3 } },
+  scalpFlowWeight:        { target: "botConfig", limit: { min: 0,      max: 1,    maxStep: 0.2,   maxRelStep: 0.5 } },
+  scalpMaxOpen:           { target: "botConfig", limit: { min: 1,      max: 6,    maxStep: 1,     maxRelStep: 0.5 } },
 
-  // ── Risk limits (PROPOSE-ONLY for the same reason) ──
+  // ── Risk limits (PROPOSE-ONLY: lib/risk-manager.ts still reads env) ──
   maxDailyLossPct:   { target: "env", envVar: "MAX_DAILY_LOSS_PCT",       limit: { min: 0.03,   max: 0.15, maxStep: 0.01,  maxRelStep: 0.25 } },
   maxDrawdownPct:    { target: "env", envVar: "MAX_DRAWDOWN_PCT",         limit: { min: 0.10,   max: 0.35, maxStep: 0.03,  maxRelStep: 0.25 } },
   maxTotalMarginPct: { target: "env", envVar: "MAX_TOTAL_MARGIN_PCT",     limit: { min: 0.30,   max: 0.80, maxStep: 0.05,  maxRelStep: 0.25 } },
@@ -98,11 +101,11 @@ export interface CoherenceRule {
 }
 
 export const COHERENCE_RULES: CoherenceRule[] = [
-  { fields: ["adxMin", "adxMax"],        describe: "adxMin must be < adxMax",               ok: (a, b) => a < b },
-  { fields: ["atrPctMin", "atrPctMax"],  describe: "atrPctMin must be < atrPctMax",         ok: (a, b) => a < b },
-  { fields: ["emaFast", "emaSlow"],      describe: "emaFast must be < emaSlow",             ok: (a, b) => a < b },
-  { fields: ["partialFraction", "partialAtrMult"], describe: "both must be > 0",              ok: (a, b) => a > 0 && b > 0 },
-  { fields: ["slAtrMult", "tpAtrMult"],  describe: "tpAtrMult should be >= slAtrMult",      ok: (a, b) => b >= a },
+  { fields: ["scalpAdxMin", "scalpAdxMax"],        describe: "scalpAdxMin must be < scalpAdxMax",       ok: (a, b) => a < b },
+  { fields: ["scalpAtrPctMin", "scalpAtrPctMax"],  describe: "scalpAtrPctMin must be < scalpAtrPctMax", ok: (a, b) => a < b },
+  { fields: ["emaFast", "emaSlow"],                describe: "emaFast must be < emaSlow",               ok: (a, b) => a < b },
+  { fields: ["partialFraction", "partialAtrMult"], describe: "both must be > 0",                      ok: (a, b) => a > 0 && b > 0 },
+  { fields: ["slAtrMult", "tpAtrMult"],            describe: "tpAtrMult should be >= slAtrMult",        ok: (a, b) => b >= a },
 ]
 
 /**
@@ -236,9 +239,10 @@ export function leverDefault(field: string, fallback: number): number {
 }
 
 // Map human-readable display names (what DeepSeek sometimes emits) to the
-// canonical camelCase keys used by LEVER_REGISTRY. Safety net: the prompt asks
-// for canonical names, but if the model echoes a display name like
-// "ML Confidence Threshold", we still resolve it correctly.
+// canonical keys used by LEVER_REGISTRY. Safety net: the prompt asks for
+// canonical names, but if the model echoes a display name like
+// "ML Confidence Threshold", or the older env-style "adxMin", we still resolve
+// it correctly.
 export function normalizeField(field: string): string {
   if (LEVER_REGISTRY[field]) return field
   const norm = field.toLowerCase().replace(/[^a-z0-9]/g, "")
@@ -261,27 +265,37 @@ export function normalizeField(field: string): string {
     partialatrmult: "partialAtrMult",
     partialatrmultiplier: "partialAtrMult",
     partialfraction: "partialFraction",
-    // scalper thresholds
-    scalpadxmin: "adxMin",
-    adxmin: "adxMin",
-    scalpadxmax: "adxMax",
-    adxmax: "adxMax",
-    scalpatrpctmin: "atrPctMin",
-    atrpctmin: "atrPctMin",
-    scalpatrpctmax: "atrPctMax",
-    atrpctmax: "atrPctMax",
-    scalppullbacklookback: "pullbackLookback",
-    pullbacklookback: "pullbackLookback",
-    scalpscorethreshold: "scoreThreshold",
-    scorethreshold: "scoreThreshold",
-    scalpriskpct: "riskPct",
-    riskpct: "riskPct",
-    scalprmultiple: "rMultiple",
-    rmultiple: "rMultiple",
-    scalpflowweight: "flowWeight",
-    flowweight: "flowWeight",
-    scalpmaxopen: "maxOpen",
-    maxopen: "maxOpen",
+    // scalper thresholds — canonical and legacy (pre-DB) spellings
+    scalp_adxmin: "scalpAdxMin",
+    scalpadxmin: "scalpAdxMin",
+    adxmin: "scalpAdxMin",
+    scalp_adxmax: "scalpAdxMax",
+    scalpadxmax: "scalpAdxMax",
+    adxmax: "scalpAdxMax",
+    scalp_atrpctmin: "scalpAtrPctMin",
+    scalpatrpctmin: "scalpAtrPctMin",
+    atrpctmin: "scalpAtrPctMin",
+    scalp_atrpctmax: "scalpAtrPctMax",
+    scalpatrpctmax: "scalpAtrPctMax",
+    atrpctmax: "scalpAtrPctMax",
+    scalp_pullbacklookback: "scalpPullbackLookback",
+    scalppullbacklookback: "scalpPullbackLookback",
+    pullbacklookback: "scalpPullbackLookback",
+    scalp_scorethreshold: "scalpScoreThreshold",
+    scalpscorethreshold: "scalpScoreThreshold",
+    scorethreshold: "scalpScoreThreshold",
+    scalp_riskpct: "scalpRiskPct",
+    scalpriskpct: "scalpRiskPct",
+    riskpct: "scalpRiskPct",
+    scalp_rmultiple: "scalpRMultiple",
+    scalprmultiple: "scalpRMultiple",
+    rmultiple: "scalpRMultiple",
+    scalp_flowweight: "scalpFlowWeight",
+    scalpflowweight: "scalpFlowWeight",
+    flowweight: "scalpFlowWeight",
+    scalp_maxopen: "scalpMaxOpen",
+    scalpmaxopen: "scalpMaxOpen",
+    maxopen: "scalpMaxOpen",
     // risk limits
     maxdailylosspct: "maxDailyLossPct",
     maxdrawdownpct: "maxDrawdownPct",

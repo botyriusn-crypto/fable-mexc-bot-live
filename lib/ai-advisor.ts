@@ -105,49 +105,29 @@ async function currentLeverValues(): Promise<{ values: Record<string, number>; m
     positionSizeUsdt: cfg.positionSizeUsdt,
     partialAtrMult: cfg.partialAtrMult,
     partialFraction: cfg.partialFraction,
+    // Scalper levers are now real columns (migration 0011). Read them straight
+    // from the row: going through SCALP.* would report a stale module snapshot
+    // when the advisor runs before the first tick, and the clamp anchors to
+    // whatever this reports.
+    scalpAdxMin: cfg.scalpAdxMin,
+    scalpAdxMax: cfg.scalpAdxMax,
+    scalpAtrPctMin: cfg.scalpAtrPctMin,
+    scalpAtrPctMax: cfg.scalpAtrPctMax,
+    scalpPullbackLookback: cfg.scalpPullbackLookback,
+    scalpScoreThreshold: cfg.scalpScoreThreshold,
+    scalpRiskPct: cfg.scalpRiskPct,
+    scalpRMultiple: cfg.scalpRMultiple,
+    scalpFlowWeight: cfg.scalpFlowWeight,
+    scalpMaxOpen: cfg.scalpMaxOpen,
   }
   for (const [k, v] of Object.entries(fromCfg)) {
     const n = Number(v)
     if (Number.isFinite(n)) values[k] = n
   }
 
-  // Runtime (env-backed) levers. Imported lazily so a change to the scalper's
-  // module graph cannot break the advisor at load time.
-  try {
-    const { SCALP, SCALP_DB_BACKED } = await import("./trend-scalper")
-    if (SCALP_DB_BACKED) {
-      // Once the scalper reads from the DB, its getters return the live values
-      // and these are directly writable. Until then they are propose-only.
-      values.adxMin = SCALP.adxMin()
-      values.adxMax = SCALP.adxMax()
-      values.atrPctMin = SCALP.atrPctMin()
-      values.atrPctMax = SCALP.atrPctMax()
-      values.pullbackLookback = SCALP.pullbackLookback()
-      values.scoreThreshold = SCALP.scoreThreshold()
-      values.riskPct = SCALP.riskPct()
-      values.rMultiple = SCALP.rMultiple()
-      values.flowWeight = SCALP.flowWeight()
-      values.maxOpen = SCALP.maxOpen()
-    } else {
-      values.adxMin = SCALP.adxMin()
-      values.adxMax = SCALP.adxMax()
-      values.atrPctMin = SCALP.atrPctMin()
-      values.atrPctMax = SCALP.atrPctMax()
-      values.pullbackLookback = SCALP.pullbackLookback()
-      values.scoreThreshold = SCALP.scoreThreshold()
-      values.riskPct = SCALP.riskPct()
-      values.rMultiple = SCALP.rMultiple()
-      values.flowWeight = SCALP.flowWeight()
-      values.maxOpen = SCALP.maxOpen()
-    }
-  } catch (err) {
-    console.warn("[AI Advisor] could not read scalper levers:", err instanceof Error ? err.message : String(err))
-    for (const f of ["adxMin", "adxMax", "atrPctMin", "atrPctMax", "pullbackLookback", "scoreThreshold", "riskPct", "rMultiple", "flowWeight", "maxOpen"]) {
-      if (!(f in values)) missing.push(f)
-    }
-  }
-
-  // Risk limits (env-backed)
+  // Risk limits are still env-backed (lib/risk-manager.ts reads process.env at
+  // call time), so they remain PROPOSE-ONLY: lib/ai-levers.ts targets them at
+  // "env" and applyRecommendations records, never writes, them.
   try {
     const { RISK_LIMITS } = await import("./risk-manager")
     values.maxDailyLossPct = RISK_LIMITS.maxDailyLossPct()
@@ -324,6 +304,9 @@ ${rows.slice(0, 10).map((t, i) =>
 CURRENT PARAMETERS (with the range you may propose within):
 ${leverLines}
 
+CURRENT PARAMETERS (with the range you may propose within):
+${leverLines}
+
 RULES:
 1. Propose 2-4 changes. Each must name a cause visible in the breakdowns above.
 2. Use ONLY these field names, exactly as written: ${fieldsCsv}
@@ -333,7 +316,7 @@ RULES:
 6. Do not propose anything for a field whose value is already at the edge of its range in the direction you want to move it.
 
 Return ONLY a JSON array, no prose:
-[{"field":"scoreThreshold","current":0.5,"suggested":0.55,"reason":"scalp win rate 31% at n=42; raising the confluence floor removes the weakest setups","impact":"fewer entries, expected win-rate lift to ~40%"}]`
+[{"field":"scalpScoreThreshold","current":0.5,"suggested":0.55,"reason":"scalp win rate 31% at n=42; raising the confluence floor removes the weakest setups","impact":"fewer entries, expected win-rate lift to ~40%"}]`
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -462,10 +445,10 @@ export interface ApplyOptions {
  *   1. Re-clamp against the registry using the LIVE current values, so a stored
  *      proposal can never be applied with stale or model-supplied anchors.
  *   2. Coherence — reject a set whose fields combine into an incoherent config
- *      (e.g. adxMin >= adxMax), after per-field clamping.
- *   3. Target split — only "botConfig" levers are written. "env" levers
- *      (every SCALP_* and RISK_LIMITS value) are recorded for manual apply,
- *      because writing them to bot_config would be a silent no-op.
+ *      (e.g. scalpAdxMin >= scalpAdxMax), after per-field clamping.
+ *   3. Target split — only "botConfig" levers are written. "env" levers (the
+ *      RISK_LIMITS) are recorded for manual apply, because writing them to
+ *      bot_config would be a silent no-op.
  */
 export async function applyRecommendations(
   recommendationId: number,
@@ -504,6 +487,9 @@ export async function applyRecommendations(
       return { ...empty, reason: `incoherent parameter set: ${coherence.reason}`, skipped: skipped.map((s) => `${s.field}: ${s.skipReason}`) }
     }
 
+    // Registry keys for "botConfig" levers are the drizzle column property
+    // names verbatim (scalpAdxMin -> scalp_adx_min), so the key IS the write
+    // target — no separate mapping table to drift out of sync.
     const botConfigUpdates: Record<string, number> = {}
     const proposeOnlyFields: string[] = []
     for (const rec of applied) {

@@ -86,6 +86,30 @@ export const botConfig = pgTable("bot_config", {
   partialTakeEnabled: boolean("partial_take_enabled").notNull().default(false),
   partialFraction: doublePrecision("partial_fraction").notNull().default(0.5),
   partialAtrMult: doublePrecision("partial_atr_mult").notNull().default(1.0),
+  // ── Scalper (trend-scalper) tunable thresholds ──
+  // These were process.env-only (SCALP_*), which is why the AI advisor could
+  // never auto-apply them: applyRecommendations writing a bot_config column is
+  // a no-op if the scalper reads the env instead. lib/trend-scalper.ts now
+  // prefers the column and falls back to the env var, so a clamped (bounded,
+  // coherence-checked) recommendation can actually take effect.
+  //
+  // DEFAULTS MIRROR THE HISTORICAL ENV DEFAULTS. If a deployment overrode any
+  // SCALP_* var, the column default will supersede it on first read — set the
+  // column to the live value (or unset the env var afterwards) or the override
+  // silently reverts.
+  //
+  // Bounds and max-step-per-apply for each are enforced in lib/ai-levers.ts,
+  // not here: the DB is the storage, the registry is the guardrail.
+  scalpAdxMin: doublePrecision("scalp_adx_min").notNull().default(18),
+  scalpAdxMax: doublePrecision("scalp_adx_max").notNull().default(50),
+  scalpAtrPctMin: doublePrecision("scalp_atr_pct_min").notNull().default(0.0015),
+  scalpAtrPctMax: doublePrecision("scalp_atr_pct_max").notNull().default(0.10),
+  scalpPullbackLookback: integer("scalp_pullback_lookback").notNull().default(6),
+  scalpScoreThreshold: doublePrecision("scalp_score_threshold").notNull().default(0.5),
+  scalpRiskPct: doublePrecision("scalp_risk_pct").notNull().default(0.01),
+  scalpRMultiple: doublePrecision("scalp_r_multiple").notNull().default(1.8),
+  scalpFlowWeight: doublePrecision("scalp_flow_weight").notNull().default(0),
+  scalpMaxOpen: integer("scalp_max_open").notNull().default(3),
   // Advanced strategy
   advancedEnabled: boolean("advanced_enabled").notNull().default(false),
   advancedMtfEnabled: boolean("advanced_mtf_enabled").notNull().default(true),
