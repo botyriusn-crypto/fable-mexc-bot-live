@@ -17,6 +17,9 @@ import type { IndicatorSnapshot } from "./indicators"
 import type { BotConfig } from "./db/schema"
 import { ema, rsi, macdHistogram, vwap, marketStructure } from "./indicators"
 import { calculateDynamicSize } from "./strategy"
+import { screenUniverse, type UniverseRow } from "./trend-candidate"
+import { VALIDATED_SYMBOLS } from "./validated-symbols"
+import type { Ticker } from "./exchange"
 
 export interface ScalpSignal {
   direction: "long" | "short" | null
@@ -141,6 +144,9 @@ export interface ScalpMarketState {
   hasOpenPosition: boolean
   /** Concurrently open scalp-strategy positions across all markets. */
   openScalpCount: number
+  /** Member of the advisor-tap feed (FIND/AUTO-grade movers). Evaluated with
+   * the same cap discipline as multi-market, independent of that env flag. */
+  inAdvisorFeed?: boolean
 }
 
 /**
@@ -155,9 +161,70 @@ export function scalpMarketEligible(
 ): boolean {
   if (state.hasOpenPosition) return false
   const multi = opts?.multiMarket ?? SCALP.multiMarket() === 1
-  if (!multi) return state.isSelected
   const cap = opts?.maxOpen ?? SCALP.maxOpen()
+  // Advisor-tap feed: evaluated under the same cap discipline, whether or
+  // not the multi-market env flag is set. Selected-market default is
+  // unchanged (evaluated, and uncapped as before when multi is off).
+  if (state.inAdvisorFeed) return state.openScalpCount < cap
+  if (!multi) return state.isSelected
   return state.openScalpCount < cap
+}
+
+// ============================================================================
+// Advisor-tap scalp feed — FIND/AUTO-grade movers as scalp evaluation markets.
+//
+// The scalp loop only sees the MAINBAR symbol plus position/grid markets,
+// which are ranging coins by construction (grids survive in chop). Momentum
+// setups live elsewhere, so a single flat MAINBAR token starves the scalper
+// of setups AND of training samples. This selector screens the same bulk
+// tickers the advisor scans (|24h move| x log turnover + funding squeeze)
+// and applies the advisor's own admission bars — validated basket, realized
+// losers, price floor — so the feed carries FIND/AUTO-grade candidates with
+// the deployment sizing/depth checks (irrelevant for evaluation) left out.
+// Take-time gates (ML + Lorentzian + risk) are untouched: this changes what
+// the scalper LOOKS at, never what it takes.
+// ============================================================================
+
+/** Symbols never admitted to the feed (grid-trial sanctity). */
+export const SCALP_FEED_EXCLUDE = new Set<string>(["ENA_USDT"])
+
+/** Feed breadth: extra kline fetches per tick, so keep it small. */
+export const SCALP_FEED_TOP_N = 3
+
+/** Screened wide before the validated/realized filters (they only narrow). */
+const SCALP_FEED_SCREEN_N = 25
+
+export function selectScalpFeedMarkets(
+  tickers: Ticker[],
+  opts?: {
+    topN?: number
+    /** Symbols already evaluated this tick (MAINBAR, positions, grids). */
+    exclude?: Set<string>
+    /** Trailing-window realized losers — same bar as the advisor gate. */
+    realizedLosers?: Set<string>
+  },
+): string[] {
+  const topN = Math.max(1, opts?.topN ?? SCALP_FEED_TOP_N)
+  const rows: UniverseRow[] = []
+  for (const t of tickers) {
+    if (!t.symbol.endsWith("_USDT")) continue
+    const turnover = (t.amount24 ?? 0) > 0 ? (t.amount24 as number) : (t.volume24 ?? 0) * (t.lastPrice ?? 0)
+    rows.push({
+      symbol: t.symbol,
+      turnover24h: turnover,
+      riseFallRate24h: t.riseFallRate ?? 0,
+      fundingRate: t.fundingRate ?? 0,
+      lastPrice: t.lastPrice,
+    })
+  }
+  const exclude = opts?.exclude
+  const losers = opts?.realizedLosers
+  return screenUniverse(rows, SCALP_FEED_SCREEN_N)
+    .filter(s => VALIDATED_SYMBOLS.has(s))
+    .filter(s => !SCALP_FEED_EXCLUDE.has(s))
+    .filter(s => !exclude?.has(s))
+    .filter(s => !losers?.has(s))
+    .slice(0, topN)
 }
 
 /**

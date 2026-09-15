@@ -1,14 +1,14 @@
 import { ema, atr, adx, bollinger } from "./indicators"
 import { comboDna, comboParams } from "./combo-score"
 import { db } from "./db"
-import { botLogs, gridConfigs, botConfig, trades } from "./db/schema"
+import { botLogs, gridConfigs, botConfig } from "./db/schema"
 import { livePrices } from "./mexc/ws"
 import { fetchDepth, depthNotionalNearMid } from "./mexc/public"
 import type { Candle } from "./mexc/public"
 import { computeSafeGridSettings } from "./grid-sizing"
 import { getExchangeClient, type ExchangeClient, type Exchange, type Ticker } from "./exchange"
 import { getConfig } from "./engine"
-import { eq, and, gte, sql } from "drizzle-orm"
+import { eq } from "drizzle-orm"
 import { VALIDATED_SYMBOLS } from "./validated-symbols"
 import { DEFAULT_MIN_CANDIDATE_PRICE } from "./trend-candidate"
 
@@ -85,66 +85,24 @@ export function isRecentLoser(symbol: string): boolean {
   return o.pnl < 0
 }
 
-// ============================================================================
-// 1.2 REALIZED-PERFORMANCE GATE — stop (re-)deploying symbols that are
-// actually losing money. Backtest validation is a one-time admission ticket;
-// it never expires, so a validated pair can bleed live indefinitely and still
-// score 100 on every scan (PEPE/ARB/DOGE class). This gate reads trailing
-// realized grid PnL from the books, so it survives restarts — unlike the
-// in-memory 48h cooler above, which also only fires when the rotator records
-// an outcome. Thin history passes: a symbol with too few closes to judge is
-// not a proven loser.
-// ============================================================================
-export const REALIZED_WINDOW_DAYS = 14
-export const REALIZED_MIN_TRADES = 3
-
-export interface RealizedSymbolStats {
-  netPnl: number
-  closedTrades: number
-}
-
-export function isRealizedLoser(netPnl: number, closedTrades: number): boolean {
-  if (!Number.isFinite(netPnl) || !Number.isFinite(closedTrades)) return false
-  return closedTrades >= REALIZED_MIN_TRADES && netPnl <= 0
-}
-
-/**
- * Trailing-window realized grid PnL per symbol, filtered BY MODE (same
- * discipline as the rotator: live and paper books never mix). Returns a map
- * of symbol -> stats; symbols with no closes in the window are absent (thin
- * history passes the gate). Fail-open on DB error with a loud log line — the
- * advisor is best-effort and a transient blip must not strand deployment.
- */
-export async function getRealizedStats(): Promise<Map<string, RealizedSymbolStats>> {
-  const empty = new Map<string, RealizedSymbolStats>()
-  try {
-    const cfgRows = await db
-      .select({ mode: botConfig.mode })
-      .from(botConfig)
-      .where(eq(botConfig.id, 1))
-    const modeIsLive = cfgRows[0]?.mode === "live"
-    const cutoff = new Date(Date.now() - REALIZED_WINDOW_DAYS * 24 * 60 * 60 * 1000)
-    const rows = await db
-      .select({
-        symbol: trades.symbol,
-        net: sql<number | string | null>`sum(${trades.pnl})`,
-        n: sql<number | string | null>`count(*)`,
-      })
-      .from(trades)
-      .where(and(eq(trades.live, modeIsLive), gte(trades.closedAt, cutoff)))
-      .groupBy(trades.symbol)
-    const stats = new Map<string, RealizedSymbolStats>()
-    for (const r of rows) {
-      const net = Number(r.net)
-      const n = Number(r.n)
-      if (!r.symbol || !Number.isFinite(n) || n <= 0) continue
-      stats.set(r.symbol, { netPnl: Number.isFinite(net) ? net : 0, closedTrades: n })
-    }
-    return stats
-  } catch (err) {
-    console.error(`[AI Advisor] realized-stats query failed (gate fail-open): ${err instanceof Error ? err.message : String(err)}`)
-    return empty
-  }
+// 1.2 REALIZED-PERFORMANCE GATE lives in lib/realized-gate.ts (shared with
+// the scalp advisor-tap feed). Re-exported here so existing importers keep
+// working.
+import {
+  REALIZED_WINDOW_DAYS,
+  REALIZED_MIN_TRADES,
+  isRealizedLoser,
+  getRealizedStats,
+  type RealizedSymbolStats,
+} from "./realized-gate"
+// Re-exported so existing importers (and the scalp feed's shared bar) keep
+// resolving these from the advisor module.
+export {
+  REALIZED_WINDOW_DAYS,
+  REALIZED_MIN_TRADES,
+  isRealizedLoser,
+  getRealizedStats,
+  type RealizedSymbolStats,
 }
 
 function calcChop(candles: Candle[], period: number = 14): number {

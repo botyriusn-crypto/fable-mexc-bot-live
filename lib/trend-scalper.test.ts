@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest"
 import type { Candle } from "./mexc/public"
 import { computeSnapshot } from "./indicators"
 import { notionalToMarginUsdt } from "./strategy"
-import { evaluateScalpSignal, macdTurnedUp, gradeFlowAgreement, scalpMarketEligible, SCALP } from "./trend-scalper"
+import { evaluateScalpSignal, macdTurnedUp, gradeFlowAgreement, scalpMarketEligible, SCALP, selectScalpFeedMarkets, SCALP_FEED_EXCLUDE } from "./trend-scalper"
 
 // Minimal config matching the fields the scalper + computeSnapshot read.
 const cfg: any = {
@@ -211,5 +211,64 @@ describe("scalpMarketEligible", () => {
       delete process.env.SCALP_MULTI_MARKET
       delete process.env.SCALP_MAX_OPEN
     }
+  })
+})
+
+const tick = (symbol: string, movePct: number, turnover: number, price = 10): any => ({
+  symbol,
+  lastPrice: price,
+  fundingRate: 0.0001,
+  volume24: 0,
+  amount24: turnover,
+  riseFallRate: movePct / 100,
+})
+
+const FEED_TICKERS = [
+  tick("SOL_USDT", 12, 50_000_000),
+  tick("HYPE_USDT", 3, 30_000_000),
+  tick("FARTCOIN_USDT", 25, 80_000_000), // unvalidated: biggest mover, must not pass
+  tick("ENA_USDT", 15, 60_000_000), // hard-excluded (grid-trial sanctity)
+  tick("DOGE_USDT", -8, 40_000_000, 0.2),
+]
+
+describe("selectScalpFeedMarkets", () => {
+  it("admits validated movers ranked by move size", () => {
+    expect(selectScalpFeedMarkets(FEED_TICKERS)).toEqual(["SOL_USDT", "DOGE_USDT", "HYPE_USDT"])
+  })
+
+  it("bars unvalidated symbols no matter how hard they move", () => {
+    expect(selectScalpFeedMarkets(FEED_TICKERS)).not.toContain("FARTCOIN_USDT")
+  })
+
+  it("bars ENA, already-ticked, and realized losers", () => {
+    expect(SCALP_FEED_EXCLUDE.has("ENA_USDT")).toBe(true)
+    const base = selectScalpFeedMarkets(FEED_TICKERS)
+    expect(base).not.toContain("ENA_USDT")
+    expect(selectScalpFeedMarkets(FEED_TICKERS, { exclude: new Set(["SOL_USDT"]) })[0]).toBe("DOGE_USDT")
+    expect(
+      selectScalpFeedMarkets(FEED_TICKERS, { realizedLosers: new Set(["SOL_USDT", "HYPE_USDT"]) }),
+    ).toEqual(["DOGE_USDT"])
+  })
+
+  it("caps breadth and skips non-USDT symbols", () => {
+    const tickers = [...FEED_TICKERS, { ...tick("XRP_USDT", 5, 20_000_000) }, { symbol: "BTC-PERP", lastPrice: 1, fundingRate: 0, volume24: 1, riseFallRate: 0.5 }]
+    expect(selectScalpFeedMarkets(tickers, { topN: 2 })).toHaveLength(2)
+    expect(selectScalpFeedMarkets(tickers, { topN: 10 })).not.toContain("BTC-PERP")
+  })
+})
+
+describe("scalpMarketEligible advisor feed", () => {
+  it("evaluates feed markets under cap discipline without the env flag", () => {
+    const feed = { isSelected: false, hasOpenPosition: false, openScalpCount: 0, inAdvisorFeed: true }
+    expect(scalpMarketEligible(feed, { multiMarket: false, maxOpen: 3 })).toBe(true)
+    // Cap and per-market position rules still bind feed markets.
+    expect(scalpMarketEligible({ ...feed, openScalpCount: 3 }, { multiMarket: false, maxOpen: 3 })).toBe(false)
+    expect(scalpMarketEligible({ ...feed, hasOpenPosition: true }, { multiMarket: false, maxOpen: 3 })).toBe(false)
+  })
+
+  it("leaves the single-market default untouched for non-feed markets", () => {
+    const plain = { isSelected: false, hasOpenPosition: false, openScalpCount: 0 }
+    expect(scalpMarketEligible(plain, { multiMarket: false, maxOpen: 3 })).toBe(false)
+    expect(scalpMarketEligible({ ...plain, isSelected: true }, { multiMarket: false, maxOpen: 3 })).toBe(true)
   })
 })

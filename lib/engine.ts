@@ -1,5 +1,31 @@
 let _lastRiskHaltState: string | null = null
 let _tickInProgress = false
+
+// Advisor-tap scalp feed support: trailing-window realized losers, cached for
+// an hour so the per-tick feed screen is a map lookup, not a DB query. Shared
+// bar with the grid advisor gate (lib/realized-gate.ts): proven losers never
+// enter the scalp evaluation set either.
+let _realizedLoserCache: { at: number; set: Set<string> } | null = null
+const REALIZED_LOSER_TTL_MS = 60 * 60 * 1000
+
+async function getCachedRealizedLosers(): Promise<Set<string>> {
+  const now = Date.now()
+  if (_realizedLoserCache && now - _realizedLoserCache.at < REALIZED_LOSER_TTL_MS) {
+    return _realizedLoserCache.set
+  }
+  try {
+    const stats = await getRealizedStats()
+    const set = new Set(
+      [...stats]
+        .filter(([, s]) => isRealizedLoser(s.netPnl, s.closedTrades))
+        .map(([symbol]) => symbol),
+    )
+    _realizedLoserCache = { at: now, set }
+    return set
+  } catch {
+    return new Set<string>()
+  }
+}
 // Tick orchestration: data → features → ML-gated signal → exit management →
 // paper/live execution → model update → persistence.
 
@@ -38,7 +64,8 @@ import {
   marginBudgetRemaining,
   getRiskState,
 } from "./risk-manager"
-import { evaluateScalpSignal, scalpMarketEligible } from "./trend-scalper"
+import { evaluateScalpSignal, scalpMarketEligible, selectScalpFeedMarkets } from "./trend-scalper"
+import { getRealizedStats, isRealizedLoser } from "./realized-gate"
 import { buildAwareness, decide, setLastAwareness, resolveBlockingGate } from "./awareness"
 
 // Net grid inventory for a symbol/timeframe. Open inventory = pending orders
@@ -787,6 +814,9 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
     const marketKeys = new Set<string>([`${cfg.symbol}|${cfg.timeframe}`])
     for (const pos of openPositions) marketKeys.add(`${pos.symbol}|${pos.timeframe}`)
     for (const order of activeGrid) marketKeys.add(`${order.symbol}|${order.timeframe}`)
+    // Advisor-tap feed markets are added below (needs `exchange`, declared
+    // with the ticker cache) — see the scalp-feed block after the client.
+    const scalpFeed = new Set<string>()
     // Concurrent scalp positions across markets (tick-start snapshot; the
     // loop below increments it as this tick opens more). Bounds the
     // multi-market scalp expansion (SCALP_MULTI_MARKET / SCALP_MAX_OPEN).
@@ -821,6 +851,33 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
 
     const tickerCache = new Map()
     const exchange = getExchangeClient(cfg.exchange as Exchange)
+
+    // ── Advisor-tap scalp feed: FIND/AUTO-grade movers as extra evaluation
+    // markets. The scalp loop otherwise only sees the MAINBAR symbol plus
+    // position/grid markets (ranging coins by construction), starving a
+    // single flat MAINBAR token of setups and training samples. Best-effort:
+    // a bulk-ticker or realized-stats failure just means no extra markets
+    // this tick. Take-time gates (ML + Lorentzian + risk) are untouched.
+    if (process.env.SCALPER_ENABLED !== "0") {
+      try {
+        if (exchange.fetchAllTickers) {
+          const allTickers = await exchange.fetchAllTickers()
+          const ticked = new Set([...marketKeys].map(k => k.split("|")[0]))
+          for (const pos of openPositions) ticked.add((pos as any).symbol)
+          const losers = await getCachedRealizedLosers()
+          for (const s of selectScalpFeedMarkets(allTickers, { exclude: ticked, realizedLosers: losers })) {
+            const key = `${s}|Min15`
+            if (!marketKeys.has(key)) {
+              marketKeys.add(key)
+              scalpFeed.add(s)
+            }
+          }
+          if (scalpFeed.size > 0) {
+            await log("info", `Scalp feed: evaluating ${scalpFeed.size} advisor-tap market(s): ${[...scalpFeed].join(", ")}`).catch(() => {})
+          }
+        }
+      } catch { /* feed is best-effort */ }
+    }
 
     // ── Multi-pair grid execution ──
     const gridCfgs = await getGridConfigs()
@@ -900,7 +957,7 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
         // Default: selected market only, one position at a time (as before).
         // SCALP_MULTI_MARKET=1 extends evaluation to every position-free
         // ticked market, bounded by SCALP_MAX_OPEN concurrent scalps.
-        if (scalpMarketEligible({ isSelected, hasOpenPosition: marketPosition != null, openScalpCount })) {
+        if (scalpMarketEligible({ isSelected, hasOpenPosition: marketPosition != null, openScalpCount, inAdvisorFeed: scalpFeed.has(symbol) })) {
           let scalpHandled = false
           if (process.env.SCALPER_ENABLED !== "0") {
             // Taker-flow confirmation (SCALP_FLOW_WEIGHT>0 only, so the
