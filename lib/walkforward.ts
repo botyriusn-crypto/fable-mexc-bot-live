@@ -202,3 +202,119 @@ export function regimeSplit(
   }
   return out
 }
+
+export interface ConcentrationEntry {
+  key: string
+  net: number
+}
+
+export interface ConcentrationCheck {
+  totalNet: number
+  /** Top contributors by |net|, descending. */
+  top: ConcentrationEntry[]
+  survivesTop1: boolean
+  survivesTop2: boolean
+  concentrated: boolean
+}
+
+const signOf = (v: number): number => (v > 0 ? 1 : v < 0 ? -1 : 0)
+
+/**
+ * Does an aggregate result survive removing its largest contributors?
+ * Ratio-free by design: "share of net total" explodes on small/near-zero
+ * denominators, and a flat percentage ignores contributor count (40% of 5
+ * is mild, 40% of 15 is damning). Sign-flip is robust to both. A zero total
+ * is uninformative, so it never "survives". Same function serves both axes:
+ * map per-symbol nets for symbol concentration, per-fold nets for fold
+ * concentration. Pure.
+ */
+export function concentrationSurvival(entries: ConcentrationEntry[]): ConcentrationCheck {
+  const ranked = [...entries].sort((a, b) => Math.abs(b.net) - Math.abs(a.net))
+  const totalNet = entries.reduce((s, e) => s + e.net, 0)
+  const base = signOf(totalNet)
+  const rest = (k: number): number =>
+    totalNet - ranked.slice(0, k).reduce((s, e) => s + e.net, 0)
+  // Removal must preserve a nonzero sign: dropping to exactly zero (or from
+  // zero) proves nothing and counts as concentrated, not robust.
+  const survives = (k: number): boolean =>
+    base !== 0 && ranked.length > k && signOf(rest(k)) === base
+  const survivesTop1 = survives(1)
+  const survivesTop2 = survives(2)
+  return {
+    totalNet,
+    top: ranked.slice(0, 2),
+    survivesTop1,
+    survivesTop2,
+    concentrated: !survivesTop1 || !survivesTop2,
+  }
+}
+
+export interface AdvantageCheck {
+  /** Contender total minus baseline total (the claimed improvement). */
+  advantage: number
+  survivesTop1: boolean
+  survivesTop2: boolean
+  /** Top carriers of the advantage (largest toward-sign diffs first). */
+  top: { key: string; diff: number }[]
+  /** True when the advantage flips or vanishes without its top carriers. */
+  evaporates: boolean
+}
+
+/**
+ * Does arm B's advantage over arm A survive removing the keys that carry
+ * it? This is the check that caught the +709 case: sign-survival of the
+ * total passed (+381 without TAO/ENA), but the +232 any-vs-neutral
+ * advantage lived entirely in ENA (+197) and TAO (+56) — removing two keys
+ * flipped it to −21. Per-key diffs, never ratios. Pure.
+ */
+export function advantageSurvives(
+  baseline: ConcentrationEntry[],
+  contender: ConcentrationEntry[],
+): AdvantageCheck {
+  const baseByKey = new Map(baseline.map((e) => [e.key, e.net] as const))
+  const diffs = contender.map((c) => ({
+    key: c.key,
+    diff: c.net - (baseByKey.get(c.key) ?? 0),
+  }))
+  const advantage = diffs.reduce((s, d) => s + d.diff, 0)
+  const base = signOf(advantage)
+  // Rank by contribution TOWARD the advantage's sign, not |diff|: removing a
+  // drag (opposite-sign diff) adds back to the total and must not count as
+  // stress-testing the carriers. Symmetric for negative advantages.
+  const ranked = [...diffs].sort((a, b) => b.diff * base - a.diff * base)
+  const survives = (k: number): boolean => {
+    if (base === 0 || ranked.length <= k) return false
+    const rest = advantage - ranked.slice(0, k).reduce((s, d) => s + d.diff, 0)
+    return signOf(rest) === base
+  }
+  const survivesTop1 = survives(1)
+  const survivesTop2 = survives(2)
+  return {
+    advantage,
+    survivesTop1,
+    survivesTop2,
+    top: ranked.slice(0, 2),
+    evaporates: !survivesTop1 || !survivesTop2,
+  }
+}
+
+/**
+ * Expected backtest timeframe per arm. The scalper trades 5–15m, so scalp
+ * arms validated anywhere else do not validate production — the neutral
+ * gate shipped on hourly results for a 15m strategy and cost a full
+ * re-validation. Grid is deliberately unpinned: it is genuinely multi-TF
+ * (8 user-selectable timeframes Min1–Day1, schema default Min5, rotator and
+ * AI advisor pin Min15), so no single TF assertion would be honest. If grid
+ * ever consolidates on one execution TF, pin it here.
+ */
+export function expectedArmTf(arm: string): number | null {
+  if (arm.startsWith("scalp")) return 15
+  return null
+}
+
+/** Non-null message when a run's TF doesn't validate its arm; else null. */
+export function armTfMismatch(tfMin: number, arm: string): string | null {
+  const expected = expectedArmTf(arm)
+  if (expected == null || tfMin === expected) return null
+  return `TF MISMATCH: arm "${arm}" validates ${expected}m execution but ran on ${tfMin}m — results do not validate production`
+}

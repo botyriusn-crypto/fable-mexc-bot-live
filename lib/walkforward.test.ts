@@ -5,6 +5,9 @@ import {
   verdictFromFolds,
   attributeRegime,
   regimeSplit,
+  concentrationSurvival,
+  advantageSurvives,
+  armTfMismatch,
   type FoldMetrics,
 } from "./walkforward"
 import type { Candle } from "./mexc/public"
@@ -131,5 +134,94 @@ describe("regimeSplit", () => {
     const net = split.trend.net + split.range.net + split.neutral.net + split.unknown.net
     expect(n).toBe(3)
     expect(net).toBe(9)
+  })
+})
+
+describe("concentrationSurvival", () => {
+  it("passes a genuinely broad result", () => {
+    const c = concentrationSurvival([
+      { key: "A", net: 100 }, { key: "B", net: 90 }, { key: "C", net: 80 },
+      { key: "D", net: 60 }, { key: "E", net: 50 },
+    ])
+    expect(c.concentrated).toBe(false)
+    expect(c.survivesTop1).toBe(true)
+    expect(c.survivesTop2).toBe(true)
+  })
+
+  it("flags a result carried by one key, without any ratio", () => {
+    const c = concentrationSurvival([
+      { key: "PUMP", net: 489 }, { key: "SOL", net: 30 }, { key: "HYPE", net: -44 },
+    ])
+    expect(c.concentrated).toBe(true)
+    expect(c.survivesTop1).toBe(false)
+    expect(c.top[0].key).toBe("PUMP")
+  })
+
+  it("treats zero and near-zero totals as uninformative, not robust", () => {
+    expect(concentrationSurvival([]).concentrated).toBe(true)
+    expect(concentrationSurvival([{ key: "A", net: 50 }, { key: "B", net: -50 }]).concentrated).toBe(true)
+  })
+
+  it("serves the fold axis too: single-fold dominance flags", () => {
+    const c = concentrationSurvival([
+      { key: "fold0", net: -32 }, { key: "fold1", net: 182 }, { key: "fold2", net: 21 },
+      { key: "fold3", net: 10 }, { key: "fold4", net: -20 },
+    ])
+    expect(c.concentrated).toBe(true)
+    expect(c.top[0]).toEqual({ key: "fold1", net: 182 })
+  })
+})
+
+describe("advantageSurvives", () => {
+  // Session regression: 15m any-regime (+709) vs neutral-only (+477).
+  // Sign-survival of the total passes without TAO/ENA (+381), but the +232
+  // advantage lives in ENA (+197) and TAO (+56) — removing two keys flips
+  // it to −21. The revert failed its own conditional; the check must too.
+  const neutral = [
+    { key: "BTC", net: 12 }, { key: "ETH", net: -4 }, { key: "SOL", net: -6 },
+    { key: "XRP", net: -21 }, { key: "HYPE", net: 36 }, { key: "ZEC", net: 37 },
+    { key: "DOGE", net: -9 }, { key: "SUI", net: 68 }, { key: "LINK", net: 4 },
+    { key: "TAO", net: 111 }, { key: "ENA", net: -36 }, { key: "AAVE", net: 119 },
+    { key: "ADA", net: -5 }, { key: "WLD", net: 73 }, { key: "AVAX", net: 98 },
+  ]
+  const anyRegime = [
+    { key: "BTC", net: -2 }, { key: "ETH", net: -6 }, { key: "SOL", net: -47 },
+    { key: "XRP", net: 22 }, { key: "HYPE", net: 90 }, { key: "ZEC", net: 29 },
+    { key: "DOGE", net: 44 }, { key: "SUI", net: 31 }, { key: "LINK", net: 8 },
+    { key: "TAO", net: 167 }, { key: "ENA", net: 161 }, { key: "AAVE", net: 101 },
+    { key: "ADA", net: -90 }, { key: "WLD", net: 65 }, { key: "AVAX", net: 127 },
+  ]
+
+  it("evaporates when the advantage's carriers are removed", () => {
+    const a = advantageSurvives(neutral, anyRegime)
+    expect(a.advantage).toBeGreaterThan(200)
+    expect(a.top[0]).toEqual({ key: "ENA", diff: 197 })
+    expect(a.top[1]).toEqual({ key: "TAO", diff: 56 })
+    expect(a.survivesTop1).toBe(true)
+    expect(a.survivesTop2).toBe(false)
+    expect(a.evaporates).toBe(true)
+  })
+
+  it("holds when the advantage is broad", () => {
+    const base = neutral.map((e) => ({ key: e.key, net: 0 }))
+    const cont = neutral.map((e) => ({ key: e.key, net: 10 }))
+    const a = advantageSurvives(base, cont)
+    expect(a.evaporates).toBe(false)
+  })
+
+  it("a zero advantage is not a surviving advantage", () => {
+    const a = advantageSurvives(neutral, [...neutral])
+    expect(a.advantage).toBe(0)
+    expect(a.evaporates).toBe(true)
+  })
+})
+
+describe("armTfMismatch", () => {
+  it("pins scalp arms to 15m and leaves other arms alone", () => {
+    expect(armTfMismatch(15, "scalp (any regime)")).toBeNull()
+    expect(armTfMismatch(60, "scalp (any regime)")).toContain("15m")
+    expect(armTfMismatch(60, "scalp (neutral only)")).toContain("15m")
+    expect(armTfMismatch(60, "grid")).toBeNull()
+    expect(armTfMismatch(15, "grid")).toBeNull()
   })
 })

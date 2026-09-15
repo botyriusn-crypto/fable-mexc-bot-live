@@ -20,6 +20,7 @@ import { runScalpBacktest, type ScalpBacktestConfig } from "./lib/scalp-backtest
 import { runFlashFadeBacktest } from "./lib/flashfade-backtest"
 import {
   splitFolds, summarizeFold, verdictFromFolds, regimeSplit, DEFAULT_BAR,
+  concentrationSurvival, advantageSurvives, armTfMismatch,
 } from "./lib/walkforward"
 import type { Candle } from "./lib/mexc/public"
 
@@ -96,8 +97,17 @@ async function main() {
     { name: "scalp (neutral only)", kind: "scalp", allowedRegimes: ["neutral"] },
     { name: "flash-fade", kind: "flash-fade", allowedRegimes: undefined },
   ] as const
+  const fmtSigned = (v: number): string => `${v >= 0 ? "+" : ""}${v.toFixed(0)}`
+  const armNetsByArm: Record<string, { key: string; net: number }[]> = {}
   for (const arm of arms) {
     console.log(`\n## arm: ${arm.name}`)
+    const tfWarn = armTfMismatch(TF_MIN, arm.name)
+    if (tfWarn) console.log(`   ⚠ ${tfWarn}`)
+    if (process.env.GAUNTLET_STRICT_TF === "1" && tfWarn) {
+      console.error(`   refusing: GAUNTLET_STRICT_TF=1 with mismatched TF`)
+      process.exit(2)
+    }
+    const armNets: { key: string; net: number }[] = []
     for (const symbol of symbols) {
       let candles: Candle[] | undefined = cache[symbol]
       let source = "cache"
@@ -138,7 +148,35 @@ async function main() {
         `   folds(net): ${metrics.map((m) => `${m.net >= 0 ? "+" : ""}${m.net.toFixed(0)}`).join(" ")} ` +
           `| regime ${Object.entries(regimeTot).map(([r, s]) => `${r}:${s.n}/${s.net >= 0 ? "+" : ""}${s.net.toFixed(0)}`).join(" ")}`,
       )
+      armNets.push({ key: symbol, net: metrics.reduce((s, m) => s + m.net, 0) })
+      // Fold axis: does this symbol's verdict survive its best fold?
+      const foldCheck = concentrationSurvival(metrics.map((m, i) => ({ key: `fold${i}`, net: m.net })))
+      if (foldCheck.concentrated && metrics.some((m) => m.n >= DEFAULT_BAR.minTrades)) {
+        console.log(`   ...fold-concentrated: top ${foldCheck.top[0]?.key} ${fmtSigned(foldCheck.top[0]?.net ?? 0)} of ${fmtSigned(foldCheck.totalNet)}`)
+      }
     }
+    // Symbol axis: does the arm survive its top carriers?
+    const armCheck = concentrationSurvival(armNets)
+    const topStr = armCheck.top.map((t) => `${t.key} ${fmtSigned(t.net)}`).join(", ")
+    console.log(
+      `   ## concentration (${arm.name}): total ${fmtSigned(armCheck.totalNet)} | top: ${topStr} ` +
+      `| survives top-1: ${armCheck.survivesTop1 ? "YES" : "NO"} | top-2: ${armCheck.survivesTop2 ? "YES" : "NO"}` +
+      `${armCheck.concentrated ? " → CONCENTRATED" : ""}`,
+    )
+    armNetsByArm[arm.name] = armNets
+  }
+  // Comparative form: does any-regime's edge over neutral-only survive the
+  // keys that carry it? This exact check retired a prod revert once already.
+  const neutralNets = armNetsByArm["scalp (neutral only)"]
+  const anyNets = armNetsByArm["scalp (any regime)"]
+  if (neutralNets && anyNets) {
+    const adv = advantageSurvives(neutralNets, anyNets)
+    const advTop = adv.top.map((t) => `${t.key} ${fmtSigned(t.diff)}`).join(", ")
+    console.log(
+      `\n## advantage (any-regime over neutral-only): ${fmtSigned(adv.advantage)} | carriers: ${advTop} ` +
+      `| survives top-1: ${adv.survivesTop1 ? "YES" : "NO"} | top-2: ${adv.survivesTop2 ? "YES" : "NO"}` +
+      `${adv.evaporates ? " → EVAPORATES without its carriers" : ""}`,
+    )
   }
   process.exit(0)
 }
