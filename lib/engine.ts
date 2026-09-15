@@ -8,6 +8,9 @@ let _tickInProgress = false
 let _realizedLoserCache: { at: number; set: Set<string> } | null = null
 const REALIZED_LOSER_TTL_MS = 60 * 60 * 1000
 
+// Last-logged scalp feed key (log-on-change dedup: one line per feed change).
+let _lastScalpFeedKey = ""
+
 async function getCachedRealizedLosers(): Promise<Set<string>> {
   const now = Date.now()
   if (_realizedLoserCache && now - _realizedLoserCache.at < REALIZED_LOSER_TTL_MS) {
@@ -64,7 +67,7 @@ import {
   marginBudgetRemaining,
   getRiskState,
 } from "./risk-manager"
-import { evaluateScalpSignal, scalpMarketEligible, selectScalpFeedMarkets } from "./trend-scalper"
+import { evaluateScalpSignal, scalpMarketEligible, selectScalpFeedMarkets, scalpFeedChanged } from "./trend-scalper"
 import { getRealizedStats, isRealizedLoser } from "./realized-gate"
 import { buildAwareness, decide, setLastAwareness, resolveBlockingGate } from "./awareness"
 
@@ -872,7 +875,10 @@ export async function runTick(): Promise<{ status: string; detail?: string }> {
               scalpFeed.add(s)
             }
           }
-          if (scalpFeed.size > 0) {
+          // Dedup: one line per feed change, not one per minute.
+          const feedState = scalpFeedChanged(_lastScalpFeedKey, scalpFeed)
+          _lastScalpFeedKey = feedState.key
+          if (feedState.changed) {
             await log("info", `Scalp feed: evaluating ${scalpFeed.size} advisor-tap market(s): ${[...scalpFeed].join(", ")}`).catch(() => {})
           }
         }

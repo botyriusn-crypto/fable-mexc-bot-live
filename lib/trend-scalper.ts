@@ -191,6 +191,16 @@ export const SCALP_FEED_EXCLUDE = new Set<string>(["ENA_USDT"])
 /** Feed breadth: extra kline fetches per tick, so keep it small. */
 export const SCALP_FEED_TOP_N = 3
 
+/**
+ * Log dedup for the per-tick feed line: returns the stable key for this
+ * tick's set and whether it differs from the previous tick (empty sets never
+ * log; an empty gap resets so the next non-empty set logs once).
+ */
+export function scalpFeedChanged(prevKey: string, feed: Set<string>): { key: string; changed: boolean } {
+  const key = [...feed].sort().join(",")
+  return { key, changed: feed.size > 0 && key !== prevKey }
+}
+
 /** Screened wide before the validated/realized filters (they only narrow). */
 const SCALP_FEED_SCREEN_N = 25
 

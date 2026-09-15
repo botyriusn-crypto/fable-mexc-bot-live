@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest"
 import type { Candle } from "./mexc/public"
 import { computeSnapshot } from "./indicators"
 import { notionalToMarginUsdt } from "./strategy"
-import { evaluateScalpSignal, macdTurnedUp, gradeFlowAgreement, scalpMarketEligible, SCALP, selectScalpFeedMarkets, SCALP_FEED_EXCLUDE } from "./trend-scalper"
+import { evaluateScalpSignal, macdTurnedUp, gradeFlowAgreement, scalpMarketEligible, SCALP, selectScalpFeedMarkets, SCALP_FEED_EXCLUDE, scalpFeedChanged } from "./trend-scalper"
 
 // Minimal config matching the fields the scalper + computeSnapshot read.
 const cfg: any = {
@@ -270,5 +270,23 @@ describe("scalpMarketEligible advisor feed", () => {
     const plain = { isSelected: false, hasOpenPosition: false, openScalpCount: 0 }
     expect(scalpMarketEligible(plain, { multiMarket: false, maxOpen: 3 })).toBe(false)
     expect(scalpMarketEligible({ ...plain, isSelected: true }, { multiMarket: false, maxOpen: 3 })).toBe(true)
+  })
+})
+
+describe("scalpFeedChanged", () => {
+  it("logs once per feed change, never for repeats or empty sets", () => {
+    // First sighting logs.
+    let s = scalpFeedChanged("", new Set(["INJ_USDT"]))
+    expect(s.changed).toBe(true)
+    // Same set next tick: silent.
+    expect(scalpFeedChanged(s.key, new Set(["INJ_USDT"])).changed).toBe(false)
+    // Order-insensitive: same members, different order: silent.
+    expect(scalpFeedChanged("A,B", new Set(["B", "A"])).changed).toBe(false)
+    // Changed membership logs.
+    expect(scalpFeedChanged(s.key, new Set(["INJ_USDT", "SUI_USDT"])).changed).toBe(true)
+    // Empty set never logs, and resets so the next set logs again.
+    const empty = scalpFeedChanged(s.key, new Set<string>())
+    expect(empty.changed).toBe(false)
+    expect(scalpFeedChanged(empty.key, new Set(["INJ_USDT"])).changed).toBe(true)
   })
 })
