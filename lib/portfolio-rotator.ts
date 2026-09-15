@@ -37,6 +37,112 @@ export function getLastRotationTime(): number {
   return lastRotationTime
 }
 
+// A grid is dead when it is old enough to judge and has made no money. Same
+// rule as before, now named so it can be tested and reused by the planner.
+export function isDeadGrid(ageHours: number, pnl: number): boolean {
+  return ageHours >= MIN_AGE_HOURS && pnl <= 0
+}
+
+// Trial/ops hold: a config whose metadata carries rotationHold:true is never
+// pruned or replaced (e.g. NEAR while the 2.0x TP trial accumulates closes).
+// Set with: UPDATE grid_configs SET metadata = COALESCE(metadata,'{}'::jsonb)
+// || '{"rotationHold": true}'::jsonb WHERE symbol = '...'; remove with the
+// same statement and '{"rotationHold": false}'.
+export function isRotationHeld(config: any): boolean {
+  const meta = (config as any)?.metadata
+  return !!meta && typeof meta === "object" && (meta as any).rotationHold === true
+}
+
+export interface RotationAuditEntry {
+  config: any
+  ageHours: number
+  pnl: number
+}
+
+export interface RotationReplacement {
+  deadId: number
+  deadSymbol: string
+  candidate: any
+}
+
+export interface RotationPlan {
+  pruneIds: number[]
+  replacements: RotationReplacement[]
+}
+
+/**
+ * Pure rotation planner: which dead grids to retire, and which replacements
+ * to fill freed slots with. Pruning NEVER depends on candidates — a dead grid
+ * with no replacement is still retired (this was the coupling defect: no
+ * candidates meant dead grids stayed enabled forever). Held grids are
+ * excluded from both phases. Caps and budget apply to replacements only;
+ * retiring frees capital and needs no permission.
+ */
+export function planRotation(
+  audits: RotationAuditEntry[],
+  candidates: any[],
+  opts: {
+    existingSymbols?: Set<string>
+    deployedPct?: number
+    maxReplacements?: number
+    budgetCapPct?: number
+    budgetOf?: (c: any) => number
+  } = {},
+): RotationPlan {
+  const {
+    existingSymbols = new Set<string>(),
+    deployedPct = 0,
+    maxReplacements = MAX_REPLACEMENTS_PER_CYCLE,
+    budgetCapPct = MAX_DEPLOYED_PCT,
+    budgetOf = (c: any) => c.budgetPct || 10,
+  } = opts
+  const dead = audits.filter(a => !isRotationHeld(a.config) && isDeadGrid(a.ageHours, a.pnl))
+  const pruneIds = dead.map(a => a.config.id)
+  const replacements: RotationReplacement[] = []
+  const taken = new Set<string>(existingSymbols)
+  let deployed = deployedPct
+  for (const d of dead) {
+    if (replacements.length >= maxReplacements) break
+    const candidate = candidates.find((c: any) => c && !taken.has(c.symbol))
+    if (!candidate) break
+    if (deployed + budgetOf(candidate) > budgetCapPct) break
+    taken.add(candidate.symbol)
+    deployed += budgetOf(candidate)
+    replacements.push({ deadId: d.config.id, deadSymbol: d.config.symbol, candidate })
+  }
+  return { pruneIds, replacements }
+}
+
+// Retire one dead grid: record the outcome (feeds the advisor's 48h cooler),
+// disable the config, and delete only the UNFILLED ladder rungs.
+//
+// Rows with buyPrice set represent real held inventory — a filled buy
+// awaiting its sell, or a filled short awaiting its buy-to-close — that
+// is still OPEN on the exchange. Deleting those rows loses the tracking
+// record, orphaning the real position (the orphan sweep then force-
+// closes it at market WITHOUT booking a trade, so the PnL vanishes from
+// the books). Leave them: the grid's own risk path (checkGridStopLoss /
+// checkAllHeldPositionsRisk) keeps closing held inventory even after the
+// config is disabled, and the recenter paths are now gc.enabled-guarded
+// so they will not rebuild a fresh ladder for this pair.
+async function retireDeadGrid(deadAudit: RotationAuditEntry): Promise<void> {
+  // 1.1 Feedback loop: record this dead grid's outcome so the AI advisor
+  // won't re-pick a symbol that just lost money (48h cool-off).
+  recordGridOutcome(deadAudit.config.symbol, deadAudit.pnl)
+
+  // Pause old grid
+  await db.update(gridConfigs)
+    .set({ enabled: false, paused: true })
+    .where(eq(gridConfigs.id, deadAudit.config.id))
+
+  await db.delete(gridOrders)
+    .where(and(
+      eq(gridOrders.symbol, deadAudit.config.symbol),
+      eq(gridOrders.timeframe, deadAudit.config.timeframe),
+      isNull(gridOrders.buyPrice),
+    ))
+}
+
 export async function checkAndRotate(exchange: any): Promise<void> {
   if (!rotationEnabled) return
 
@@ -100,84 +206,69 @@ export async function checkAndRotate(exchange: any): Promise<void> {
       return
     }
 
-    // 4. Get AI Advisor recommendations
+    // 4. Get AI Advisor recommendations. Advisor health NEVER gates pruning:
+    // a dead grid is retired even when the advisor is unreachable or returns
+    // nothing — the plan below prunes unconditionally and replaces only when
+    // candidates fit the caps.
     await log("info", "🔍 Scanning for fresh AI Advisor picks...")
-    // Bounded fetch: an unresponsive advisor must not stall the tick that
-    // called rotation.
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), AI_ADVISOR_TIMEOUT_MS)
-    let aiRes: Response
+    let candidates: any[] = []
     try {
-      aiRes = await fetch(AI_ADVISOR_URL, { signal: controller.signal })
-    } finally {
-      clearTimeout(timeout)
+      // Bounded fetch: an unresponsive advisor must not stall the tick that
+      // called rotation.
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), AI_ADVISOR_TIMEOUT_MS)
+      let aiRes: Response
+      try {
+        aiRes = await fetch(AI_ADVISOR_URL, { signal: controller.signal })
+      } finally {
+        clearTimeout(timeout)
+      }
+      if (!aiRes.ok) {
+        await log("error", `AI Advisor scan failed (${aiRes.status}) - pruning without replacement`)
+      } else {
+        const aiData = await aiRes.json()
+        candidates = (aiData.recommendations || []).filter((c: any) => VALIDATED_SYMBOLS.has(c.symbol))
+        if (candidates.length === 0) {
+          await log("info", "AI Advisor returned no candidates - pruning without replacement")
+        }
+      }
+    } catch (err) {
+      await log("error", `AI Advisor unreachable (${err instanceof Error ? err.message : String(err)}) - pruning without replacement`)
     }
-    if (!aiRes.ok) {
-      await log("error", `AI Advisor scan failed (${aiRes.status}) - skipping rotation`)
-      return
-    }
-    const aiData = await aiRes.json()
-    const candidates = (aiData.recommendations || []).filter((c: any) => VALIDATED_SYMBOLS.has(c.symbol))
 
-    if (candidates.length === 0) {
-      await log("info", "AI Advisor returned no candidates - skipping rotation")
-      return
-    }
-
-    // 5. Perform replacements
+    // 5. Plan, then execute in two phases: prune ALL dead grids first,
+    // then fill freed slots from candidates when any fit the caps.
     const existingSymbols = new Set(comboConfigs.map(c => c.symbol))
     const totalDeployed = allConfigs.filter(c => c.enabled).reduce((s, c) => s + (c.budgetPct || 0), 0)
-    let replaced = 0
+    const plan = planRotation(audits, candidates, { existingSymbols, deployedPct: totalDeployed })
 
-    for (const deadGrid of dead) {
-      if (replaced >= MAX_REPLACEMENTS_PER_CYCLE) {
-        await log("info", `Rotation cap reached (${MAX_REPLACEMENTS_PER_CYCLE}) - stopping`)
-        break
-      }
+    if (plan.pruneIds.length === 0) {
+      await log("info", "No prunable grids (dead ones are all rotation-held) - no rotation needed")
+      lastRotationTime = now
+      return
+    }
 
-      // Find first candidate not already in portfolio
-      const candidate = candidates.find((c: any) => !existingSymbols.has(c.symbol))
-      if (!candidate) {
-        await log("info", "No more new candidates available - stopping rotation")
-        break
-      }
-
-      // Budget safety: stop if adding would exceed cap
-      const newBudget = candidate.budgetPct || 10
-      if (totalDeployed + newBudget > MAX_DEPLOYED_PCT) {
-        await log("info", `Budget cap reached (${totalDeployed}% deployed) - stopping rotation`)
-        break
-      }
-
+    // Phase A: retire every dead grid, with or without a replacement.
+    const auditById = new Map(audits.map(a => [a.config.id, a]))
+    let pruned = 0
+    for (const id of plan.pruneIds) {
+      const audit = auditById.get(id)
+      if (!audit) continue
       try {
-        await log("trade", `🔄 Rotating: ${deadGrid.config.symbol} (${deadGrid.ageHours.toFixed(1)}h old, $${deadGrid.pnl} PnL) → ${candidate.symbol}`)
+        await log("trade", `🪓 Retiring dead grid: ${audit.config.symbol} (${audit.ageHours.toFixed(1)}h old, $${audit.pnl} PnL)${plan.replacements.length === 0 ? " (no replacement available)" : ""}`)
+        await retireDeadGrid(audit)
+        pruned++
+      } catch (err) {
+        await log("error", `Failed to retire ${audit.config.symbol}: ${err}`)
+      }
+    }
 
-        // 1.1 Feedback loop: record this dead grid's outcome so the AI advisor
-        // won't re-pick a symbol that just lost money (48h cool-off).
-        recordGridOutcome(deadGrid.config.symbol, deadGrid.pnl)
-
-        // Pause old grid
-        await db.update(gridConfigs)
-          .set({ enabled: false, paused: true })
-          .where(eq(gridConfigs.id, deadGrid.config.id))
-
-        // Delete the old LADDER, but only the UNFILLED rungs.
-        //
-        // Rows with buyPrice set represent real held inventory — a filled buy
-        // awaiting its sell, or a filled short awaiting its buy-to-close — that
-        // is still OPEN on the exchange. Deleting those rows loses the tracking
-        // record, orphaning the real position (the orphan sweep then force-
-        // closes it at market WITHOUT booking a trade, so the PnL vanishes from
-        // the books). Leave them: the grid's own risk path (checkGridStopLoss /
-        // checkAllHeldPositionsRisk) keeps closing held inventory even after the
-        // config is disabled, and the recenter paths are now gc.enabled-guarded
-        // so they will not rebuild a fresh ladder for this pair.
-        await db.delete(gridOrders)
-          .where(and(
-            eq(gridOrders.symbol, deadGrid.config.symbol),
-            eq(gridOrders.timeframe, deadGrid.config.timeframe),
-            isNull(gridOrders.buyPrice),
-          ))
+    // Phase B: fill freed slots from advisor candidates (capped, budgeted).
+    let replaced = 0
+    for (const rep of plan.replacements) {
+      const candidate = rep.candidate
+      try {
+        await log("trade", `🔄 Rotating: ${rep.deadSymbol} → ${candidate.symbol}`)
 
         // ── Reuse the existing row for the candidate if one exists ──
         //
@@ -202,7 +293,7 @@ export async function checkAndRotate(exchange: any): Promise<void> {
           makerMode: true,
           paused: false,
           metadata: {
-            rotatedFrom: deadGrid.config.symbol,
+            rotatedFrom: rep.deadSymbol,
             rotatedAt: now,
             aiScore: candidate.dnaScore,
             suggestedSpacing: candidate.suggestedSpacingPct,
@@ -222,11 +313,11 @@ export async function checkAndRotate(exchange: any): Promise<void> {
         existingSymbols.add(candidate.symbol)
         replaced++
       } catch (err) {
-        await log("error", `Failed to rotate ${deadGrid.config.symbol}: ${err}`)
+        await log("error", `Failed to rotate ${rep.deadSymbol}: ${err}`)
       }
     }
 
-    await log("info", `🎯 Rotation complete: ${replaced} grids replaced`)
+    await log("info", `🎯 Rotation complete: ${pruned} pruned, ${replaced} replaced`)
     lastRotationTime = now
 
   } catch (err) {

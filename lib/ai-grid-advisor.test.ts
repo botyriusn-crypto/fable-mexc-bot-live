@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { isPriceEligible, quoteVolume24h } from "./ai-grid-advisor"
+import { isPriceEligible, quoteVolume24h, isRealizedLoser } from "./ai-grid-advisor"
 import { DEFAULT_MIN_CANDIDATE_PRICE } from "./trend-candidate"
 
 describe("isPriceEligible", () => {
@@ -45,5 +45,26 @@ describe("quoteVolume24h", () => {
   it("returns 0 when nothing is readable", () => {
     expect(quoteVolume24h({})).toBe(0)
     expect(quoteVolume24h({ volume24: 100 })).toBe(0)
+  })
+})
+
+describe("isRealizedLoser", () => {
+  it("flags sustained losers, including break-even at the boundary", () => {
+    // PEPE/ARB/DOGE class: deeply negative over a dozen closes.
+    expect(isRealizedLoser(-143.87, 12)).toBe(true)
+    // Mirrors the rotator's dead rule (pnl <= 0): zero is not alive.
+    expect(isRealizedLoser(0, 3)).toBe(true)
+  })
+
+  it("passes winners and thin history", () => {
+    expect(isRealizedLoser(37.21, 9)).toBe(false)
+    // Too few closes to judge is not a proven loser (new listings pass).
+    expect(isRealizedLoser(-50, 2)).toBe(false)
+    expect(isRealizedLoser(-50, 0)).toBe(false)
+  })
+
+  it("fails open on unreadable stats", () => {
+    expect(isRealizedLoser(NaN, 5)).toBe(false)
+    expect(isRealizedLoser(-10, NaN)).toBe(false)
   })
 })
