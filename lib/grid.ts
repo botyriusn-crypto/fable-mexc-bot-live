@@ -23,14 +23,22 @@ import { checkGridExposureGate } from "./exposure"
 //   2. Add a fast ROC trigger so a sharp directional move pauses the grid
 //      before the lagging ADX confirms — gated on ADX>=18 to avoid whipsaw
 //      on a single ranging spike.
-function resolveTrendPause(snap: IndicatorSnapshot, cfg: BotConfig): boolean {
+export function resolveTrendPause(snap: IndicatorSnapshot, cfg: BotConfig, currentlyPaused = false): boolean {
   const atrPct = snap.price > 0 ? (snap.atr / snap.price) * 100 : 0
   // Anchor the coin-aware bar to the single source of truth (adxTrendThreshold)
   // instead of hardcoded 24/32. Preserves current behavior at the default (25):
   //   normal coins: 25 + 7 = 32, high-ATR% coins: 25 - 1 = 24.
   const adxBar = cfg.adxTrendThreshold + (atrPct >= 1.5 ? -1 : 7)
-  const fastTrend = Math.abs(snap.roc) >= 2.5 && snap.adx >= 18
-  return snap.adx >= adxBar || fastTrend
+  const slowTrigger = snap.adx >= adxBar
+  const fastTrigger = Math.abs(snap.roc) >= 2.5 && snap.adx >= 18
+  if (!currentlyPaused) return slowTrigger || fastTrigger
+  // Hysteresis deadband: an already-paused grid resumes only when conditions
+  // are calmer than the entry trigger. Entry and resume on the same bar
+  // flapped pause/resume in minutes (LINK/SUI/SOL sub-10-min cycles) — each
+  // flap cancels resting buys and rebuilds the ladder for zero protection.
+  const slowClear = snap.adx < adxBar - 4
+  const fastClear = Math.abs(snap.roc) < 1.5
+  return !(slowClear && fastClear)
 }
 
 
@@ -210,6 +218,7 @@ export interface GridConfig {
   feeMarginMult: number
   autoPause: boolean
   makerMode: boolean
+  paused: boolean
   // "neutral" = COMBO / Bitsgap-style two-sided grid (buys below + sells above).
   direction: "long" | "short" | "neutral" | "auto"
 }
@@ -234,6 +243,7 @@ export async function getGridConfigs(): Promise<GridConfig[]> {
     feeMarginMult: r.feeMarginMult,
     autoPause: r.autoPause,
     makerMode: r.makerMode,
+    paused: r.paused,
     direction: (r.direction as "long" | "short" | "neutral" | "auto") || "long",
   }))
 }
@@ -1325,13 +1335,17 @@ async function runGridTickMaker(cfg: BotConfig, gc: GridConfig, snap: IndicatorS
   await resolveShadowEntries(gc.symbol, snap.price)
   await evaluateKillSwitch(gc.symbol)
   const volatility = detectVolatilitySurge(gc.symbol, snap)
-  const paused = gc.autoPause && resolveTrendPause(snap, cfg)
+  const paused = gc.autoPause && resolveTrendPause(snap, cfg, gc.paused === true)
 
   const gridConfigRow = await db.select().from(gridConfigs).where(
     and(eq(gridConfigs.symbol, gc.symbol), eq(gridConfigs.timeframe, gc.timeframe))
   ).limit(1)
 
-  if (gridConfigRow.length > 0 && gridConfigRow[0].paused !== paused) {
+  // Disabled rows keep held-inventory management below, but their pause flag
+  // is frozen: evaluating it would flap DB writes and log noise on corpses
+  // (1000PEPE kept logging pause/resume days after disable) and a stale flip
+  // could never rebuild anything anyway (setup/recenter are enabled-guarded).
+  if (gc.enabled && gridConfigRow.length > 0 && gridConfigRow[0].paused !== paused) {
     await db.update(gridConfigs).set({ paused }).where(eq(gridConfigs.id, gridConfigRow[0].id))
     if (paused) {
       const restingBuys = active.filter((o) => o.side === "buy")
@@ -1690,7 +1704,7 @@ hi = Math.max(price, cur.high)
 lo = Math.min(price, cur.low)
 }
   let spacing = active.find((o) => o.spacing != null)?.spacing ?? snap.atr * gc.rangeAtrMult
-  const paused = gc.autoPause && resolveTrendPause(snap, cfg)
+  const paused = gc.autoPause && resolveTrendPause(snap, cfg, gc.paused === true)
   
   // Phantom trend order removed
 
@@ -1699,7 +1713,8 @@ lo = Math.min(price, cur.low)
     and(eq(gridConfigs.symbol, gc.symbol), eq(gridConfigs.timeframe, gc.timeframe))
   ).limit(1)
   
-  if (gridConfigRow.length > 0 && gridConfigRow[0].paused !== paused) {
+  // Same freeze as the maker path: disabled rows don't evaluate pause.
+  if (gc.enabled && gridConfigRow.length > 0 && gridConfigRow[0].paused !== paused) {
     await db.update(gridConfigs)
       .set({ paused })
       .where(eq(gridConfigs.id, gridConfigRow[0].id))
